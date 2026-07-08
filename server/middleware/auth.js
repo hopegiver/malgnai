@@ -94,7 +94,7 @@ export async function authMiddleware(c, next) {
 }
 
 /** JWT 서명 검증 + 만료 확인 (Web Crypto API — Cloudflare Workers 기본 지원) */
-async function verifyJwt(token, secret) {
+export async function verifyJwt(token, secret) {
   const [headerB64, payloadB64, signatureB64] = token.split('.')
   if (!headerB64 || !payloadB64 || !signatureB64) throw new Error('malformed token')
 

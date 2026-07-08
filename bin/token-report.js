@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * 토큰 사용 "범인 색출" 리포트 — DB(claude_session_usage / claude_agent_usage)만 읽어
+ * 토큰 사용 "토큰 도둑 색출" 리포트 — DB(claude_session_usage / claude_agent_usage)만 읽어
  * 거의 0토큰(로컬 SQL)으로 분석 출력. sync-claude.js 가 적재한 데이터를 소비한다.
  *
  * Usage:
@@ -61,7 +61,7 @@ const A = (sql, ...b) => db.prepare(sql).all(...b)
 const sinceSql = since ? "WHERE started_at >= ?" : ""
 const sinceBind = since ? [since] : []
 
-console.log(`\n토큰 범인 색출 리포트  (기간: ${sinceArg || "전체"}${since ? ` = ${since.slice(0, 16)} 이후` : ""})`)
+console.log(`\n토큰 도둑 색출 리포트  (기간: ${sinceArg || "전체"}${since ? ` = ${since.slice(0, 16)} 이후` : ""})`)
 console.log("=".repeat(72))
 
 // 1) 전체 요약
@@ -82,15 +82,15 @@ if (tot) {
 
 // 2) 세션 top-N (비용순)
 console.log(`\n■ 세션 Top ${limit} (비용순)`)
-console.log(`${pad("세션",9)} ${pad("프로젝트",18)} ${rpad("응답",5)} ${rpad("서브",4)} ${rpad("총토큰",13)} ${rpad("비용",9)}  제목`)
-console.log("-".repeat(110))
+console.log(`${pad("세션",9)} ${pad("프로젝트",18)} ${rpad("메인턴",6)} ${rpad("서브턴",6)} ${rpad("서브",4)} ${rpad("총토큰",13)} ${rpad("비용",9)}  제목`)
+console.log("-".repeat(118))
 const pf = projectFilter ? "AND project_key = ?" : ""
 for (const s of A(
   `SELECT * FROM claude_session_usage ${since ? "WHERE started_at >= ?" : "WHERE 1=1"} ${pf}
    ORDER BY cost_usd DESC LIMIT ?`, ...sinceBind, ...(projectFilter ? [projectFilter] : []), limit
 )) {
   console.log(
-    `${pad(s.session_id.slice(0,8),9)} ${pad(shortKey(s.project_key),18)} ${rpad(s.main_turns,5)} ${rpad(s.sub_agent_count||0,4)} ${rpad(n(s.total_tokens),13)} ${rpad(usd(s.cost_usd),9)}  ${(s.title||"").slice(0,30)}`
+    `${pad(s.session_id.slice(0,8),9)} ${pad(shortKey(s.project_key),18)} ${rpad(s.main_turns,6)} ${rpad(s.sub_turns||0,6)} ${rpad(s.sub_agent_count||0,4)} ${rpad(n(s.total_tokens),13)} ${rpad(usd(s.cost_usd),9)}  ${(s.title||"").slice(0,30)}`
   )
 }
 
@@ -107,7 +107,7 @@ for (const p of A(
 }
 
 // 4) 에이전트 type별
-console.log(`\n■ 서브에이전트 type별 (범인 색출)`)
+console.log(`\n■ 서브에이전트 type별 (도둑 색출)`)
 console.log(`${pad("에이전트",18)} ${rpad("호출",5)} ${rpad("총턴",6)} ${rpad("최대턴",6)} ${rpad("토큰",13)} ${rpad("비용",9)}`)
 console.log("-".repeat(64))
 const aJoin = since ? "JOIN claude_session_usage s ON s.session_id=a.session_id AND s.started_at>=?" : ""

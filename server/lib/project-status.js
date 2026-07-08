@@ -10,7 +10,9 @@
 // 순수(부수효과·DB 의존 없음) — 웹/서버와 MCP 양쪽에서 안전하게 import 한다.
 
 // schema.sql 의 CHECK(status IN (...)) 와 반드시 일치. 변경 시 schema.sql 도 함께 고칠 것.
-export const PROJECT_STATUS_VALUES = ['pending', 'active', 'completed', 'on_hold']
+// 'deleted' = 소프트delete(사람이 삭제 누르거나 sync가 workspace 폴더 소실을 감지했을 때). 하드delete
+//   대신 상태 전이로 처리해 decisions/issues/memories 등 project_id 참조를 끊지 않는다(이슈 884f02bf 회피).
+export const PROJECT_STATUS_VALUES = ['pending', 'active', 'completed', 'on_hold', 'deleted']
 
 // 표시 라벨(감사로그·안내 메시지용). 프론트는 자체 라벨을 쓰지만 서버/MCP 로그 일관성을 위해 공유.
 export const PROJECT_STATUS_LABELS = {
@@ -18,6 +20,7 @@ export const PROJECT_STATUS_LABELS = {
   active: '진행',
   completed: '완료',
   on_hold: '보류',
+  deleted: '삭제됨',
 }
 
 export function isValidProjectStatus(s) {

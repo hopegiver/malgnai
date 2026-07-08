@@ -158,12 +158,16 @@ function readTranscripts() {
 
 // --- Project Sessions (작업 이력) ---
 // 트랜스크립트 1개 = 1 세션. 제목·첫/마지막 프롬프트·메시지수·시각을 뽑아 프로젝트별로 묶는다.
+// IDE/훅이 사용자 메시지에 곁다리로 끼워 넣는 컨텍스트 블록(파일 오픈 알림 등) — 제목에 안 섞이게 제외.
+const INJECTED_TAG_RE = /^<(ide_opened_file|ide_selection|ide_diagnostics|system-reminder)>/
 function userText(msg) {
   if (!msg) return ""
   const c = msg.content
   if (typeof c === "string") return c
   if (Array.isArray(c)) {
-    return c.filter(b => b && b.type === "text").map(b => b.text || "").join(" ").trim()
+    return c
+      .filter(b => b && b.type === "text" && !INJECTED_TAG_RE.test((b.text || "").trim()))
+      .map(b => b.text || "").join(" ").trim()
   }
   return ""
 }
@@ -221,9 +225,13 @@ function readProjectSessions() {
             if (!endedAt || o.timestamp > endedAt) endedAt = o.timestamp
           }
           if (o.type === "user" && !firstPrompt) {
-            // 실제 사용자 입력(도구 결과가 아닌 텍스트)만
-            const t = userText(o.message)
-            if (t && o.userType !== "external") firstPrompt = t.slice(0, 500)
+            // 실제 사용자 입력만. userType 은 VSCode/헤드리스 모두 "external"로 찍혀 구분력이
+            // 없다(진짜 프롬프트도 도구결과 캐리어도 동일) — promptSource==="sdk" 만 사람이
+            // 실제로 제출한 프롬프트에 붙는다(도구결과·Stop hook feedback 등은 비어있음).
+            if (o.promptSource === "sdk") {
+              const t = userText(o.message)
+              if (t) firstPrompt = t.slice(0, 500)
+            }
           }
           if (o.type === "assistant") {
             for (const b of o.message?.content || []) {
@@ -367,7 +375,7 @@ function costOf(model, t) {
   return t.in*p.in + t.out*p.out + t.cr*p.cr + t.cw1h*p.cw1h + t.cw5m*p.cw5m
 }
 
-// --- Session Usage (범인 색출): 세션별 토큰/비용, main vs 서브에이전트 분리, 에이전트 type별 집계 ---
+// --- Session Usage (도둑 색출): 세션별 토큰/비용, main vs 서브에이전트 분리, 에이전트 type별 집계 ---
 // 근거: 사이드체인(서브에이전트) 메시지는 부모와 같은 sessionId를 가지며 isSidechain=true + agentId 보유.
 // agent_type 연결: Agent tool_use(id, input.subagent_type) → 같은 tool_use_id 의 tool_result(agentId) → agentId.
 function readSessionUsage() {
@@ -411,9 +419,9 @@ function readSessionUsage() {
         if (!s.started || o.timestamp < s.started) s.started = o.timestamp
         if (!s.ended || o.timestamp > s.ended) s.ended = o.timestamp
       }
-      if (o.type === "user" && !o.isSidechain && !s.firstPrompt) {
+      if (o.type === "user" && !o.isSidechain && !s.firstPrompt && o.promptSource === "sdk") {
         const t = userText(o.message)
-        if (t && o.userType !== "external") s.firstPrompt = t.slice(0, 200)
+        if (t) s.firstPrompt = t.slice(0, 200)
       }
       // 서브에이전트 초기 프롬프트 → agentId별 프롬프트키(type 연결용).
       // agentId 첫 등장 = 그 서브에이전트의 시작 프롬프트(중첩 서브에이전트는 parentUuid≠null 이라

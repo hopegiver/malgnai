@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node --watch server/node.js",
-    "dev": "node --watch server/node.js",
+    "start": "node server/node.js",
+    "dev": "node server/node.js",
     "scan": "node bin/scan.js",
     "sync-agents": "node bin/sync-agents.js",
     "sync-projects": "node bin/sync-projects.js",
@@ -16,7 +16,8 @@
     "check-docs": "node \"$HOME/.claude/hooks/doc-drift.mjs\"",
     "test": "playwright test",
     "test:ui": "playwright test --ui",
-    "test:api": "vitest run test/routes/"
+    "test:api": "vitest run test/routes/",
+    "test:unit": "vitest run test/lib/"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

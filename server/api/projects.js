@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { readdirSync, statSync, existsSync, createReadStream, readFileSync } from 'node:fs'
 import { join, normalize, basename, extname, sep } from 'node:path'
+import { homedir } from 'node:os'
 import ProjectsDao from '../dao/projects.js'
 import ClaudeDao from '../dao/claude.js'
 import { AUTONOMOUS_KINDS } from '../dao/init.js'
@@ -11,8 +12,12 @@ import { taskTypeToCategory, commandStatusToResult } from '../lib/activity-norma
 import { logActivity } from '../lib/activity-log.js'
 import { cadenceInterval } from '../lib/cadence.js'
 import { PROJECT_STATUS_VALUES, normalizeProjectStatus, PROJECT_STATUS_CHANGE_ACTION, projectStatusChangeDetail } from '../lib/project-status.js'
+import { scaffoldProject, validateProjectName } from '../lib/scaffold-project.js'
 
 const router = new Hono()
+
+// bin/sync-projects.js 와 동일한 워크스페이스 루트 규약(맥/리눅스=~/workspace, WORKSPACE_DIR로 override 가능).
+const WORKSPACE_DIR = process.env.WORKSPACE_DIR || join(homedir(), 'workspace')
 
 // 파일 목록에서 제외할 폴더(scan-projects와 동일 기준 + 일반 빌드/캐시 폴더).
 const FILE_EXCLUDES = new Set(['node_modules', '.git', '.cache', '.tmp', 'dist', '.next', '.nuxt'])
@@ -513,16 +518,33 @@ router.get('/:id/file', async (c) => {
   })
 })
 
+// 프로젝트명 = 워크스페이스 폴더명(전역 CLAUDE.md 규약). 클라이언트가 경로를 지정하지 않고,
+// 서버가 ~/workspace/<name> 에 표준 스캐폴드(STATUS.md/CLAUDE.md/docs/README.md/.claude/doc-drift.json/
+// package.json + git init)를 실제로 생성한다. 한글 등 표시용 이름은 description 에 담는다.
+// ※ 이 규칙은 웹에서 신규 생성하는 경로에만 적용된다 — bin/sync-projects.js 가 기존 폴더를 스캔해
+//   등록하는 `/sync`(upsert) 경로는 이미 존재하는 폴더를 그대로 인식하므로 별도(큐레이션 한글명 보존).
 router.post('/', async (c) => {
   const body = await c.req.json()
   if (!body.name) return badRequest(c, 'name is required')
+  const nameError = validateProjectName(body.name)
+  if (nameError) return badRequest(c, nameError)
+  if (body.kind !== undefined && !AUTONOMOUS_KINDS.includes(body.kind)) {
+    return badRequest(c, `kind must be one of: ${AUTONOMOUS_KINDS.join(', ')}`)
+  }
   const dao = new ProjectsDao(c.env.DB)
   const id = crypto.randomUUID()
+  const root = join(WORKSPACE_DIR, body.name)
+  try {
+    scaffoldProject(root, body.name, body.description)
+  } catch (e) {
+    return badRequest(c, e.message)
+  }
   // P0: owner 자동 귀속 — JWT sub(=username, 블로커 B1) 로 소유자 부여. body 가 owner_user_id 를
   //   명시하면(관리자 대리생성 등) 그 값을 우선한다. JWT 없는 경로(X-API-Key sync 등)면 owner 미부여(NULL).
   const ownerFromJwt = c.get('user')?.sub || null
   const owner_user_id = body.owner_user_id ?? ownerFromJwt ?? undefined
-  const project = await dao.create({ id, ...body, ...(owner_user_id !== undefined ? { owner_user_id } : {}) })
+  const { path: _clientPath, ...rest } = body
+  const project = await dao.create({ id, ...rest, path: root, ...(owner_user_id !== undefined ? { owner_user_id } : {}) })
   return c.json({ project }, 201)
 })
 
@@ -696,7 +718,7 @@ router.put('/:id/status', authMiddleware, async (c) => {
 
 // 워크스페이스 폴더 일괄 동기화
 router.post('/sync', apiKeyMiddleware, async (c) => {
-  const { projects } = await c.req.json()
+  const { projects, workspace_dir } = await c.req.json()
   if (!Array.isArray(projects)) return badRequest(c, 'projects array is required')
   const dao = new ProjectsDao(c.env.DB)
   const results = []
@@ -705,7 +727,20 @@ router.post('/sync', apiKeyMiddleware, async (c) => {
     const project = await dao.upsert(p)
     results.push(project)
   }
-  return c.json({ projects: results, synced: results.length })
+  // workspace_dir 스캔 결과에서 이번엔 안 보인 프로젝트 = 폴더가 사라졌다고 보고 소프트delete.
+  // workspace_dir 하위 경로를 가진 것만 대상으로 좁혀, 그 밖 경로로 등록된 프로젝트는 건드리지 않는다.
+  const deletedIds = []
+  if (workspace_dir) {
+    const prefix = normalize(workspace_dir).replace(/[\\/]+$/, '') + '/'
+    const incomingIds = new Set(results.map(p => p.id))
+    const candidates = await dao.findByPathPrefix(prefix)
+    for (const cand of candidates) {
+      if (incomingIds.has(cand.id)) continue
+      await dao.update(cand.id, { status: 'deleted' })
+      deletedIds.push(cand.id)
+    }
+  }
+  return c.json({ projects: results, synced: results.length, deleted: deletedIds })
 })
 
 router.delete('/:id', async (c) => {

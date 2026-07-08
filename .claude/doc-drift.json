@@ -1,7 +1,7 @@
 {
   "_help": "CLAUDE.md 구조 서술 ↔ 코드 실측 드리프트 대조. expected 변경 시 CLAUDE.md 서술도 함께 갱신. 전역 훅(~/.claude/hooks/doc-drift.mjs)이 읽음. 측정법: glob|homeGlob|jsonLength|file+regex.",
   "checks": [
-    { "label": "API 파일", "expected": 10, "glob": "server/api/*.js" },
+    { "label": "API 파일", "expected": 11, "glob": "server/api/*.js" },
     { "label": "DB 테이블", "expected": 20, "file": "schema.sql", "regex": "CREATE TABLE IF NOT EXISTS \\w+" },
     { "label": "페이지", "expected": 14, "jsonLength": "app/pages/pages.json" },
     { "label": "LaunchAgent 러너", "expected": 5, "homeGlob": "Library/LaunchAgents/com.malgnai.*.plist" },

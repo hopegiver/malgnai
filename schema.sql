@@ -5,8 +5,8 @@
 
 CREATE TABLE IF NOT EXISTS activity_logs (
           id TEXT PRIMARY KEY,
-          project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
-          command_id TEXT REFERENCES commands(id) ON DELETE SET NULL,
+          project_id TEXT,
+          command_id TEXT,
           agent_name TEXT NOT NULL,
           action TEXT NOT NULL,
           detail TEXT,
@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS activity_logs (
           correlation_id TEXT
         );
 
-CREATE TABLE IF NOT EXISTS agent_learning_logs (id TEXT PRIMARY KEY, agent_name TEXT NOT NULL REFERENCES agents(name) ON DELETE CASCADE, type TEXT NOT NULL CHECK(type IN ('experience','external','peer_feedback','discussion')), title TEXT NOT NULL, content TEXT, source TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS agent_learning_logs (id TEXT PRIMARY KEY, agent_name TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('experience','external','peer_feedback','discussion')), title TEXT NOT NULL, content TEXT, source TEXT, created_at TEXT NOT NULL);
+-- project_id 컬럼은 migrations/002-add-project-id-to-agent-learning-logs.sql 이 전담(ALTER ADD COLUMN은
+-- 멱등이 아니라 CREATE TABLE에 같이 넣으면 신규 DB 부트스트랩 시 "duplicate column" 로 migration이 깨진다).
 
 CREATE TABLE IF NOT EXISTS agents (
   name TEXT PRIMARY KEY,
@@ -51,11 +53,11 @@ CREATE TABLE IF NOT EXISTS claude_stats (id TEXT PRIMARY KEY, date TEXT NOT NULL
 
 CREATE TABLE IF NOT EXISTS claude_token_stats (id TEXT PRIMARY KEY, date TEXT NOT NULL, model TEXT NOT NULL, tokens INTEGER DEFAULT 0);
 
-CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, host TEXT, instruction TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','approved','claimed','running','done','failed','rejected','expired')), permission_mode TEXT NOT NULL DEFAULT 'allowlist' CHECK(permission_mode IN ('allowlist','acceptEdits','bypass')), created_by TEXT, claimed_by TEXT, claimed_at TEXT, exit_code INTEGER, result TEXT, cost_usd REAL, session_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, task_type TEXT, business TEXT, customer TEXT, risk_level TEXT DEFAULT 'low', ai_summary TEXT, evidence TEXT, recommended_action TEXT, review_status TEXT, review_note TEXT, reviewed_by TEXT, reviewed_at TEXT, idempotency_key TEXT, applied_rule_id TEXT, title TEXT, assignee_agent_name TEXT, parent_command_id TEXT, root_command_id TEXT, level INTEGER DEFAULT 0, result_json TEXT);
+CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, host TEXT, instruction TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','approved','claimed','running','done','failed','rejected','expired')), permission_mode TEXT NOT NULL DEFAULT 'allowlist' CHECK(permission_mode IN ('allowlist','acceptEdits','bypass')), created_by TEXT, claimed_by TEXT, claimed_at TEXT, exit_code INTEGER, result TEXT, cost_usd REAL, session_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, task_type TEXT, business TEXT, customer TEXT, risk_level TEXT DEFAULT 'low', ai_summary TEXT, evidence TEXT, recommended_action TEXT, review_status TEXT, review_note TEXT, reviewed_by TEXT, reviewed_at TEXT, idempotency_key TEXT, applied_rule_id TEXT, title TEXT, assignee_agent_name TEXT, parent_command_id TEXT, root_command_id TEXT, level INTEGER DEFAULT 0, result_json TEXT);
 
 CREATE TABLE IF NOT EXISTS decisions (
   id TEXT PRIMARY KEY,
-  project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  project_id TEXT,
   title TEXT NOT NULL,
   summary TEXT,
   reason TEXT,
@@ -66,7 +68,7 @@ CREATE TABLE IF NOT EXISTS decisions (
 
 CREATE TABLE IF NOT EXISTS issues (
   id TEXT PRIMARY KEY,
-  project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  project_id TEXT,
   title TEXT NOT NULL,
   description TEXT,
   status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','resolved')),
@@ -78,8 +80,8 @@ CREATE TABLE IF NOT EXISTS issues (
 
 CREATE TABLE IF NOT EXISTS memories (
           id TEXT PRIMARY KEY,
-          project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
-          command_id TEXT REFERENCES commands(id) ON DELETE SET NULL,
+          project_id TEXT,
+          command_id TEXT,
           memory_type TEXT NOT NULL DEFAULT 'note',
           title TEXT NOT NULL,
           content TEXT NOT NULL,
@@ -89,13 +91,13 @@ CREATE TABLE IF NOT EXISTS memories (
           agent_name TEXT
         );
 
-CREATE TABLE IF NOT EXISTS project_collaborators (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, user TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'viewer' CHECK(role IN ('viewer','editor')), created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS project_collaborators (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, user TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'viewer' CHECK(role IN ('viewer','editor')), created_at TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   description TEXT,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','active','completed','on_hold')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','active','completed','on_hold','deleted')),
   path TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -116,6 +118,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_project ON activity_logs(project_id);
 CREATE INDEX IF NOT EXISTS idx_activity_project_time ON activity_logs (project_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_agent_learning_logs_agent ON agent_learning_logs(agent_name, created_at DESC);
+-- idx_agent_learning_logs_project 도 project_id 컬럼과 함께 migrations/002-*.sql 에서 만든다(위와 동일 이유).
 
 CREATE INDEX IF NOT EXISTS idx_cau_agent_type ON claude_agent_usage (agent_type);
 

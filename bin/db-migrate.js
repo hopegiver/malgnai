@@ -58,6 +58,11 @@ function main() {
 
   const db = new Database(DB_PATH)
   db.pragma('journal_mode = WAL')
+  // better-sqlite3(macOS)가 PRAGMA foreign_keys = ON으로 컴파일됨.
+  // schema.sql + migrations 실행 중 FK가 활성화돼 있으면 DROP TABLE 이 CASCADE 를 트리거해
+  // 참조 테이블 데이터를 삭제/NULL화한다. 마이그레이션 세션만 비활성화하고 종료 시 복원한다.
+  const fkWasOn = db.pragma('foreign_keys', { simple: true }) === 1
+  if (fkWasOn) db.pragma('foreign_keys = OFF')
 
   // 2) pre-migrate 백업(기존 DB일 때만).
   if (!fresh && !NO_BACKUP) {
@@ -106,6 +111,7 @@ function main() {
   ).run(version, new Date().toISOString())
   console.log('[db:migrate] schema version =', version)
 
+  if (fkWasOn) db.pragma('foreign_keys = ON')
   db.close()
   console.log('[db:migrate] done')
 }

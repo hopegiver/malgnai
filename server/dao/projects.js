@@ -8,16 +8,28 @@ export default class ProjectsDao {
   constructor(db) { this.db = db }
 
   async findAll(status, limit = 50, offset = 0, kind) {
-    // 선택적 필터(status, kind) 를 동적 WHERE 로 조립. 둘 다 없으면 전체.
+    // 선택적 필터(status, kind) 를 동적 WHERE 로 조립.
+    // status 를 명시하지 않으면 소프트delete(status='deleted')는 기본적으로 숨긴다 — 목록/집계 등
+    // "지금 살아있는 프로젝트"를 기대하는 호출부가 죽은 프로젝트로 오염되지 않게. status='deleted'를
+    // 명시하면(휴지통 뷰 등) 그대로 조회된다.
     const where = []
     const args = []
     if (status) { where.push('status = ?'); args.push(status) }
+    else { where.push("status != 'deleted'") }
     if (kind) { where.push('kind = ?'); args.push(kind) }
     const clause = where.length ? `WHERE ${where.join(' AND ')}` : ''
     args.push(limit, offset)
     return (await this.db.prepare(
       `SELECT * FROM projects ${clause} ORDER BY updated_at DESC LIMIT ? OFFSET ?`
     ).bind(...args).all()).results
+  }
+
+  // workspace 경로 접두사로 시작하는(= 로컬 폴더 스캔 대상인) 프로젝트 중 아직 삭제되지 않은 것들.
+  // sync 가 "이번 스캔에 없는 폴더 = 사라짐" 을 판단할 후보 집합을 구하는 데 쓴다.
+  async findByPathPrefix(prefix) {
+    return (await this.db.prepare(
+      `SELECT id, path FROM projects WHERE path LIKE ? ESCAPE '\\' AND status != 'deleted'`
+    ).bind(prefix.replace(/[\\%_]/g, '\\$&') + '%').all()).results
   }
 
   async findById(id) {
@@ -106,7 +118,7 @@ export default class ProjectsDao {
 
   async countByStatus() {
     const rows = (await this.db.prepare('SELECT status, COUNT(*) as cnt FROM projects GROUP BY status').all()).results
-    const counts = { pending: 0, active: 0, completed: 0, on_hold: 0 }
+    const counts = { pending: 0, active: 0, completed: 0, on_hold: 0, deleted: 0 }
     for (const r of rows) counts[r.status] = r.cnt
     return counts
   }

@@ -181,6 +181,21 @@
           </button>
         </template>
       </div>
+
+      <!-- 시스템 (관리자 전용) -->
+      <div v-if="role === 'admin'" class="card p-4 mt-3">
+        <h5 class="mb-1"><i class="bi bi-hdd-stack me-2"></i>시스템</h5>
+        <p class="text-muted small mb-3">서버 프로세스를 재시작합니다. 진행 중인 요청/작업이 중단될 수 있습니다.</p>
+
+        <div v-if="restartError" class="alert alert-danger py-2 small mb-3" role="alert">
+          <i class="bi bi-exclamation-triangle me-2"></i>{{ restartError }}
+        </div>
+
+        <button type="button" class="btn btn-outline-danger" :disabled="restarting" @click="restartServer">
+          <span v-if="restarting" class="spinner-border spinner-border-sm me-2"></span>
+          서버 재시작
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -213,6 +228,10 @@ export default {
       disableCode: '',
       copied: false,
       _toastTimer: null,
+
+      // 서버 재시작 상태
+      restarting: false,
+      restartError: '',
     }
   },
   mounted() {
@@ -325,6 +344,22 @@ export default {
       }
       this.showToast('2단계 인증이 비활성화되었습니다.')
       await this.load()
+    },
+    async restartServer() {
+      if (!window.confirm('서버를 재시작할까요? 진행 중인 요청/작업이 중단될 수 있습니다.')) return
+      this.restartError = ''
+      this.restarting = true
+      const { data, error } = await useApi('/api/system/restart', { method: 'POST' })
+      if (error) {
+        this.restarting = false
+        this.restartError = error || '서버 재시작 요청에 실패했습니다.'
+        return
+      }
+      this.showToast(data?.message || '서버를 재시작합니다. 잠시 후 다시 로그인해 주세요.')
+      // restarting 스피너는 유지 — 서버가 내려갔다 올라오는 동안 재클릭 방지.
+      // 재시작된 서버는 이전 세션 상태(SSE 연결 등)를 잃으므로 5초 뒤 로그아웃시켜
+      // 사용자가 새로 로그인하며 최신 상태를 받도록 한다.
+      setTimeout(() => logout(), 5000)
     },
     async copy(text) {
       if (!text) return

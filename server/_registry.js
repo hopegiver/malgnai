@@ -7,8 +7,10 @@ import r4 from './api/commands.js'
 import r5 from './api/context.js'
 import r6 from './api/dashboard.js'
 import r7 from './api/lead.js'
-import r8 from './api/projects.js'
-import r9 from './api/users.js'
+import r8 from './api/monitor.js'
+import r9 from './api/projects.js'
+import r10 from './api/system.js'
+import r11 from './api/users.js'
 
 export default function register(app) {
   app.route('/api/activities', r0)
@@ -19,6 +21,8 @@ export default function register(app) {
   app.route('/api/context', r5)
   app.route('/api/dashboard', r6)
   app.route('/api/lead', r7)
-  app.route('/api/projects', r8)
-  app.route('/api/users', r9)
+  app.route('/api/monitor', r8)
+  app.route('/api/projects', r9)
+  app.route('/api/system', r10)
+  app.route('/api/users', r11)
 }

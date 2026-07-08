@@ -19,7 +19,7 @@ malgnai 웹앱 + 자율 운영 엔진의 로컬(맥미니) 운영 스크립트 �
 | [sync-claude.js](sync-claude.js) | `.claude` 로그/토큰 통계/메모리/세션 동기화 | `pnpm run sync-claude`, sync-all.sh |
 | [skill-definitions.js](skill-definitions.js) | 에이전트별 필수 스킬 정의(데이터) — sync-agents.js가 import | (라이브러리) |
 | [sync-all.sh](sync-all.sh) | 서버 기동 확인 후 sync-projects → sync-agents → sync-claude 순차 실행, 로그 → `logs/sync-all.log` | `com.malgnai.sync` LaunchAgent (600s) |
-| [token-report.js](token-report.js) | 토큰 사용 "범인 색출" 리포트 (DB만 읽어 0토큰) | `pnpm run token-report` |
+| [token-report.js](token-report.js) | 토큰 사용 "도둑 색출" 리포트 (DB만 읽어 0토큰) | `pnpm run token-report` |
 | [migrate.js](migrate.js) | 데이터 마이그레이션 명시 트리거(백업+무결성 검증 후 실행) | `pnpm run migrate` |
 
 ## 3. 자율 운영 (LaunchAgent 5개, 2026-07-03 단순 코어 전환 P4로 8→5 통합)

@@ -662,6 +662,9 @@ code, .text-code {
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
   height: 36px;
 }
+textarea.form-control {
+  height: auto;
+}
 .form-select { padding-right: 2.25rem; }
 .form-control::placeholder { color: var(--color-ink-faint); }
 .form-control:focus,
@@ -746,6 +749,10 @@ code, .text-code {
 }
 .table tbody tr:last-child td { border-bottom: none; }
 .table-hover tbody tr:hover td { background-color: var(--color-surface-hover); }
+/* thead th만 nowrap이면 좁은 화면에서 셀 텍스트가 옆으로 넘치는 대신 줄바꿈되어
+   행만 비정상적으로 길어지고 실제로 스크롤할 가로 폭은 거의 안 생긴다.
+   td도 nowrap으로 맞춰 표가 원래 폭대로 넘치게 하고, .table-responsive가 그 폭을 스크롤로 흡수한다. */
+.table-responsive .table td { white-space: nowrap; }
 
 /* 라벨 셀 — 줄바꿈 방지 */
 .table-label-cell { white-space: nowrap; width: 1%; min-width: 80px; }
@@ -1488,6 +1495,15 @@ code, .text-code {
   background: currentColor; /* 감싼 text-{tone} 색을 그대로 따라감 (가동중=녹/대기=파랑/점검=주황/정지=회색) */
 }
 .project-card-dot--live { box-shadow: 0 0 5px var(--color-ai-pulse); } /* running 만 은은한 발광 */
+
+/* ── 프로젝트 필터 바 — 탭/선택상자/검색창 높이 통일 ─────── */
+.project-filter-bar .btn,
+.project-filter-bar .form-select,
+.project-filter-bar .form-control {
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+}
 
 /* ── 스켈레톤 로더 ───────────────────────────────── */
 .skeleton-line {

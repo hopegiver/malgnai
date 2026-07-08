@@ -163,7 +163,7 @@ router.post('/sync/agent-usage', async (c) => {
   return c.json({ synced })
 })
 
-// --- 토큰 범인 색출 (읽기) ---
+// --- 토큰 도둑 색출 (읽기) ---
 // since 파라미터: 'today' | 'week' | ISO문자열 (없으면 전체)
 function resolveSince(v) {
   if (!v) return null

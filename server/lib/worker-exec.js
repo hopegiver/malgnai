@@ -49,10 +49,15 @@ export const WORKER_SYSTEM_PROMPT = [
 // 사람이 웹앱에서 직접 낸 명령(무제한 턴, task_type!=='project_cycle')에만 덧붙이는 단계화 지침.
 //   턴 제한을 없앤 대신, 한 세션에서 거대한 작업을 통째로 밀어붙여 토큰을 낭비하지 않도록
 //   "의미 있는 단계로 쪼개 이번엔 한 단계를 완결" 하는 습관을 프롬프트로 유도한다(사용자 요청).
+//   NEXT_PHASE: 신호(server/lib/phase-chain.js 가 파싱)로 다음 단계 command 를 자동 생성·실행까지
+//   이어지므로(재승인 없음), 여기서 끊기지 않고 마지막까지 자동 완결된다.
 export const STAGED_EXECUTION_PROMPT = [
   '작업 범위가 크면 한 세션에서 전부 끝내려 하지 말고, 의미 있는 단계로 나눠서 진행한다.',
-  '이번 세션에서는 한 단계를 완결하고, 다음 단계에 필요한 맥락·남은 할 일을 결과에 명확히 남겨',
-  '후속 세션이 이어받게 한다(토큰을 효율적으로 사용).',
+  '이번 세션에서는 한 단계를 완결한다.',
+  '아직 남은 작업이 있으면, 응답의 맨 마지막에 정확히 다음 형식 한 줄만 남겨라(그 줄에 다른 말은 섞지 마라):',
+  'NEXT_PHASE: <다음 세션이 이어받을 구체적 지시 — 지금까지 한 일과 남은 일을 판단할 수 있게 충분히 구체적으로>',
+  '이 지시는 사람 확인 없이 그대로 다음 세션에 전달되어 자동 실행된다.',
+  '이번 단계로 작업이 전부 끝났다면 그 줄을 남기지 말고 그냥 마무리한다.',
 ].join(' ')
 
 // M-2: 워커 1태스크당 최대 턴 안전 기본값(설계 §5.1). claim 응답/서버 직접 디스패치 둘 다 이 값으로
@@ -112,12 +117,48 @@ export function buildSpawn(claudeArgs, cwd, sandboxProfile) {
   return { bin: 'claude', argv: claudeArgs, cleanup: () => {}, sandboxed: false, workerTmp: null }
 }
 
+// 실시간 모니터용 stream-json 이벤트 → 화면 표시 요약(진행 로그 1줄).
+// 순수 진행 내용(assistant 응답 텍스트 · 도구 호출 · 도구 결과)만 뽑고, system(훅 발동 등)·
+// result(최종, end()로 별도 처리)·rate_limit_event 등 잡음은 버린다.
+function summarizeToolInput(name, input) {
+  if (!input || typeof input !== 'object') return ''
+  const val = input.file_path || input.path || input.command || input.pattern || input.url || input.description
+  if (val) return String(val).slice(0, 150)
+  try { return JSON.stringify(input).slice(0, 150) } catch { return '' }
+}
+
+// assistant 의 text 블록은 여기서 다루지 않는다 — runClaude 가 --include-partial-messages 로
+//   토큰 단위 stream_event(content_block_delta) 를 실시간 방출하므로, 완성된 'assistant' 메시지의
+//   text 는 이미 다 보여준 내용의 중복이다(tool_use 만 discrete 이벤트라 여기서 뽑는다).
+export function summarizeStreamEvent(evt) {
+  if (!evt || typeof evt !== 'object') return []
+  const items = []
+  if (evt.type === 'assistant' && Array.isArray(evt.message?.content)) {
+    for (const block of evt.message.content) {
+      if (block.type === 'tool_use') {
+        items.push({ kind: 'tool_call', tool: block.name, detail: summarizeToolInput(block.name, block.input) })
+      }
+    }
+  } else if (evt.type === 'user' && Array.isArray(evt.message?.content)) {
+    for (const block of evt.message.content) {
+      if (block.type !== 'tool_result') continue
+      const raw = Array.isArray(block.content)
+        ? block.content.map((c) => c.text || '').join(' ')
+        : (block.content || '')
+      items.push({ kind: 'tool_result', isError: !!block.is_error, detail: String(raw).trim().slice(0, 200) })
+    }
+  }
+  return items
+}
+
 /**
  * runClaude — headless claude 워커 1회 실행.
  * @param {string} resumeSessionId (§9 원격 승인 재개) 주어지면 `claude --resume <sid>` 로 그 세션을
  *   이어받아 실행한다(instruction 은 그 세션에 이어붙일 -p 프롬프트=대표 답변). 미지정이면 신규 세션.
+ * @param {function} onChunk stderr 원문 텍스트 청크 콜백(진단용, 기존 동작 유지).
+ * @param {function} onEvent stdout stream-json 각 줄을 summarizeStreamEvent()로 요약한 진행 항목 콜백(신규).
  */
-export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfile, resumeSessionId = null) {
+export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfile, resumeSessionId = null, onChunk = null, onEvent = null) {
   return new Promise((res) => {
     // env 스크럽: 인입 인증 키 등 불필요한 비밀을 자식 프로세스에 노출하지 않는다.
     const scrubbedEnv = { ...process.env }
@@ -148,7 +189,12 @@ export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfi
       '-p', instruction,
       // (§9) resume 모드: 유효한 session id 면 --resume 로 같은 세션을 이어받는다(반환 session_id 동일).
       ...(typeof resumeSessionId === 'string' && resumeSessionId.trim() ? ['--resume', resumeSessionId.trim()] : []),
-      '--output-format', 'json',
+      // stream-json(--verbose 필수): 실행 도중 assistant/tool 이벤트를 줄 단위로 실시간 방출해
+      // 실행 모니터가 진행 내용을 볼 수 있게 한다(구 'json'은 종료 후 결과 1건만 나와 진행 불가시였음).
+      // --include-partial-messages: 이게 없으면 assistant 의 응답 텍스트가 "한 턴 전체 생성 완료"
+      //   시점에야 한 덩어리로 나온다(수 초 침묵 후 결과가 통째로 뜸). 토큰 단위 delta(stream_event/
+      //   content_block_delta)를 받아야 실제로 타이핑되듯 실시간으로 보인다.
+      '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
       ...(toolTokens
         ? ['--permission-mode', 'default', '--allowedTools', ...toolTokens]
         : ['--permission-mode', 'bypassPermissions']),
@@ -199,8 +245,44 @@ export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfi
 
     let stdout = ''
     let stderr = ''
-    child.stdout?.on('data', (d) => { stdout += d.toString() })
-    child.stderr?.on('data', (d) => { stderr += d.toString() })
+    let lineBuf = ''
+    // --include-partial-messages 의 stream_event/content_block_delta(text_delta) 누적 상태.
+    //   이 실행(child) 1회 전용 클로저 변수라 실행 간 상태 누수 없음. blockId 로 프론트가
+    //   "새 줄 추가" vs "직전 줄 갱신(타이핑 효과)"을 구분한다(exec-monitor.progress 의 in-place 교체).
+    let curBlockId = null
+    let curText = ''
+    let curBlockSeq = 0
+    child.stdout?.on('data', (d) => {
+      const text = d.toString()
+      stdout += text
+      if (!onEvent) return
+      // NDJSON: 줄 경계가 chunk 경계와 안 맞을 수 있어 미완성 줄은 버퍼에 남긴다.
+      lineBuf += text
+      const lines = lineBuf.split('\n')
+      lineBuf = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.trim()) continue
+        let evt
+        try { evt = JSON.parse(line) } catch { continue /* 불완전/비JSON 줄은 무시 */ }
+        if (evt?.type === 'stream_event') {
+          const se = evt.event
+          if (se?.type === 'content_block_start' && se.content_block?.type === 'text') {
+            curBlockId = `${se.index}-${curBlockSeq++}`
+            curText = ''
+          } else if (se?.type === 'content_block_delta' && se.delta?.type === 'text_delta') {
+            curText += se.delta.text
+            onEvent({ kind: 'text', text: curText, streaming: true, blockId: curBlockId })
+          }
+          continue
+        }
+        for (const item of summarizeStreamEvent(evt)) onEvent(item)
+      }
+    })
+    child.stderr?.on('data', (d) => {
+      const text = d.toString()
+      stderr += text
+      if (onChunk) try { onChunk(text) } catch { /* 모니터 실패는 무시 */ }
+    })
 
     child.on('error', (err) => {
       if (killTimer) clearTimeout(killTimer)
@@ -220,14 +302,16 @@ export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfi
   })
 }
 
-// claude --output-format json 의 stdout 에서 result/total_cost_usd/session_id 추출.
+// claude --output-format stream-json 의 stdout(줄마다 JSON 이벤트) 중 마지막 type='result' 줄에서
+// result/total_cost_usd/session_id 추출. (구 --output-format json 은 stdout 전체가 단일 JSON 이었으나
+// 실시간 진행 스트리밍을 위해 stream-json 으로 전환 — 마지막 줄이 그 결과 객체와 동일 스키마.)
 // claude 가 max-turns 초과 등으로 is_error=true 를 반환할 때도 exit code 는 0이 아니게 오지만
 // stdout 에는 진단 가능한 JSON(subtype/errors)이 실려 있다 — cliError 로 같이 뽑아 error 필드에 반영한다.
 export function parseClaudeJson(stdout) {
   const out = { result: null, cost_usd: null, session_id: null, cliError: null }
   if (!stdout) return out
-  try {
-    const json = JSON.parse(stdout)
+
+  const applyResultJson = (json) => {
     out.result = json.result != null ? String(json.result) : null
     out.cost_usd = typeof json.total_cost_usd === 'number' ? json.total_cost_usd : null
     out.session_id = json.session_id || null
@@ -235,10 +319,22 @@ export function parseClaudeJson(stdout) {
       const reason = Array.isArray(json.errors) && json.errors.length ? json.errors.join('; ') : (json.subtype || 'unknown error')
       out.cliError = `claude ${json.subtype || 'error'}: ${reason} (num_turns=${json.num_turns ?? '?'})`
     }
-  } catch {
-    // JSON 파싱 실패 시 stdout 원문을 result 로 보존.
-    out.result = stdout
   }
+
+  // stream-json: 뒤에서부터 훑어 type='result' 줄을 찾는다(정상 종료 시 항상 마지막 줄).
+  const lines = stdout.trim().split('\n').filter((l) => l.trim())
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const json = JSON.parse(lines[i])
+      if (json && json.type === 'result') { applyResultJson(json); return out }
+    } catch { /* 다음 줄 계속 탐색 */ }
+  }
+  // result 타입 줄을 못 찾음 — 구 --output-format json(단일 JSON 전체) 형식 폴백 시도.
+  if (lines.length === 1) {
+    try { applyResultJson(JSON.parse(lines[0])); return out } catch { /* 아래 최종 폴백 */ }
+  }
+  // 완전 실패: 원문을 result 로 보존.
+  out.result = stdout
   return out
 }
 

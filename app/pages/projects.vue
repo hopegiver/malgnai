@@ -5,27 +5,36 @@
       <div>
         <h1 class="mb-0">프로젝트</h1>
         <small class="text-muted" v-if="!loading">
-          총 {{ projects.length }}개<span v-if="search.trim() || activeFilter"> · {{ filteredProjects.length }}개 표시</span>
+          총 {{ projects.length }}개<span v-if="search.trim() || activeFilter || kindFilter"> · {{ filteredProjects.length }}개 표시</span>
           <span v-if="activeCount > 0"> · 자율 가동 {{ activeCount }}개</span>
         </small>
       </div>
-      <button class="btn btn-primary btn-sm d-flex align-items-center gap-1" @click="openNewModal">
+      <button class="btn btn-primary d-flex align-items-center gap-1" @click="openNewModal">
         <i class="bi bi-plus-lg"></i>
         <span class="d-none d-sm-inline">새 프로젝트</span>
       </button>
     </div>
 
-    <!-- 필터 바 -->
-    <div class="d-flex flex-wrap align-items-center gap-2 mb-4">
-      <div class="btn-group btn-group-sm" role="group">
-        <button class="btn" :class="activeFilter === '' ? 'btn-primary' : 'btn-outline-secondary'" @click="setFilter('')">전체</button>
-        <button class="btn" :class="activeFilter === 'active' ? 'btn-primary' : 'btn-outline-secondary'" @click="setFilter('active')">진행</button>
-        <button class="btn" :class="activeFilter === 'pending' ? 'btn-primary' : 'btn-outline-secondary'" @click="setFilter('pending')">대기</button>
-        <button class="btn" :class="activeFilter === 'completed' ? 'btn-primary' : 'btn-outline-secondary'" @click="setFilter('completed')">완료</button>
-        <button class="btn" :class="activeFilter === 'on_hold' ? 'btn-primary' : 'btn-outline-secondary'" @click="setFilter('on_hold')">보류</button>
+    <!-- 필터 바: 유형 탭 → 상태 선택 → 검색 (높이 통일 = .project-filter-bar, base.css) -->
+    <div class="project-filter-bar d-flex flex-wrap align-items-center gap-2 mb-4">
+      <div class="btn-group" role="group">
+        <button class="btn" :class="kindFilter === '' ? 'btn-primary' : 'btn-outline-secondary'" @click="setKindFilter('')">전체 유형</button>
+        <button
+          v-for="k in KIND_OPTIONS"
+          :key="k.value"
+          class="btn"
+          :class="kindFilter === k.value ? 'btn-primary' : 'btn-outline-secondary'"
+          @click="setKindFilter(k.value)">{{ k.label }}</button>
       </div>
+      <select class="form-select" style="width:auto" v-model="activeFilter" aria-label="상태 필터">
+        <option value="">전체 상태</option>
+        <option value="active">진행</option>
+        <option value="pending">대기</option>
+        <option value="completed">완료</option>
+        <option value="on_hold">보류</option>
+      </select>
       <input
-        class="form-control form-control-sm"
+        class="form-control"
         style="width:180px"
         type="search"
         v-model="search"
@@ -58,9 +67,10 @@
             </span>
           </div>
 
-          <!-- 상태 + 에이전트 -->
+          <!-- 상태 + 유형 + 에이전트 -->
           <div class="d-flex align-items-center gap-2 mb-2">
-            <span class="badge border text-secondary bg-transparent" style="font-size:11px" title="라이프사이클 단계">{{ statusLabel(p.status) }}</span>
+            <span class="badge" :class="'bg-' + statusColor(p.status) + '-subtle text-' + statusColor(p.status) + '-emphasis'" style="font-size:11px" title="라이프사이클 단계">{{ statusLabel(p.status) }}</span>
+            <span class="badge" :style="{ color: kindMeta(p.kind).fg, backgroundColor: kindMeta(p.kind).bg, fontSize: '11px' }" title="프로젝트 유형">{{ kindLabel(p.kind) }}</span>
             <span v-if="p.lead_agent_name" class="text-faint" style="font-size:12px">
               <i class="bi bi-robot" style="font-size:10px"></i> {{ p.lead_agent_name }}
             </span>
@@ -85,7 +95,7 @@
     </div>
 
     <!-- 빈 상태: 검색/필터 결과 없음 -->
-    <div v-else-if="!loading && (search.trim() || activeFilter)" class="text-center py-5">
+    <div v-else-if="!loading && (search.trim() || activeFilter || kindFilter)" class="text-center py-5">
       <i class="bi bi-funnel d-block mb-3" style="font-size:2.5rem;color:var(--color-ink-faint)"></i>
       <div class="fw-medium mb-1 text-muted">해당 조건의 프로젝트가 없습니다</div>
       <button class="btn btn-sm btn-outline-secondary mt-2" @click="resetFilter">필터 초기화</button>
@@ -112,18 +122,19 @@
         <form @submit.prevent="createProject">
           <div class="mb-3">
             <label class="form-label fw-medium">프로젝트명 <span class="text-danger">*</span></label>
-            <input class="form-control" v-model="form.name" placeholder="예: malgnai" required maxlength="100" :class="formErrors.name ? 'is-invalid' : ''">
+            <input class="form-control font-monospace" v-model="form.name" placeholder="예: my-project" required maxlength="50" pattern="^[a-z0-9]+(-[a-z0-9]+)*$" :class="formErrors.name ? 'is-invalid' : ''">
             <div class="invalid-feedback">{{ formErrors.name }}</div>
+            <div class="form-text">영문 소문자·숫자·하이픈(-)만, 공백 불가. <code>~/workspace/{{ form.name || '이름' }}</code> 폴더가 이 이름으로 생성됩니다.</div>
           </div>
           <div class="mb-3">
-            <label class="form-label fw-medium">설명</label>
-            <input class="form-control" v-model="form.description" placeholder="한 줄 설명 (선택)" maxlength="500">
+            <label class="form-label fw-medium">설명 (표시 이름)</label>
+            <input class="form-control" v-model="form.description" placeholder="한 줄 설명 — 한글 표시 이름도 여기 (선택)" maxlength="500">
           </div>
           <div class="mb-3">
-            <label class="form-label fw-medium">로컬 경로</label>
-            <input class="form-control font-monospace" v-model="form.path" placeholder="/Users/... 또는 ~/workspace/..." :class="formErrors.path ? 'is-invalid' : ''">
-            <div class="invalid-feedback">{{ formErrors.path }}</div>
-            <div class="form-text">실제 작업 폴더 경로. AI가 이 폴더에서 작업합니다.</div>
+            <label class="form-label fw-medium">유형</label>
+            <select class="form-select" v-model="form.kind">
+              <option v-for="k in KIND_OPTIONS" :key="k.value" :value="k.value">{{ k.label }}</option>
+            </select>
           </div>
           <div class="row g-3 mb-3">
             <div class="col-6">
@@ -168,6 +179,18 @@
 </template>
 
 <script>
+// 프로젝트 유형(kind) 5종 — server/dao/init.js AUTONOMOUS_KINDS 와 값 일치(단일 소스는 서버, 여긴 표시용 라벨만).
+const KIND_OPTIONS = [
+  { value: 'dev', label: '개발' },
+  { value: 'research', label: '리서치' },
+  { value: 'marketing', label: '마케팅' },
+  { value: 'proposal', label: '제안' },
+  { value: 'internal_ops', label: '내부운영' },
+]
+const KIND_LABEL_MAP = Object.fromEntries(KIND_OPTIONS.map(k => [k.value, k.label]))
+// 서버 server/lib/scaffold-project.js 의 PROJECT_NAME_RE 와 동일(단일 소스는 서버, 여긴 UX용 사전 검증).
+const NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/
+
 export default {
   title: '프로젝트',
   data() {
@@ -176,18 +199,21 @@ export default {
       agents: [],
       loading: true,
       activeFilter: '',
+      kindFilter: '',
       search: '',
       showNewModal: false,
       creating: false,
       createError: '',
-      form: { name: '', description: '', path: '', lead_agent_name: '', cadence: 'off', autonomy_enabled: false },
+      form: { name: '', description: '', kind: 'dev', lead_agent_name: '', cadence: 'off', autonomy_enabled: false },
       formErrors: {},
+      KIND_OPTIONS,
     }
   },
   computed: {
     filteredProjects() {
       let list = this.projects
       if (this.activeFilter) list = list.filter(p => p.status === this.activeFilter)
+      if (this.kindFilter) list = list.filter(p => p.kind === this.kindFilter)
       const q = this.search.trim().toLowerCase()
       if (q) list = list.filter(p => (p.name || '').toLowerCase().includes(q))
       return list
@@ -211,27 +237,29 @@ export default {
       const { data } = await useApi('/api/agents')
       this.agents = data?.agents || []
     },
-    setFilter(f) {
-      this.activeFilter = f
+    setKindFilter(k) {
+      this.kindFilter = k
     },
     resetFilter() {
       this.activeFilter = ''
+      this.kindFilter = ''
       this.search = ''
     },
     openNewModal() {
-      this.form = { name: '', description: '', path: '', lead_agent_name: '', cadence: 'off', autonomy_enabled: false }
+      this.form = { name: '', description: '', kind: 'dev', lead_agent_name: '', cadence: 'off', autonomy_enabled: false }
       this.formErrors = {}
       this.createError = ''
       this.showNewModal = true
     },
     validateForm() {
       this.formErrors = {}
-      if (!this.form.name.trim()) {
+      const name = this.form.name.trim()
+      if (!name) {
         this.formErrors.name = '프로젝트명을 입력하세요'
         return false
       }
-      if (this.form.path && !this.form.path.match(/^[/~]/)) {
-        this.formErrors.path = '유효한 경로를 입력하세요 (/ 또는 ~/ 시작)'
+      if (name.length < 2 || name.length > 50 || !NAME_RE.test(name)) {
+        this.formErrors.name = '영문 소문자·숫자·하이픈(-)만 사용, 공백 불가 (예: my-project)'
         return false
       }
       return true
@@ -243,7 +271,7 @@ export default {
       const body = {
         name: this.form.name.trim(),
         description: this.form.description.trim() || undefined,
-        path: this.form.path.trim() || undefined,
+        kind: this.form.kind,
         lead_agent_name: this.form.lead_agent_name || undefined,
         cadence: this.form.cadence,
         autonomy_enabled: this.form.autonomy_enabled && !!this.form.lead_agent_name,
@@ -264,10 +292,24 @@ export default {
     },
     // 라이프사이클(사람이 정하는 단계). "진행중" → "진행"으로 완화해 실시간 가동상태와 혼동 방지.
     statusColor(s) {
-      return { pending: 'secondary', active: 'primary', completed: 'success', on_hold: 'warning' }[s] || 'secondary'
+      return { pending: 'secondary', active: 'primary', completed: 'success', on_hold: 'warning', deleted: 'danger' }[s] || 'secondary'
     },
     statusLabel(s) {
-      return { pending: '대기', active: '진행', completed: '완료', on_hold: '보류' }[s] || s
+      return { pending: '대기', active: '진행', completed: '완료', on_hold: '보류', deleted: '삭제됨' }[s] || s
+    },
+    kindLabel(k) {
+      return KIND_LABEL_MAP[k] || k
+    },
+    // 상태 배지(bootstrap 시맨틱 색)와 겹치지 않게 유형은 별도 팔레트(연한 배경+짙은 글자, act-cat-badge 톤과 동일 계열).
+    kindMeta(k) {
+      const M = {
+        dev:          { fg: '#0075de', bg: 'rgba(0,117,222,0.10)' },
+        research:     { fg: '#7a3ff2', bg: 'rgba(122,63,242,0.12)' },
+        marketing:    { fg: '#b5540a', bg: 'rgba(221,91,0,0.12)' },
+        proposal:     { fg: '#1f7d79', bg: 'rgba(42,157,153,0.14)' },
+        internal_ops: { fg: '#5c636a', bg: 'rgba(108,117,125,0.14)' },
+      }
+      return M[k] || { fg: '#5c636a', bg: 'rgba(108,117,125,0.14)' }
     },
     // 가동 상태(서버 파생 activity_status). "지금 AI가 실제로 돌고 있나"의 유일한 표현.
     activityLabel(p) {

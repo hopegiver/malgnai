@@ -16,7 +16,7 @@
 
 // agents.budget_json 미설정 시 fallback.
 export const DEFAULT_BUDGET = {
-  daily_cost_limit_usd: 5,
+  daily_cost_limit_usd: 100,
   max_turns_per_task: 8,
 }
 

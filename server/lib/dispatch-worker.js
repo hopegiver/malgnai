@@ -33,11 +33,13 @@
 import CommandsDao from '../dao/commands.js'
 import ProjectsDao from '../dao/projects.js'
 import { runClaude, parseClaudeJson, truncate, RESULT_MAX_CHARS } from './worker-exec.js'
+import { execMonitor } from './exec-monitor.js'
 import { resolveMaxTurns, resolveAllowedTools, resolveSandboxProfile } from './tool-profiles.js'
 import { ingestCycleResultTx } from './cycle-ingest.js'
 import { ingestCommandFailureTx, extractEmbeddedJson } from './worker-ingest.js'
 import { checkExecGuard } from './workspace-guard.js'
 import { buildResumePrompt, maybeRequeueResume } from './resume-loop.js'
+import { maybeRequeuePhase } from './phase-chain.js'
 import { logActivity } from './activity-log.js'
 
 const TERMINAL_STATUSES = ['done', 'failed', 'rejected', 'expired']
@@ -117,8 +119,17 @@ export async function dispatchApprovedCommand(db, commandId) {
     const promptText = isResume ? buildResumePrompt(command.review_note) : command.instruction
     const resumeSid = isResume ? command.session_id : null
 
+    execMonitor.start(commandId, {
+      projectId: project.id,
+      projectName: project.name || project.path?.split('/').pop() || '?',
+      instruction: (promptText || '').slice(0, 200),
+      taskType: command.task_type || 'direct',
+    })
+
     const { exitCode, stdout, stderr, spawnError } = await runClaude(
-      promptText, project.path, maxTurns, allowedTools, sandboxProfile, resumeSid
+      promptText, project.path, maxTurns, allowedTools, sandboxProfile, resumeSid,
+      (chunk) => execMonitor.chunk(commandId, chunk),
+      (item) => execMonitor.progress(commandId, item)
     )
     const parsed = parseClaudeJson(stdout)
     // poll(bin/lib/poll-commands.js)과 동일한 에러 우선순위: spawn 자체 실패 > claude stdout JSON 의
@@ -127,8 +138,11 @@ export async function dispatchApprovedCommand(db, commandId) {
       ? `spawn error: ${spawnError}`
       : (exitCode !== 0 ? truncate(parsed.cliError || stderr || 'non-zero exit', 2000) : null)
 
+    const finalStatus = exitCode === 0 ? 'done' : 'failed'
+    execMonitor.end(commandId, finalStatus, { costUsd: parsed.cost_usd })
+
     await dao.updateStatus(commandId, {
-      status: exitCode === 0 ? 'done' : 'failed',
+      status: finalStatus,
       exit_code: exitCode,
       result: truncate(parsed.result, RESULT_MAX_CHARS),
       cost_usd: parsed.cost_usd,
@@ -144,6 +158,22 @@ export async function dispatchApprovedCommand(db, commandId) {
         logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'resume_requeue', detail: `다음 라운드 승인 필요 → command ${rq.newId} 큐잉`, created_at: nowIso() })
       } else if (rq.reason) {
         logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'resume_requeue_skip', detail: rq.reason, created_at: nowIso() })
+      }
+    }
+
+    // (단계 자동 이어달리기) STAGED_EXECUTION_PROMPT 를 본 워커가 "NEXT_PHASE:" 신호로 끝났으면
+    //   다음 단계 command 를 자가승인 생성 + 즉시 클레임 시도한다(재승인 없이 자동 완결, 사용자 요청).
+    //   project_cycle/resume 은 함수 내부에서 자동 no-op(각자 별도 체계를 이미 가짐).
+    if (exitCode === 0) {
+      const pc = maybeRequeuePhase(db, command, parsed.result)
+      if (pc.requeued) {
+        logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'phase_chain_create', detail: `다음 단계 command ${pc.newId} 생성${pc.claimed ? ' (즉시 실행)' : ' (프로젝트 실행 중 → 안전망 poll 대기)'}`, created_at: nowIso() })
+        if (pc.claimed) {
+          dispatchApprovedCommand(db, pc.newId).catch((e) =>
+            logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: e.message, created_at: nowIso() }))
+        }
+      } else if (pc.reason) {
+        logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'phase_chain_skip', detail: pc.reason, created_at: nowIso() })
       }
     }
 
@@ -171,6 +201,8 @@ export async function dispatchApprovedCommand(db, commandId) {
     }
   } catch (e) {
     // §2.3-6: 전체 try/catch — 실패해도 throw 하지 않고 logActivity 로만 감사.
+    // execMonitor.end() 는 start() 가 불린 경우에만 실제 동작(미호출 시 no-op).
+    try { execMonitor.end(commandId, 'failed') } catch { /* best-effort */ }
     try {
       logActivity(db, { agent_name: 'system', action: 'instant_dispatch_error', detail: e.message, created_at: nowIso() })
     } catch { /* 감사 실패는 무시(best-effort) */ }

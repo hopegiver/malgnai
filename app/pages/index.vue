@@ -127,6 +127,9 @@
         <div v-for="a in recentActivities.slice(0, 5)" :key="a.id" class="activity-mini-row">
           <span class="text-faint flex-shrink-0" style="font-size:11px;min-width:52px">{{ relativeTime(a.created_at) }}</span>
           <span v-if="a.agent_name" class="badge bg-secondary-subtle text-secondary flex-shrink-0" style="font-size:10px">{{ a.agent_name }}</span>
+          <router-link v-if="a.project_id" :to="'/projects/' + a.project_id" class="text-faint flex-shrink-0 text-decoration-none" style="font-size:11px">
+            <i class="bi bi-folder"></i> {{ a.project_name || a.project_id }}
+          </router-link>
           <span class="text-truncate" style="font-size:13px">{{ activityTitle(a) }}</span>
           <span class="ms-auto flex-shrink-0" :class="a.result === 'success' ? 'text-success' : a.result === 'failure' ? 'text-danger' : 'text-faint'" style="font-size:12px">
             <i class="bi" :class="a.result === 'success' ? 'bi-check2' : a.result === 'failure' ? 'bi-x' : 'bi-dash'"></i>

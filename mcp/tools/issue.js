@@ -22,11 +22,14 @@ export function issueAdd(params) {
   return issue;
 }
 
-/** 이슈를 해결 처리한다. 없는 id면 null. */
+/** 이슈를 해결 처리한다. 없는 id거나 project_id 가 불일치하면 에러. */
 export function issueResolve(params) {
   const db = getDb();
   const existing = db.prepare("SELECT * FROM issues WHERE id = ?").get(params.id);
-  if (!existing) return null;
+  if (!existing) return { error: "ISSUE_NOT_FOUND", id: params.id };
+  if (existing.project_id && existing.project_id !== params.project_id) {
+    return { error: "PROJECT_MISMATCH", id: params.id, expected: existing.project_id, got: params.project_id };
+  }
 
   const resolved_at = new Date().toISOString();
   db.prepare("UPDATE issues SET status = 'resolved', resolved_at = ? WHERE id = ?").run(resolved_at, params.id);

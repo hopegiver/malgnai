@@ -1,0 +1,31 @@
+import { Hono } from 'hono'
+import { authMiddleware } from '../middleware/auth.js'
+import { forbidden } from '../utils/response.js'
+import { logActivity } from '../lib/activity-log.js'
+
+// 시스템 레벨 운영 액션(현재는 서버 재시작 1종) — **관리자(role='admin')만** 허용.
+// LaunchAgent(com.malgnai.server, KeepAlive=true)가 프로세스 종료를 감지해 즉시
+// 재기동하므로, 서버가 직접 할 일은 "정상 종료"뿐이다.
+const router = new Hono()
+
+async function requireAdmin(c, next) {
+  const me = c.get('user')
+  if (!me || me.role !== 'admin') return forbidden(c, '관리자 권한이 필요합니다.')
+  await next()
+}
+
+router.post('/restart', authMiddleware, requireAdmin, async (c) => {
+  const me = c.get('user')
+  logActivity(c.env.DB, {
+    agent_name: 'system',
+    action: 'server_restart',
+    detail: `${me?.sub || 'admin'} 요청으로 서버 재시작`,
+    level: 'audit',
+    category: 'system',
+  })
+  // 응답을 먼저 내려보낸 뒤 종료 — LaunchAgent KeepAlive 가 자동으로 재기동한다.
+  setTimeout(() => process.exit(0), 300)
+  return c.json({ ok: true, message: '서버를 재시작합니다.' })
+})
+
+export default router

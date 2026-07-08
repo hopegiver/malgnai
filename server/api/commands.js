@@ -7,6 +7,7 @@ import { resolveAllowedTools, resolveSandboxProfile, resolveMaxTurns } from '../
 import { reviewCommandTx, claimApprovedForProject } from '../lib/instant-dispatch.js'
 import { dispatchApprovedCommand } from '../lib/dispatch-worker.js'
 import { buildResumePrompt, maybeRequeueResume } from '../lib/resume-loop.js'
+import { maybeRequeuePhase } from '../lib/phase-chain.js'
 import { logActivity } from '../lib/activity-log.js'
 
 const router = new Hono()
@@ -236,6 +237,21 @@ router.patch('/:id', apiKeyMiddleware, async (c) => {
     const rq = maybeRequeueResume(c.env.DB, command, body.result)
     if (rq.requeued) {
       logActivity(c.env.DB, { project_id: command.project_id, agent_name: 'system', action: 'resume_requeue', detail: `다음 라운드 승인 필요 → command ${rq.newId} 큐잉`, created_at: new Date().toISOString() })
+    }
+  }
+
+  // (단계 자동 이어달리기, 안전망 poll 경로) 워커가 "NEXT_PHASE:" 신호로 끝났으면 다음 단계 command 를
+  //   자가승인 생성 + 즉시 클레임 시도한다. project_cycle/resume 은 함수 내부에서 자동 no-op.
+  if (Number(body.exit_code) === 0) {
+    const pc = maybeRequeuePhase(c.env.DB, command, body.result)
+    if (pc.requeued) {
+      logActivity(c.env.DB, { project_id: command.project_id, agent_name: 'system', action: 'phase_chain_create', detail: `다음 단계 command ${pc.newId} 생성${pc.claimed ? ' (즉시 실행)' : ' (프로젝트 실행 중 → 안전망 poll 대기)'}`, created_at: new Date().toISOString() })
+      if (pc.claimed) {
+        dispatchApprovedCommand(c.env.DB, pc.newId).catch((e) =>
+          logActivity(c.env.DB, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: e.message, created_at: new Date().toISOString() }))
+      }
+    } else if (pc.reason) {
+      logActivity(c.env.DB, { project_id: command.project_id, agent_name: 'system', action: 'phase_chain_skip', detail: pc.reason, created_at: new Date().toISOString() })
     }
   }
   return c.json({ command })

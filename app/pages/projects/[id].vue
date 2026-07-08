@@ -18,14 +18,23 @@
           </span>
           <!-- 라이프사이클(사람이 정하는 단계) — 드롭다운으로 명시적 전환. 가동상태와 직교. -->
           <div class="d-flex align-items-center gap-1">
-            <select class="form-select form-select-sm pd-status-select" :value="project.status"
-                    :disabled="statusSaving" @change="changeStatus($event.target.value)"
-                    title="라이프사이클 단계 — 사람이 정하는 진행 단계">
-              <option value="pending">대기</option>
-              <option value="active">진행</option>
-              <option value="completed">완료</option>
-              <option value="on_hold">보류</option>
-            </select>
+            <template v-if="project.status === 'deleted'">
+              <span class="badge bg-danger">삭제됨</span>
+              <button type="button" class="btn btn-sm btn-outline-secondary" title="삭제 취소(복구)"
+                      :disabled="statusSaving" @click="restoreProject">
+                <i class="bi bi-arrow-counterclockwise"></i> 복구
+              </button>
+            </template>
+            <template v-else>
+              <select class="form-select form-select-sm pd-status-select" :value="project.status"
+                      :disabled="statusSaving" @change="changeStatus($event.target.value)"
+                      title="라이프사이클 단계 — 사람이 정하는 진행 단계">
+                <option value="pending">대기</option>
+                <option value="active">진행</option>
+                <option value="completed">완료</option>
+                <option value="on_hold">보류</option>
+              </select>
+            </template>
             <i v-if="statusSaving" class="bi bi-arrow-repeat spin text-muted" style="font-size:13px"></i>
           </div>
         </div>
@@ -42,6 +51,12 @@
         <li class="nav-item" role="presentation">
           <button class="nav-link" type="button" :class="{ active: tab === 'instruct' }" @click="selectTab('instruct')">
             <i class="bi bi-send pd-tab-icon"></i>지시
+          </button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" type="button" :class="{ active: tab === 'monitor' }" @click="selectTab('monitor')">
+            <i class="bi bi-broadcast-pin pd-tab-icon"></i>모니터링
+            <span v-if="monitorActive.length" class="pd-auto-dot" title="실행 중"></span>
           </button>
         </li>
         <li class="nav-item" role="presentation">
@@ -115,7 +130,7 @@
           <!-- KPI 4종 -->
           <div class="row g-3 mb-4">
             <div class="col-6 col-lg-3">
-              <a href="#" class="card pd-stat pd-stat--primary p-3 text-decoration-none" @click.prevent="goProgress('tasks')">
+              <a href="#" class="card pd-stat pd-stat--primary p-3 text-decoration-none" @click.prevent="goProgress('commands')">
                 <div class="pd-stat-top">
                   <span class="pd-stat-icon"><i class="bi bi-list-check"></i></span>
                   <span class="pd-stat-label">작업</span>
@@ -257,7 +272,7 @@
           <div v-show="assignMode === 'command'">
             <div class="mb-2">
               <label class="form-label small fw-medium">지시문</label>
-              <textarea v-model="newCommand" class="form-control" rows="3" maxlength="4000"
+              <textarea v-model="newCommand" class="form-control" rows="6" maxlength="4000"
                 placeholder="로컬에서 실행할 명령(지시문)을 입력하세요..."></textarea>
             </div>
             <div class="alert alert-warning py-2 px-3 small mb-2">
@@ -277,6 +292,66 @@
         </div>
       </div>
 
+      <!-- ============ 모니터링 탭 (이 프로젝트로 스코핑된 실시간 실행 모니터) ============ -->
+      <div v-show="tab === 'monitor'">
+        <div class="card mb-3">
+          <div class="card-header d-flex align-items-center justify-content-between py-2">
+            <span class="fw-semibold"><i class="bi bi-lightning-charge me-1 text-warning"></i>실행 중</span>
+            <small class="text-muted">{{ monitorSse ? '연결됨' : '연결 끊김' }}</small>
+          </div>
+          <div v-if="!monitorActive.length" class="text-center text-muted py-4 small">
+            <i class="bi bi-pause-circle me-1"></i>현재 이 프로젝트에서 실행 중인 AI 작업이 없습니다.
+          </div>
+          <div v-for="run in monitorActive" :key="run.id" class="p-3 border-bottom">
+            <div class="d-flex align-items-start justify-content-between gap-2">
+              <div style="min-width:0;">
+                <span class="badge" :class="run.taskType === 'project_cycle' ? 'bg-info' : 'bg-primary'">{{ run.taskType === 'project_cycle' ? 'AI 자율' : '직접 명령' }}</span>
+                <div class="text-muted small mt-1" style="word-break:break-word;">{{ run.instruction.slice(0, 200) }}{{ run.instruction.length > 200 ? '…' : '' }}</div>
+              </div>
+              <div class="text-end flex-shrink-0">
+                <div class="fw-bold text-warning font-monospace" style="font-size:1.1rem;">{{ formatElapsed(run.startedAt) }}</div>
+                <small class="text-muted">경과</small>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="monitorLog.length" class="card mb-3">
+          <div class="card-header d-flex align-items-center justify-content-between py-2">
+            <span class="fw-semibold"><i class="bi bi-terminal me-1"></i>진행 로그</span>
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2" @click="monitorLog = []">지우기</button>
+          </div>
+          <div class="p-2" style="max-height:320px;overflow-y:auto;background:#111;border-radius:0 0 8px 8px;" ref="pmLogBox">
+            <div v-for="(line, i) in monitorLog" :key="i" class="d-flex align-items-start gap-2 mb-1" style="font-size:0.75rem;">
+              <i class="bi" :class="monitorLogIcon(line.kind)"></i>
+              <span class="font-monospace" :class="line.isError ? 'text-danger' : 'text-light'" style="white-space:pre-wrap;word-break:break-word;">
+                <strong v-if="line.kind === 'tool_call'">{{ line.tool }}</strong><span v-if="line.kind === 'tool_call' && line.detail"> — {{ line.detail }}</span>
+                <span v-else>{{ line.text || line.detail }}</span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header py-2 fw-semibold"><i class="bi bi-check2-circle me-1 text-success"></i>최근 완료</div>
+          <div v-if="!monitorRecent.length" class="text-center text-muted py-4 small">완료된 작업이 없습니다.</div>
+          <div v-else class="table-responsive">
+            <table class="table table-sm mb-0">
+              <thead><tr><th>상태</th><th>종류</th><th>명령</th><th class="text-end">소요</th><th class="text-end">비용</th></tr></thead>
+              <tbody>
+                <tr v-for="run in monitorRecent" :key="run.id + run.endedAt">
+                  <td><span class="badge" :class="run.status === 'done' ? 'bg-success' : 'bg-danger'">{{ run.status === 'done' ? '완료' : '실패' }}</span></td>
+                  <td><small class="text-muted">{{ run.taskType === 'project_cycle' ? 'AI 자율' : '직접' }}</small></td>
+                  <td><small class="text-muted">{{ run.instruction.slice(0, 60) }}{{ run.instruction.length > 60 ? '…' : '' }}</small></td>
+                  <td class="text-end"><small>{{ formatDuration(run.durationMs) }}</small></td>
+                  <td class="text-end"><small>{{ run.costUsd != null ? '$' + run.costUsd.toFixed(4) : '-' }}</small></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <!-- ============ 기록 탭 ============ -->
       <div v-show="tab === 'journal'">
         <div class="btn-group pd-subseg flex-wrap mb-3" role="group">
@@ -290,7 +365,7 @@
           <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
             <div class="small text-muted">
               <template v-if="timelineCounts">
-                활동 {{ timelineCounts.activity || 0 }} · 대화 {{ timelineCounts.session || 0 }} · 명령 {{ timelineCounts.command || 0 }} · 작업 {{ timelineCounts.task || 0 }}
+                활동 {{ timelineCounts.activity || 0 }} · 대화 {{ timelineCounts.session || 0 }} · 명령 {{ timelineCounts.command || 0 }}
               </template>
             </div>
             <div class="form-check form-switch mb-0">
@@ -344,25 +419,6 @@
             </div>
           </template>
           <p v-else class="text-muted text-center py-4 mb-0">표시할 이력이 없습니다.</p>
-        </div>
-
-        <!-- 작업 -->
-        <div v-show="progressSeg === 'tasks'" class="card p-4">
-          <div v-if="tasks.length" class="pd-list">
-            <div v-for="t in tasks" :key="t.id" class="pd-item pd-item--static">
-              <span class="pd-item-dot" :class="'pd-dot--' + statusMeta(t.status).color"><i :class="'bi ' + statusMeta(t.status).icon"></i></span>
-              <div class="pd-item-body">
-                <div class="pd-item-title">{{ t.title }}</div>
-                <div v-if="t.agent_name" class="pd-item-meta"><i class="bi bi-robot"></i> {{ t.agent_name }}</div>
-              </div>
-              <div class="pd-item-right">
-                <span class="badge" :class="'bg-' + statusMeta(t.status).color">{{ statusMeta(t.status).label }}</span>
-              </div>
-            </div>
-          </div>
-          <div v-else class="text-muted text-center py-4">
-            작업이 없습니다. <a href="#" @click.prevent="selectTab('instruct')">+ 새 작업 지시하기</a>
-          </div>
         </div>
 
         <!-- 명령 -->
@@ -457,7 +513,10 @@
             <div v-for="i in filteredIssues" :key="i.id" class="py-2 border-bottom border-hairline">
               <div class="d-flex justify-content-between align-items-start gap-2">
                 <span class="fw-medium small">{{ i.title }}</span>
-                <span :class="'badge flex-shrink-0 bg-' + issueColor(i)">{{ i.status === 'open' ? i.severity || 'open' : '해결' }}</span>
+                <div class="d-flex align-items-center gap-2 flex-shrink-0">
+                  <span :class="'badge bg-' + issueColor(i)">{{ i.status === 'open' ? i.severity || 'open' : '해결' }}</span>
+                  <small class="text-faint text-nowrap">{{ formatDate(i.created_at) }}</small>
+                </div>
               </div>
               <small v-if="i.description" class="text-muted d-block">{{ i.description }}</small>
               <small v-if="i.related_file" class="text-faint d-block font-monospace">{{ i.related_file }}</small>
@@ -476,7 +535,10 @@
             <div v-for="m in memories" :key="m.id" class="py-2 border-bottom border-hairline">
               <div class="d-flex justify-content-between align-items-start gap-2">
                 <span class="fw-medium small">{{ m.title }}</span>
-                <span v-if="m.memory_type" class="badge bg-light text-dark flex-shrink-0">{{ m.memory_type }}</span>
+                <div class="d-flex align-items-center gap-2 flex-shrink-0">
+                  <span v-if="m.memory_type" class="badge bg-light text-dark">{{ m.memory_type }}</span>
+                  <small class="text-faint text-nowrap">{{ formatDate(m.created_at) }}</small>
+                </div>
               </div>
               <small v-if="m.content" class="text-muted d-block">{{ m.content }}</small>
               <small v-if="m.tags" class="text-faint d-block mt-1">#{{ m.tags }}</small>
@@ -600,6 +662,53 @@
         <div v-else-if="autonomyError" class="alert alert-warning">
           {{ autonomyError }}
           <a href="#" class="ms-2" @click.prevent="loadAutonomy">다시 시도</a>
+        </div>
+
+        <!-- 위험 구역: 프로젝트 삭제/복구 -->
+        <div class="card p-4 mt-3 border-danger-subtle">
+          <h2 class="h6 mb-2 text-danger"><i class="bi bi-exclamation-triangle me-1"></i>위험 구역</h2>
+
+          <template v-if="project.status === 'deleted'">
+            <div class="d-flex justify-content-between align-items-center gap-3 flex-wrap">
+              <div class="small text-muted" style="max-width: 32rem;">
+                이 프로젝트는 삭제 처리되어 목록에서 숨겨져 있습니다. 복구하면 다시 목록에 표시됩니다.
+              </div>
+              <button type="button" class="btn btn-outline-secondary flex-shrink-0"
+                      :disabled="statusSaving" @click="restoreProject">
+                <i class="bi bi-arrow-counterclockwise me-1"></i>복구
+              </button>
+            </div>
+          </template>
+          <template v-else>
+            <div class="d-flex justify-content-between align-items-center gap-3 flex-wrap" v-if="!deleteConfirmOpen">
+              <div class="small text-muted" style="max-width: 32rem;">
+                프로젝트를 삭제 처리합니다. 실제 폴더나 이력(decisions/issues/memories)은 지워지지 않고 목록에서만 숨겨지며, 언제든 복구할 수 있습니다.
+              </div>
+              <button type="button" class="btn btn-outline-danger flex-shrink-0"
+                      :disabled="statusSaving" @click="openDeleteConfirm">
+                <i class="bi bi-trash me-1"></i>프로젝트 삭제
+              </button>
+            </div>
+            <template v-else>
+              <div class="mb-2">
+                <label class="form-label small fw-medium mb-1">
+                  삭제하려면 폴더명 <code>{{ projectFolderName }}</code> 을(를) 정확히 입력하세요
+                </label>
+                <input v-model="deleteConfirmText" ref="deleteConfirmInput" type="text" class="form-control form-control-sm"
+                       style="max-width: 24rem;" :placeholder="projectFolderName" autocomplete="off"
+                       @keyup.enter="deleteProject" @keyup.esc="closeDeleteConfirm">
+              </div>
+              <div class="d-flex gap-2">
+                <button type="button" class="btn btn-outline-secondary" :disabled="statusSaving" @click="closeDeleteConfirm">
+                  취소
+                </button>
+                <button type="button" class="btn btn-danger"
+                        :disabled="statusSaving || deleteConfirmText !== projectFolderName" @click="deleteProject">
+                  <i class="bi bi-trash me-1"></i>최종 삭제
+                </button>
+              </div>
+            </template>
+          </template>
         </div>
       </div>
 
@@ -875,7 +984,6 @@ export default {
       progressSeg: 'timeline',
       progressSegs: [
         { key: 'timeline', label: '통합' },
-        { key: 'tasks', label: '작업' },
         { key: 'commands', label: '명령' },
         { key: 'activities', label: '활동' },
         { key: 'sessions', label: '세션' },
@@ -897,7 +1005,16 @@ export default {
       autonomyConfirm: { open: false, target: false },
       statusSaving: false,
       statusError: '',
-      statusExpanded: false
+      statusExpanded: false,
+      deleteConfirmOpen: false,
+      deleteConfirmText: '',
+      // 모니터링 탭 (이 프로젝트로 스코핑된 실시간 실행 모니터, /api/monitor/stream?project_id=)
+      monitorActive: [],
+      monitorRecent: [],
+      monitorLog: [],
+      monitorSse: null,
+      monitorTick: 0,
+      monitorTimer: null
     }
   },
   computed: {
@@ -906,6 +1023,12 @@ export default {
     isAutonomyActive() {
       if (this.autonomy) return !!this.autonomy.autonomy_enabled
       return !!(this.project && this.project.autonomy_active)
+    },
+    // 삭제 확인용 폴더명 — project.path 의 마지막 세그먼트, 없으면 프로젝트명으로 대체.
+    projectFolderName() {
+      if (!this.project) return ''
+      const segs = (this.project.path || '').split('/').filter(Boolean)
+      return segs.length ? segs[segs.length - 1] : this.project.name
     },
     openIssueCount() { return this.issues.filter(i => i.status === 'open').length },
     journalBadge() {
@@ -958,19 +1081,25 @@ export default {
     // ?tab= 딥링크 지원 (하위 호환: 옛 키는 새 키로 리다이렉트)
     const q = this.$route.query.tab
     const tabAliases = { overview: 'now', status: 'now', assign: 'instruct', progress: 'journal', context: 'journal', autonomy: 'settings' }
-    const validTabs = ['now', 'instruct', 'journal', 'files', 'settings']
+    const validTabs = ['now', 'instruct', 'monitor', 'journal', 'files', 'settings']
     if (q) {
       const resolved = tabAliases[q] || (validTabs.includes(q) ? q : null)
       if (resolved) this.selectTab(resolved)
     }
   },
+  unmounted() {
+    this.disconnectMonitor()
+  },
   methods: {
     selectTab(t) {
+      const prev = this.tab
       this.tab = t
       if (this.$route.query.tab !== t) {
         this.$router.replace({ query: { ...this.$route.query, tab: t } }).catch(() => {})
       }
       this.scrollActiveTabIntoView()
+      if (prev === 'monitor' && t !== 'monitor') this.disconnectMonitor()
+      if (t === 'monitor') { this.connectMonitor(); return }
       if (this.loaded[t]) return
       this.loaded[t] = true
       if (t === 'instruct') this.loadAgents()
@@ -1028,7 +1157,8 @@ export default {
         id: cmd.id,
         title: cmd.title || (cmd.instruction ? String(cmd.instruction).slice(0, 120) : '(작업)'),
         agent_name: cmd.assignee_agent_name || null,
-        status: STATUS_MAP[cmd.status] || 'pending'
+        status: STATUS_MAP[cmd.status] || 'pending',
+        created_at: cmd.created_at || null
       }
     },
     async loadAgents() {
@@ -1194,6 +1324,24 @@ export default {
       }
       if (prev !== this.project.status) this.statusError = ''
     },
+    openDeleteConfirm() {
+      this.deleteConfirmOpen = true
+      this.deleteConfirmText = ''
+      this.$nextTick(() => this.$refs.deleteConfirmInput && this.$refs.deleteConfirmInput.focus())
+    },
+    closeDeleteConfirm() {
+      this.deleteConfirmOpen = false
+      this.deleteConfirmText = ''
+    },
+    async deleteProject() {
+      if (!this.project || this.deleteConfirmText !== this.projectFolderName) return
+      await this.changeStatus('deleted')
+      this.closeDeleteConfirm()
+      if (this.project.status === 'deleted') this.$router.push('/projects')
+    },
+    async restoreProject() {
+      await this.changeStatus('pending')
+    },
     async saveAutonomy(wantEnable) {
       this.autonomySaving = true
       this.autonomyError = ''
@@ -1316,15 +1464,6 @@ export default {
       this.viewFile.content = data.content
     },
     closeFile() { this.viewFile = null; this.fileError = '' },
-    statusMeta(s) {
-      const m = {
-        completed: { color: 'success', icon: 'bi-check-circle-fill', label: '완료' },
-        in_progress: { color: 'primary', icon: 'bi-arrow-repeat', label: '진행 중' },
-        pending: { color: 'secondary', icon: 'bi-circle', label: '대기' },
-        failed: { color: 'danger', icon: 'bi-x-circle-fill', label: '실패' }
-      }
-      return m[s] || { color: 'secondary', icon: 'bi-circle', label: s || '미정' }
-    },
     issueColor(i) {
       if (i.status !== 'open') return 'success'
       return { critical: 'danger', high: 'danger', medium: 'warning', low: 'secondary' }[i.severity] || 'warning'
@@ -1384,8 +1523,8 @@ export default {
       return { queued: '대기', approved: '승인됨', claimed: '점유', running: '실행중',
         done: '완료', failed: '실패', rejected: '거부', expired: '만료' }[s] || s
     },
-    statusColor(s) { return { pending: 'secondary', active: 'primary', completed: 'success', on_hold: 'warning' }[s] || 'secondary' },
-    statusLabel(s) { return { pending: '대기', active: '진행', completed: '완료', on_hold: '보류' }[s] || s },
+    statusColor(s) { return { pending: 'secondary', active: 'primary', completed: 'success', on_hold: 'warning', deleted: 'danger' }[s] || 'secondary' },
+    statusLabel(s) { return { pending: '대기', active: '진행', completed: '완료', on_hold: '보류', deleted: '삭제됨' }[s] || s },
     // 가동 상태(서버 파생 activity_status) — "지금 실제로 돌고 있나". 라이프사이클과 직교.
     activityLabel() { return { running: '가동 중', idle: '대기', stalled: '점검필요', off: '정지' }[this.project.activity_status] || '정지' },
     activityBadge() { return { running: 'bg-success', idle: 'bg-primary', stalled: 'bg-warning', off: 'bg-secondary' }[this.project.activity_status] || 'bg-secondary' },
@@ -1397,6 +1536,75 @@ export default {
     formatDateTime(iso) {
       if (!iso) return ''
       return new Date(iso).toLocaleString('ko-KR', { year: '2-digit', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    },
+    // 모니터링 탭 — /api/monitor/stream?project_id= 로 이 프로젝트만 스코핑해 구독.
+    connectMonitor() {
+      if (this.monitorSse) return
+      const token = localStorage.getItem('token')
+      const qs = new URLSearchParams({ project_id: this.$route.params.id })
+      if (token) qs.set('token', token)
+      const es = new EventSource(`/api/monitor/stream?${qs.toString()}`)
+      es.onmessage = (e) => {
+        let data
+        try { data = JSON.parse(e.data) } catch { return }
+        if (data.type === 'init') {
+          this.monitorActive = data.active || []
+          this.monitorRecent = data.recent || []
+          // 탭을 늦게 열었을 때 이미 쌓인 진행 로그를 재주입(backlog replay).
+          for (const run of (data.active || [])) {
+            for (const item of (run.events || [])) {
+              this.pushMonitorLog({ ...item }, false)
+            }
+          }
+        } else if (data.type === 'start') {
+          this.monitorActive = [...this.monitorActive.filter(r => r.id !== data.run.id), data.run]
+        } else if (data.type === 'end') {
+          this.monitorActive = this.monitorActive.filter(r => r.id !== data.run.id)
+          this.monitorRecent = [data.run, ...this.monitorRecent].slice(0, 20)
+        } else if (data.type === 'progress') {
+          this.pushMonitorLog({ ...data.item }, data.replace)
+        } else if (data.type === 'chunk') {
+          this.pushMonitorLog({ kind: 'stderr', text: data.text, ts: Date.now() }, false)
+        }
+      }
+      this.monitorSse = es
+      if (!this.monitorTimer) this.monitorTimer = setInterval(() => { this.monitorTick++ }, 1000)
+    },
+    disconnectMonitor() {
+      if (this.monitorSse) { this.monitorSse.close(); this.monitorSse = null }
+      if (this.monitorTimer) { clearInterval(this.monitorTimer); this.monitorTimer = null }
+    },
+    pushMonitorLog(entry, replace) {
+      if (replace && this.monitorLog.length) {
+        this.monitorLog.splice(this.monitorLog.length - 1, 1, entry)
+      } else {
+        this.monitorLog = [...this.monitorLog, entry].slice(-150)
+      }
+      this.$nextTick(() => {
+        const box = this.$refs.pmLogBox
+        if (box) box.scrollTop = box.scrollHeight
+      })
+    },
+    monitorLogIcon(kind) {
+      if (kind === 'tool_call') return 'bi-lightning-charge text-warning'
+      if (kind === 'tool_result') return 'bi-arrow-return-right text-info'
+      if (kind === 'stderr') return 'bi-terminal text-muted'
+      return 'bi-chat-left-text text-light'
+    },
+    formatElapsed(startedAt) {
+      void this.monitorTick // 1초마다 재렌더 트리거
+      const s = Math.floor((Date.now() - startedAt) / 1000)
+      const m = Math.floor(s / 60)
+      const h = Math.floor(m / 60)
+      if (h > 0) return `${h}:${String(m % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+      return `${m}:${String(s % 60).padStart(2, '0')}`
+    },
+    formatDuration(ms) {
+      if (!ms) return '-'
+      const s = Math.round(ms / 1000)
+      if (s < 60) return `${s}s`
+      const m = Math.floor(s / 60)
+      return `${m}m ${s % 60}s`
     }
   }
 }

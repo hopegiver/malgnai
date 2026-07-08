@@ -331,7 +331,7 @@ export default class ClaudeDao {
     ).bind(...binds).all()).results
   }
 
-  // 에이전트 type별 집계 (범인 색출: 어느 에이전트가 턴/토큰/비용을 먹나)
+  // 에이전트 type별 집계 (도둑 색출: 어느 에이전트가 턴/토큰/비용을 먹나)
   async getAgentUsage({ since = null, limit = 50 } = {}) {
     // since 는 세션 시작시각 기준 조인 필터
     const join = since

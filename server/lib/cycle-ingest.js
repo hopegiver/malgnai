@@ -189,8 +189,12 @@ export function ingestCycleResultTx(tx, command, cycleJson) {
   // ── 2.5) 워커의 라이프사이클 선언(선택) — 자율 워커는 MCP 를 못 부르므로(프롬프트 §0),
   //   완료/보류 등 라이프사이클 전이는 이 JSON 필드로 서버에 위임한다. MCP project_status_set 와
   //   동일 계약(lib/project-status.js)을 공유해 두 경로의 전이 규약이 갈라지지 않는다.
-  //   무변경/무효값은 조용히 skip(감사로그 오염 방지). ──
-  const declaredStatus = cycleJson ? normalizeProjectStatus(cycleJson.project_status) : null
+  //   무변경/무효값은 조용히 skip(감사로그 오염 방지).
+  //   단 'deleted'는 이 수동적 채널에서 제외한다 — 삭제는 사람(웹 버튼)이나 명시적 MCP
+  //   project_status_set 호출처럼 확실한 의도 표현이 필요한 행위지, 정기 사이클 자기선언으로
+  //   조용히 일어나면 안 된다(프롬프트도 completed/on_hold/active/pending 만 안내한다). ──
+  const declaredStatusRaw = cycleJson ? normalizeProjectStatus(cycleJson.project_status) : null
+  const declaredStatus = declaredStatusRaw === 'deleted' ? null : declaredStatusRaw
   if (declaredStatus) {
     const cur = tx.prepare('SELECT status FROM projects WHERE id=?').bind(projectId).first()
     const prevStatus = cur?.status
