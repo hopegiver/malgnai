@@ -1,0 +1,20 @@
+node_modules/
+.wrangler/
+.dev.vars
+.secret-*
+.DS_Store
+
+# sqlite DB(런타임 데이터)
+data/
+
+# 런타임 로그
+logs/
+
+# E2E (Playwright)
+e2e/.auth/
+e2e/.report/
+test-results/
+playwright-report/
+
+# 문서 창고 (git 추적 제외 — 디스크엔 유지, 이력만 안 쌓음)
+docs/

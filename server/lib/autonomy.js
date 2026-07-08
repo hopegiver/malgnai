@@ -1,0 +1,187 @@
+/**
+ * autonomy.js — 단순 코어(docs/design/simple-core.md) 최소안전 3종의 집행 단일 지점.
+ *
+ *   1) 마스터 킬스위치(autonomy_enabled) · 2) 프로젝트별 on/off · 3) 일일 비용 상한.
+ *
+ * P3(2026-07-03): 다층 예산게이트(task-count 일일/사이클 한도)는 미사용 죽은 코드였고
+ *   설계상 최소안전 3종에도 없어 제거했다. 남은 budget 값은 daily_cost_limit_usd(이 게이트) 와
+ *   max_turns_per_task(poll-commands.js 의 claude --max-turns 집행, 별개 관심사) 뿐이다.
+ *
+ * 핵심 불변식(R0 유지):
+ *   - autonomy_enabled OFF(기본) → verdict 가 auto 여도 **승인대기로 강등**(child command 생성 X = dry-run).
+ *   - 오늘 누적 비용 ≥ daily_cost_limit_usd → 자율 배정 차단(강등).
+ *
+ * 전부 **동기**다(better-sqlite3 트랜잭션 안에서 호출 — adapter.transaction(fn) 의 tx 파사드 사용).
+ */
+
+// agents.budget_json 미설정 시 fallback.
+export const DEFAULT_BUDGET = {
+  daily_cost_limit_usd: 5,
+  max_turns_per_task: 8,
+}
+
+const AUTONOMY_KEY = 'autonomy_enabled'
+
+/**
+ * getAppSetting — app_settings 단건 읽기(동기). 없으면 fallback.
+ * 테이블이 아직 없을 수도 있으니(부팅 순서) 방어적으로 try.
+ */
+export function getAppSetting(tx, key, fallback = null) {
+  try {
+    const row = tx.prepare('SELECT value FROM app_settings WHERE key = ?').bind(key).first()
+    return row ? row.value : fallback
+  } catch {
+    return fallback
+  }
+}
+
+/**
+ * isAutonomyEnabled — 마스터 자율 스위치(=kill-switch). 기본 OFF.
+ * '1'/'true'/'on' 만 ON 으로 본다(그 외/미설정/오류는 전부 OFF = fail-safe).
+ */
+export function isAutonomyEnabled(tx) {
+  const v = getAppSetting(tx, AUTONOMY_KEY, '0')
+  return v === '1' || v === 'true' || v === 'on'
+}
+
+/** 문자열 truthy 판정 헬퍼('1'/'true'/'on'만 true, 그 외/null/undefined 는 false). */
+export function isTruthyFlag(v) {
+  return v === '1' || v === 'true' || v === 'on' || v === 1 || v === true
+}
+
+/**
+ * isProjectAutonomyEnabled — **프로젝트별 자율 스위치**(게이트 2단화의 2단).
+ *
+ * 결정 a77ecedd: 게이트 = 전역 마스터 AND 프로젝트별 스위치. 이 함수가 후자를 평가한다.
+ * 프로젝트가 자율 대상이 되려면 아래를 모두 만족(하나라도 아니면 fail-safe OFF):
+ *   1) autonomy_enabled = '1'  (명시적 ON — 기본 '0')
+ *   2) cadence != 'off'        ('off' 는 정지로 취급)
+ *   3) lead_agent_name 존재     (관찰 LEAD 가 배정돼 있어야 자율 사이클을 만들 수 있음)
+ *
+ * ⚠️ fail-safe: 프로젝트 행이 없거나, 컬럼이 없거나(마이그레이션 전), 값이 불명확하면 **OFF**.
+ *   (프로젝트 설정 불명확 → 승인대기, 절대 auto 로 넓히지 않는다.)
+ *
+ * @param {object} tx       동기 DB 파사드.
+ * @param {string} projectId  대상 프로젝트(업무) id.
+ * @returns {boolean}
+ */
+export function isProjectAutonomyEnabled(tx, projectId) {
+  if (!projectId) return false
+  try {
+    const row = tx.prepare(
+      'SELECT autonomy_enabled, cadence, lead_agent_name FROM projects WHERE id = ?'
+    ).bind(projectId).first()
+    if (!row) return false
+    if (!isTruthyFlag(row.autonomy_enabled)) return false
+    if (row.cadence && String(row.cadence).toLowerCase() === 'off') return false
+    if (!row.lead_agent_name) return false
+    return true
+  } catch {
+    return false // 컬럼 없음(마이그레이션 전) 등 → fail-safe OFF.
+  }
+}
+
+/** budget_json(string|object|null) → 기본값 병합 객체. */
+export function parseBudget(json) {
+  if (!json) return { ...DEFAULT_BUDGET }
+  try {
+    const b = typeof json === 'string' ? JSON.parse(json) : json
+    return { ...DEFAULT_BUDGET, ...b }
+  } catch {
+    return { ...DEFAULT_BUDGET }
+  }
+}
+
+/** agents.budget_json 읽어 병합된 budget 반환(동기). */
+export function getAgentBudget(tx, agentName) {
+  let raw = null
+  try {
+    const row = tx.prepare('SELECT budget_json FROM agents WHERE name = ?').bind(agentName).first()
+    raw = row?.budget_json || null
+  } catch { /* ignore */ }
+  return parseBudget(raw)
+}
+
+/**
+ * todayCostUsd — 오늘(로컬 일자 기준) 해당 **프로젝트**가 만든 command 들의 cost_usd 합계.
+ * M-1: 비용은 실행 후 확정되므로, 디스패치 직전(ingest 박동)에서 "지금까지 누적"으로 체크한다.
+ *
+ * 실행 인프라 재설계(execution-infra-redesign.md §1.4, v3 최종): 구 구현은 commands.task_id →
+ *   tasks(owner_agent_name) JOIN 으로 "이 LEAD 가 만든 command 트리"를 집계했으나, 이 JOIN 은
+ *   오직 상시 lead task(leadtask-cycle-<pid>) 앵커 때문에 존재했다. 완전 통합(tasks/commands 병합,
+ *   kind 판별자 미채택)으로 그 앵커를 없앤 뒤에는 **project_id 로 직접 집계**하는 것이 더 정확하다
+ *   (현재 프로젝트당 lead_agent_name 은 정확히 1개라 실질적으로 동일 집합이지만, project_id 스코프는
+ *   사람이 다른 agent 에게 수동 배정한 command 도 누락 없이 잡는다는 점에서 오히려 버그 수정에 가깝다).
+ *
+ * @param {object} tx
+ * @param {string} projectId  대상 업무 프로젝트 id.
+ * @returns {number} 오늘 누적 비용(USD).
+ */
+export function todayCostUsd(tx, projectId) {
+  try {
+    const row = tx.prepare(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS total
+         FROM commands
+        WHERE project_id = ?
+          AND date(created_at,'localtime') = date('now','localtime')`
+    ).bind(projectId).first()
+    return Number(row?.total) || 0
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * createBudgetGate — 한 박동의 최소안전 3종 게이트를 1회 구성한다(단일 지점).
+ *
+ * ingest 트랜잭션 진입 시 한 번 호출 → 반환된 gate 로 평가한다.
+ * - gate.autonomy        : 마스터 킬스위치 ON 여부.
+ * - gate.projectAutonomy : 프로젝트별 on/off.
+ * - gate.costExceeded    : 오늘 누적 비용 ≥ 일일 상한.
+ * - gate.canAutoDispatch : 셋 다 통과해야 auto verdict 를 실제 배정으로 푼다.
+ *
+ * 실행 인프라 재설계(§1.4, v3 최종): owner agent 인자를 없애고 projectId 단일 스코프로 단순화했다
+ *   (todayCostUsd 와 동일 근거). agent budget(daily_cost_limit_usd/max_turns_per_task)은 여전히
+ *   그 프로젝트의 lead_agent_name 으로 조회한다 — 프로젝트가 없거나 lead_agent_name 미지정이면
+ *   DEFAULT_BUDGET 으로 안전 폴백(getAgentBudget(tx, null) → parseBudget(null)).
+ *
+ * @param {object} tx
+ * @param {string} projectId  대상 업무 프로젝트 id.
+ * @returns {object} gate
+ */
+export function createBudgetGate(tx, projectId) {
+  let leadAgentName = null
+  try {
+    const proj = tx.prepare('SELECT lead_agent_name FROM projects WHERE id = ?').bind(projectId).first()
+    leadAgentName = proj?.lead_agent_name || null
+  } catch { /* 조회 실패는 fallback(getAgentBudget 이 null 처리) */ }
+
+  const budget = getAgentBudget(tx, leadAgentName)
+  const autonomy = isAutonomyEnabled(tx)
+  const projectAutonomy = projectId ? isProjectAutonomyEnabled(tx, projectId) : true
+  const costToday = todayCostUsd(tx, projectId)
+  const costLimit = Number(budget.daily_cost_limit_usd)
+  const costExceeded = Number.isFinite(costLimit) && costLimit > 0 && costToday >= costLimit
+
+  return {
+    budget,
+    autonomy,
+    projectAutonomy,
+    costToday,
+    costLimit,
+    costExceeded,
+    // auto verdict 를 실제 child command 배정으로 풀 수 있는 조건: 전역 마스터 ON && 프로젝트별 ON && 비용 미초과.
+    canAutoDispatch: autonomy && projectAutonomy && !costExceeded,
+
+    /**
+     * autoBlockReason — auto verdict 를 강등시키는 사유(없으면 null).
+     * 마스터 OFF / 프로젝트 OFF / cost 초과 시 사유 문자열(우선순위: 마스터 > 프로젝트 > 비용).
+     */
+    autoBlockReason() {
+      if (!autonomy) return 'autonomy_off'                 // 전역 마스터 OFF(kill-switch) — 최우선.
+      if (!projectAutonomy) return 'project_autonomy_off'  // 프로젝트별 스위치 OFF(게이트 2단화).
+      if (costExceeded) return `cost cap ${costLimit} 도달(오늘 누적 ${costToday.toFixed(4)})`
+      return null
+    },
+  }
+}

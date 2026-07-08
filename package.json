@@ -1,0 +1,36 @@
+{
+  "name": "malgnai-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --watch server/node.js",
+    "dev": "node --watch server/node.js",
+    "scan": "node bin/scan.js",
+    "sync-agents": "node bin/sync-agents.js",
+    "sync-projects": "node bin/sync-projects.js",
+    "sync-claude": "node bin/sync-claude.js",
+    "token-report": "node bin/token-report.js",
+    "db:migrate": "node bin/db-migrate.js",
+    "migrate": "node bin/migrate.js",
+    "check-docs": "node \"$HOME/.claude/hooks/doc-drift.mjs\"",
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:api": "vitest run test/routes/"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "jose": "^6.2.3",
+    "vitest": "^4.1.9"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.6",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "better-sqlite3": "^12.11.1",
+    "hono": "^4.12.27",
+    "otplib": "^13.4.1",
+    "qrcode": "^1.5.4",
+    "uuid": "^11.1.0",
+    "zod": "^3.25.0"
+  }
+}
