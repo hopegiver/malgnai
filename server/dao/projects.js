@@ -2,12 +2,17 @@
 // 호출부(웹/MCP/sync)가 안 넘기면 건드리지 않으므로 기존 시그니처 100% 하위호환.
 // P0(재설계): 소유권(owner_user_id=username, 블로커 B1 교정) + 1분 틱 due 컬럼(next_run_at/last_run_at)을
 //   확장 컬럼 화이트리스트에 추가 → create/update 가 명시로 넘겨야만 SET/INSERT(미지정 시 기존값·기본값 보존).
+import { PROJECT_CHILD_TABLES } from '../lib/project-child-tables.js'
+
 const PROJECT_EXT_COLS = ['kind', 'lead_agent_name', 'goal', 'kpi_json', 'custom_instruction', 'autonomy_level', 'cadence', 'autonomy_enabled', 'owner_user_id', 'next_run_at', 'last_run_at', 'risk_approval_threshold', 'kpi_complete_action']
 
 export default class ProjectsDao {
   constructor(db) { this.db = db }
 
-  async findAll(status, limit = 50, offset = 0, kind) {
+  // user(선택) — 지정되면 owner_user_id=user 이거나 project_collaborators에 공유받은 프로젝트만
+  //   SQL WHERE 레벨에서 필터한다(대량 데이터에서도 페이지네이션이 깨지지 않도록 애플리케이션
+  //   레벨 필터링을 쓰지 않는다). 미지정 시(대시보드 등 기존 호출부) 기존 동작 그대로 전체 조회.
+  async findAll(status, limit = 50, offset = 0, kind, user) {
     // 선택적 필터(status, kind) 를 동적 WHERE 로 조립.
     // status 를 명시하지 않으면 소프트delete(status='deleted')는 기본적으로 숨긴다 — 목록/집계 등
     // "지금 살아있는 프로젝트"를 기대하는 호출부가 죽은 프로젝트로 오염되지 않게. status='deleted'를
@@ -17,6 +22,10 @@ export default class ProjectsDao {
     if (status) { where.push('status = ?'); args.push(status) }
     else { where.push("status != 'deleted'") }
     if (kind) { where.push('kind = ?'); args.push(kind) }
+    if (user) {
+      where.push('(owner_user_id = ? OR id IN (SELECT project_id FROM project_collaborators WHERE user = ?))')
+      args.push(user, user)
+    }
     const clause = where.length ? `WHERE ${where.join(' AND ')}` : ''
     args.push(limit, offset)
     return (await this.db.prepare(
@@ -77,8 +86,41 @@ export default class ProjectsDao {
     return await this.findById(id)
   }
 
+  /**
+   * delete — 프로젝트와 그 자식 레코드를 하나의 트랜잭션으로 함께 지운다.
+   *
+   * 배경(2026-07-14 사고, 대표 항의): 이 메서드는 원래 `DELETE FROM projects`만 실행했다.
+   * FK가 전부 제거된 뒤라 DB 엔진 CASCADE가 없는데도, 호출부(테스트 afterAll 주석 등)는
+   * "FK ON DELETE CASCADE라 자식도 같이 지워진다"고 잘못 가정해왔다 — 실측 결과 프로젝트가
+   * 정상 삭제된 뒤에도 commands 등 자식 행이 project_id만 남긴 채 영구 고아로 쌓였다(46개 삭제된
+   * 프로젝트에 걸쳐 81개 고아 commands 확인). 여기서 명시적으로 자식을 함께 지워 그 가정을
+   * 실제로 충족시킨다. 자식 테이블 목록은 server/lib/project-child-tables.js 단일 소스(다른
+   * 곳에도 각자 하드코딩돼 있으면 스키마 변경 시 한 곳만 갱신되고 나머지가 다시 재발하므로 통합).
+   *
+   * 안전장치: commands 중 하나라도 status가 'claimed'|'running'(진행 중인 실제 워커 실행)이면
+   * 삭제를 거부한다 — 실행 중인 커맨드 레코드를 지우면 워커가 완료 후 결과를 쓰려 할 때
+   * (PATCH /:id) 대상이 사라져 조용히 실패한다. 호출부(라우트)가 이 예외를 409로 변환한다.
+   *
+   * TOCTOU: 이 체크와 실제 삭제 사이에 다른 프로세스가 command 를 claim 하면(체크 통과 직후
+   * approved→claimed 전이) 체크가 무의미해진다. 그래서 체크와 삭제를 같은 'immediate' 트랜잭션
+   * 안에 둔다 — BEGIN IMMEDIATE 가 트랜잭션 시작과 동시에 쓰기락을 선점해, 체크가 끝난 뒤부터
+   * COMMIT 까지 다른 쓰기 트랜잭션(예: claim())이 끼어들 수 없다.
+   */
   async delete(id) {
-    const result = await this.db.prepare('DELETE FROM projects WHERE id = ?').bind(id).run()
+    const result = this.db.transaction((tx) => {
+      const active = tx.prepare(
+        `SELECT count(*) AS n FROM commands WHERE project_id = ? AND status IN ('claimed', 'running')`
+      ).bind(id).first()
+      if (active && active.n > 0) {
+        const err = new Error('project has an active command in progress')
+        err.code = 'ACTIVE_COMMAND'
+        throw err
+      }
+      for (const table of PROJECT_CHILD_TABLES) {
+        tx.prepare(`DELETE FROM ${table} WHERE project_id = ?`).bind(id).run()
+      }
+      return tx.prepare('DELETE FROM projects WHERE id = ?').bind(id).run()
+    }, 'immediate')
     return result.meta.changes > 0
   }
 
@@ -125,8 +167,18 @@ export default class ProjectsDao {
     }
   }
 
-  async countByStatus() {
-    const rows = (await this.db.prepare('SELECT status, COUNT(*) as cnt FROM projects GROUP BY status').all()).results
+  // user(선택) — findAll과 동일하게 소유자/협업자 스코프로 제한(대시보드 집계용, 2026-07-14).
+  async countByStatus(user) {
+    const where = []
+    const args = []
+    if (user) {
+      where.push('(owner_user_id = ? OR id IN (SELECT project_id FROM project_collaborators WHERE user = ?))')
+      args.push(user, user)
+    }
+    const clause = where.length ? `WHERE ${where.join(' AND ')}` : ''
+    const rows = (await this.db.prepare(
+      `SELECT status, COUNT(*) as cnt FROM projects ${clause} GROUP BY status`
+    ).bind(...args).all()).results
     const counts = { pending: 0, active: 0, completed: 0, on_hold: 0, deleted: 0 }
     for (const r of rows) counts[r.status] = r.cnt
     return counts

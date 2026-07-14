@@ -5,15 +5,17 @@ import { homedir } from 'node:os'
 import ProjectsDao from '../dao/projects.js'
 import ClaudeDao from '../dao/claude.js'
 import { AUTONOMOUS_KINDS } from '../dao/init.js'
-import { notFound, badRequest } from '../utils/response.js'
+import { notFound, badRequest, conflict } from '../utils/response.js'
 import { apiKeyMiddleware, authMiddleware } from '../middleware/auth.js'
 import { derivedProjectKey } from '../utils/project-key.js'
 import { taskTypeToCategory, commandStatusToResult } from '../lib/activity-normalize.js'
 import { logActivity } from '../lib/activity-log.js'
-import { cadenceInterval, CADENCE_VALUES } from '../lib/cadence.js'
+import { cadenceInterval, nextRunAtIso, CADENCE_VALUES } from '../lib/cadence.js'
 import { RISK_APPROVAL_THRESHOLD_VALUES, KPI_COMPLETE_ACTION_VALUES } from '../lib/autonomy.js'
 import { PROJECT_STATUS_VALUES, normalizeProjectStatus, PROJECT_STATUS_CHANGE_ACTION, projectStatusChangeDetail } from '../lib/project-status.js'
 import { scaffoldProject, validateProjectName } from '../lib/scaffold-project.js'
+import { getMonitorableProject, getProjectRole, roleAtLeast } from '../lib/project-access.js'
+import { isSuperAdmin } from '../lib/roles.js'
 
 const router = new Hono()
 
@@ -128,14 +130,18 @@ function parseLinks(json) {
   try { const v = JSON.parse(json); return Array.isArray(v) ? v : [] } catch { return [] }
 }
 
-// [H-001] GET 조회는 무인증 유지(앱에 로그인 흐름 부재). 브라우저 교차 출처 읽기는
-//   index.js 의 CORS origin 화이트리스트로 차단한다. poll 워커는 claim 응답의
-//   project_path 를 쓰므로 이 라우트에 의존하지 않는다. 전체 인증은 로그인 흐름 도입 시 후속.
-router.get('/', async (c) => {
+// [H-001] (갱신 2026-07-14) 이 주석은 stale이었다 — 로그인 흐름이 이제 있으므로 authMiddleware를
+//   붙인다. 사용자별 프로젝트 격리(owner_user_id/project_collaborators)가 API 레벨 요구사항이 되어
+//   무인증 전체조회는 더 이상 허용되지 않는다. role(admin/user) 무관하게 소유권 기준으로만 필터한다.
+//   ⚠️ (2026-07-14 3단계 role 확장) 유일한 예외 — role='super_admin'은 모니터링 목적으로 소유권
+//   무관하게 전체 프로젝트를 본다(findAll에 user를 넘기지 않으면 필터를 건너뜀, 읽기 전용).
+router.get('/', authMiddleware, async (c) => {
   const dao = new ProjectsDao(c.env.DB)
   const status = c.req.query('status')
   const kind = c.req.query('kind') // 'dev' | '업무' | undefined(전체). Phase 3 업무 대시보드 구분용.
-  const projects = await dao.findAll(status, 50, 0, kind)
+  const me = c.get('user')
+  const user = isSuperAdmin(me?.role) ? undefined : me?.sub
+  const projects = await dao.findAll(status, 50, 0, kind, user)
   // 목록에서도 자율운행 여부/가동상태를 바로 보여주기 위해 파생 판정을 함께 실어 보낸다(단일소스 withDerived).
   return c.json({ projects: projects.map(withDerived) })
 })
@@ -146,15 +152,25 @@ router.get('/', async (c) => {
 //   due 후보 집합과 동일 기준으로 나열한다 — kind ∈ AUTONOMOUS_KINDS 이고 프로젝트 자율 스위치가 켜진 것.
 //   (특정 kind 하나만 보던 옛 'internal_ops' 고정 필터는 제거. dev 등 다수 kind 도 자율 ON 이면 잡힌다.)
 //   자율 OFF 프로젝트는 여기 안 뜨고, 자율 설정은 프로젝트 상세에서 켠다. next_run/cadence 세부는 카드가 표기.
-router.get('/workspaces', async (c) => {
+router.get('/workspaces', authMiddleware, async (c) => {
   const db = c.env.DB
+  const me = c.get('user')
+  const user = me?.sub
+  const superAdmin = isSuperAdmin(me?.role)
   const kindPlaceholders = AUTONOMOUS_KINDS.map(() => '?').join(',')
+  // owner/collaborator 스코핑 — 현재 사용자의 소유 또는 공유받은 프로젝트만. 협업자 조회를
+  // 프로젝트별로(N+1) 하지 않고 이 WHERE 서브쿼리 하나로 SQL 레벨에서 처리한다.
+  // ⚠️ super_admin은 모니터링 목적으로 이 조건을 건너뛰고 전체를 본다(읽기 전용).
+  const ownerClause = superAdmin
+    ? ''
+    : ' AND (owner_user_id = ? OR id IN (SELECT project_id FROM project_collaborators WHERE user = ?))'
+  const bindArgs = superAdmin ? [...AUTONOMOUS_KINDS] : [...AUTONOMOUS_KINDS, user, user]
   const projects = (await db.prepare(
     `SELECT * FROM projects
        WHERE kind IN (${kindPlaceholders})
-         AND (autonomy_enabled='1' OR autonomy_enabled='true' OR autonomy_enabled='on')
+         AND (autonomy_enabled='1' OR autonomy_enabled='true' OR autonomy_enabled='on')${ownerClause}
        ORDER BY updated_at DESC LIMIT 100`
-  ).bind(...AUTONOMOUS_KINDS).all()).results
+  ).bind(...bindArgs).all()).results
 
   // 자율 마스터 스위치(업무 카드의 "자율상태" 배지에 반영).
   const autoRow = await db.prepare("SELECT value FROM app_settings WHERE key = 'autonomy_enabled'").first()
@@ -194,17 +210,17 @@ router.get('/workspaces', async (c) => {
   return c.json({ workspaces: enriched, autonomy_enabled: autonomyEnabled })
 })
 
-router.get('/:id', async (c) => {
+router.get('/:id', authMiddleware, async (c) => {
   const dao = new ProjectsDao(c.env.DB)
-  const project = await dao.findById(c.req.param('id'))
+  const project = await getMonitorableProject(c.env.DB, dao, c.req.param('id'), c.get('user')?.sub, c.get('user')?.role)
   if (!project) return notFound(c, 'Project not found')
   return c.json({ project: withDerived(project) })
 })
 
 // 프로젝트의 Claude Code 작업 이력(세션) 목록
-router.get('/:id/sessions', async (c) => {
+router.get('/:id/sessions', authMiddleware, async (c) => {
   const projectsDao = new ProjectsDao(c.env.DB)
-  const project = await projectsDao.findById(c.req.param('id'))
+  const project = await getMonitorableProject(c.env.DB, projectsDao, c.req.param('id'), c.get('user')?.sub, c.get('user')?.role)
   if (!project) return notFound(c, 'Project not found')
 
   // 폴더명(basename)으로 매칭 — OS/머신 이주로 절대경로 키가 바뀌어도 이력 유지.
@@ -221,10 +237,10 @@ router.get('/:id/sessions', async (c) => {
 
 // 프로젝트 개요 통계 — 작업/이슈/명령/맥락 카운트를 한 번에 집계해 '개요' 탭에 표시.
 // 여러 테이블을 작은 COUNT 쿼리로 모아 단일 응답으로 반환(상세페이지 첫 진입 시 1회 호출).
-router.get('/:id/summary', async (c) => {
+router.get('/:id/summary', authMiddleware, async (c) => {
   const dao = new ProjectsDao(c.env.DB)
   const id = c.req.param('id')
-  const project = await dao.findById(id)
+  const project = await getMonitorableProject(c.env.DB, dao, id, c.get('user')?.sub, c.get('user')?.role)
   if (!project) return notFound(c, 'Project not found')
 
   const db = c.env.DB
@@ -289,10 +305,10 @@ router.get('/:id/summary', async (c) => {
 //   - include_telemetry=1 이면 activity 의 telemetry 도 포함(기본 제외).
 //   - sources: 콤마 구분으로 원천 제한(예: sources=activity,command). 기본 전체.
 //   §10 M1: command 원천은 무조건 요약 title(instruction 앞 120자)·status·result 만 노출(전문 금지).
-router.get('/:id/timeline', async (c) => {
+router.get('/:id/timeline', authMiddleware, async (c) => {
   const dao = new ProjectsDao(c.env.DB)
   const id = c.req.param('id')
-  const project = await dao.findById(id)
+  const project = await getMonitorableProject(c.env.DB, dao, id, c.get('user')?.sub, c.get('user')?.role)
   if (!project) return notFound(c, 'Project not found')
   const db = c.env.DB
 
@@ -413,9 +429,9 @@ router.get('/:id/timeline', async (c) => {
 
 // 프로젝트 폴더 안의 파일/하위폴더 목록(1단계). ?path= 로 하위 폴더 탐색.
 // 로컬 Node 서버라 파일시스템 직접 접근. 경로는 항상 프로젝트 루트 안으로 가둔다.
-router.get('/:id/files', async (c) => {
+router.get('/:id/files', authMiddleware, async (c) => {
   const dao = new ProjectsDao(c.env.DB)
-  const project = await dao.findById(c.req.param('id'))
+  const project = await getMonitorableProject(c.env.DB, dao, c.req.param('id'), c.get('user')?.sub, c.get('user')?.role)
   if (!project) return notFound(c, 'Project not found')
 
   const root = projectRoot(project)
@@ -459,9 +475,9 @@ router.get('/:id/files', async (c) => {
 })
 
 // 프로젝트 폴더 안의 파일 다운로드. zip/pptx/pdf 만 허용.
-router.get('/:id/download', async (c) => {
+router.get('/:id/download', authMiddleware, async (c) => {
   const dao = new ProjectsDao(c.env.DB)
-  const project = await dao.findById(c.req.param('id'))
+  const project = await getMonitorableProject(c.env.DB, dao, c.req.param('id'), c.get('user')?.sub, c.get('user')?.role)
   if (!project) return notFound(c, 'Project not found')
 
   const root = projectRoot(project)
@@ -492,9 +508,9 @@ router.get('/:id/download', async (c) => {
 })
 
 // 프로젝트 폴더 안의 텍스트 파일 내용 읽기(모달 미리보기용). md/txt/코드 등만 허용.
-router.get('/:id/file', async (c) => {
+router.get('/:id/file', authMiddleware, async (c) => {
   const dao = new ProjectsDao(c.env.DB)
-  const project = await dao.findById(c.req.param('id'))
+  const project = await getMonitorableProject(c.env.DB, dao, c.req.param('id'), c.get('user')?.sub, c.get('user')?.role)
   if (!project) return notFound(c, 'Project not found')
 
   const root = projectRoot(project)
@@ -525,7 +541,12 @@ router.get('/:id/file', async (c) => {
 // package.json + git init)를 실제로 생성한다. 한글 등 표시용 이름은 description 에 담는다.
 // ※ 이 규칙은 웹에서 신규 생성하는 경로에만 적용된다 — bin/sync-projects.js 가 기존 폴더를 스캔해
 //   등록하는 `/sync`(upsert) 경로는 이미 존재하는 폴더를 그대로 인식하므로 별도(큐레이션 한글명 보존).
-router.post('/', async (c) => {
+// (2026-07-14 정정) authMiddleware 추가 — 아래 "P0: owner 자동 귀속" 주석은 JWT sub 로 owner 를
+//   채우는 걸 전제하는데, 미들웨어 없이는 c.get('user') 가 항상 undefined라 그 로직이 죽은 코드였다
+//   (신규 프로젝트가 전부 owner_user_id=NULL 로 생성되어, 소유권 기반 필터가 적용된 GET /:id 등에서
+//   생성자 본인에게도 안 보이는 회귀). 실제 호출부(app/pages/projects.vue)는 이미 로그인 흐름을
+//   거쳐 항상 Authorization 헤더를 싣고 있어 이 변경으로 깨지는 정상 경로는 없다.
+router.post('/', authMiddleware, async (c) => {
   const body = await c.req.json()
   if (!body.name) return badRequest(c, 'name is required')
   const nameError = validateProjectName(body.name)
@@ -560,9 +581,24 @@ router.post('/', async (c) => {
   return c.json({ project }, 201)
 })
 
-router.put('/:id', async (c) => {
+// (2026-07-14 Critical H-1 수정) 이 라우트는 authMiddleware도, 소유권 체크도 없었고
+//   ProjectsDao.update()가 body를 PROJECT_EXT_COLS 화이트리스트 그대로 SET하는데 거기 owner_user_id가
+//   포함돼 있어 로그인한 아무 사용자나 PUT /:id body에 {owner_user_id:'자기계정'}을 실어 보내면
+//   프로젝트 소유권을 통째로 탈취할 수 있었다(이번에 추가한 다른 모든 접근제어의 우회로).
+//   authMiddleware + editor 이상 체크(없으면 404, 다른 :id 라우트와 동일 기준)를 추가하고,
+//   owner_user_id는 이 범용 수정 라우트로는 아예 변경 불가하게 화이트리스트에서 제거한다
+//   (소유권 이전은 이번 스코프에 없는 별도 기능 — 지금은 막아둔다).
+router.put('/:id', authMiddleware, async (c) => {
   const dao = new ProjectsDao(c.env.DB)
-  const project = await dao.update(c.req.param('id'), await c.req.json())
+  const id = c.req.param('id')
+  const existing = await dao.findById(id)
+  if (!existing) return notFound(c, 'Project not found')
+  const role = await getProjectRole(c.env.DB, existing, c.get('user')?.sub)
+  if (!roleAtLeast(role, 'editor')) return notFound(c, 'Project not found')
+
+  const body = await c.req.json().catch(() => ({}))
+  delete body.owner_user_id // mass-assignment로 소유권 탈취 차단(H-1) — 소유권 이전은 별도 기능으로 후속.
+  const project = await dao.update(id, body)
   if (!project) return notFound(c, 'Project not found')
   return c.json({ project })
 })
@@ -577,7 +613,7 @@ router.put('/:id', async (c) => {
 //   cadence='off' 도 정지로 취급(게이트/스케줄러가 동일하게 skip).
 router.get('/:id/autonomy', authMiddleware, async (c) => {
   const dao = new ProjectsDao(c.env.DB)
-  const p = await dao.findById(c.req.param('id'))
+  const p = await getMonitorableProject(c.env.DB, dao, c.req.param('id'), c.get('user')?.sub, c.get('user')?.role)
   if (!p) return notFound(c, 'Project not found')
   return c.json({
     autonomy: {
@@ -604,6 +640,10 @@ router.put('/:id/autonomy', authMiddleware, async (c) => {
   const id = c.req.param('id')
   const existing = await dao.findById(id)
   if (!existing) return notFound(c, 'Project not found')
+  // 자율 설정 변경은 소유자 또는 editor 공유자만(viewer는 조회만). 접근권 없음/viewer는
+  // 존재 자체를 숨긴다(404) — 이 파일 다른 라우트와 동일한 정보누출 방지 방침.
+  const role = await getProjectRole(c.env.DB, existing, c.get('user')?.sub)
+  if (!roleAtLeast(role, 'editor')) return notFound(c, 'Project not found')
 
   const body = await c.req.json().catch(() => ({}))
   const fields = {}
@@ -659,6 +699,9 @@ router.put('/:id/autonomy', authMiddleware, async (c) => {
     } else {
       fields.cadence = body.cadence
     }
+    // next_run_at 즉시 재계산(issue 083809e3) — 안 하면 옛 cadence로 계산된 next_run_at이 그대로
+    // 남아, 그 예약 시각이 도달할 때까지(최대 옛 주기 하나만큼) 새 cadence가 반영되지 않는다.
+    fields.next_run_at = nextRunAtIso(fields.cadence, new Date())
   }
 
   // autonomy_level(선택, 자유 라벨 — 게이트엔 미영향, 표시/메타용).
@@ -752,6 +795,8 @@ router.put('/:id/status', authMiddleware, async (c) => {
   }
   const existing = await dao.findById(c.req.param('id'))
   if (!existing) return notFound(c, 'Project not found')
+  const role = await getProjectRole(c.env.DB, existing, c.get('user')?.sub)
+  if (!roleAtLeast(role, 'editor')) return notFound(c, 'Project not found')
   const project = await dao.update(existing.id, { status })
   // 감사로그 — 라이프사이클 전이(누가·무엇에서·무엇으로). 실패해도 본 동작은 막지 않음.
   try {
@@ -791,10 +836,28 @@ router.post('/sync', apiKeyMiddleware, async (c) => {
   return c.json({ projects: results, synced: results.length, deleted: deletedIds })
 })
 
-router.delete('/:id', async (c) => {
+// (2026-07-14 Critical H-2 수정) authMiddleware도 소유권 체크도 없어 로그인한 아무 사용자나
+//   남의 프로젝트를 삭제할 수 있었다. editor 이상만 허용(다른 :id 라우트와 동일 기준).
+//   존재하지 않는 id는 기존 계약(200 {deleted:false}, 테스트에 명시된 멱등 삭제 의미론)을 그대로
+//   유지 — "존재하는데 권한 없음"만 404로 막는다(있는데 남의 것 vs 아예 없음을 구분하는 정보노출은
+//   "삭제 자체가 막힌다"는 훨씬 큰 구멍에 비하면 감수 가능한 트레이드오프).
+router.delete('/:id', authMiddleware, async (c) => {
   const dao = new ProjectsDao(c.env.DB)
-  const deleted = await dao.delete(c.req.param('id'))
-  return c.json({ deleted })
+  const id = c.req.param('id')
+  const existing = await dao.findById(id)
+  if (!existing) return c.json({ deleted: false })
+  const role = await getProjectRole(c.env.DB, existing, c.get('user')?.sub)
+  if (!roleAtLeast(role, 'editor')) return notFound(c, 'Project not found')
+  try {
+    const deleted = await dao.delete(id)
+    return c.json({ deleted })
+  } catch (e) {
+    // dao.delete()의 ACTIVE_COMMAND 가드(2026-07-14) — 진행 중인 워커 실행이 있으면 삭제 거부.
+    if (e.code === 'ACTIVE_COMMAND') {
+      return conflict(c, '진행 중인 명령이 있어 프로젝트를 삭제할 수 없습니다. 완료 후 다시 시도하세요.')
+    }
+    throw e
+  }
 })
 
 export default router

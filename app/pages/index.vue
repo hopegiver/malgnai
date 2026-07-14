@@ -35,6 +35,42 @@
       </div>
     </div>
 
+    <!-- [C2] 내 자율 프로젝트 현황 (전체 사용자 — 본인 소유/공유 프로젝트 기준) -->
+    <div v-if="myAutoProjects.length" class="mb-4">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2 class="h6 mb-0"><i class="bi bi-broadcast me-1"></i>내 자율 프로젝트 현황</h2>
+        <span class="badge bg-success-subtle text-success-emphasis">오늘 비용 ${{ totalCostToday.toFixed(2) }}</span>
+      </div>
+      <div class="row g-2">
+        <div class="col-12 col-md-6 col-xl-4" v-for="p in myAutoProjects" :key="p.id">
+          <div class="card home-auto-card" @click="$router.push('/projects/' + p.id)" style="cursor:pointer">
+            <div class="d-flex justify-content-between align-items-start mb-2">
+              <span class="fw-semibold text-truncate me-2">{{ p.name }}</span>
+              <span v-if="p.pending_approvals > 0" class="badge bg-warning text-dark flex-shrink-0">승인대기 {{ p.pending_approvals }}</span>
+            </div>
+            <div class="d-flex align-items-center gap-2 mb-2">
+              <span class="badge bg-secondary-subtle text-secondary-emphasis">{{ projectStatusLabel(p.status) }}</span>
+              <span v-if="p.last_cycle_status" :class="'badge bg-' + cycleColor(p.last_cycle_status)">{{ cycleLabel(p.last_cycle_status) }}</span>
+            </div>
+            <div class="home-auto-grid">
+              <div>
+                <div class="text-faint" style="font-size:11px">오늘 비용</div>
+                <div class="small">{{ p.cost_today_usd != null ? '$' + p.cost_today_usd.toFixed(2) : '—' }}</div>
+              </div>
+              <div>
+                <div class="text-faint" style="font-size:11px">다음 실행</div>
+                <div class="small">{{ p.next_run_at ? relativeTime(p.next_run_at) : '—' }}</div>
+              </div>
+              <div>
+                <div class="text-faint" style="font-size:11px">마지막 실행</div>
+                <div class="small">{{ p.last_run_at ? relativeTime(p.last_run_at) : '—' }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- [C] 진행중 프로젝트 카드 -->
     <div class="mb-4">
       <div class="d-flex justify-content-between align-items-center mb-3">
@@ -139,69 +175,6 @@
       <div v-else class="text-muted small">아직 기록된 활동이 없습니다.</div>
     </div>
 
-    <!-- [E] AI 비용 + 가동현황 (admin) -->
-    <div v-if="admin" class="row g-3 mb-4">
-      <div class="col-12 col-lg-6">
-        <div class="card pd-stat pd-stat--success p-4 h-100">
-          <div class="pd-stat-top">
-            <span class="pd-stat-icon"><i class="bi bi-cash-stack"></i></span>
-            <span class="pd-stat-label">AI 실비용 (월 정액 구독)</span>
-          </div>
-          <div class="d-flex align-items-end justify-content-between flex-wrap gap-2">
-            <div class="pd-progress-value">${{ (cost.plan_usd || 0).toFixed(0) }}<span class="fs-6 text-muted">/월</span></div>
-            <div class="pd-stat-sub text-end">
-              이번 달 절감효과 <span class="text-success fw-semibold">+${{ (cost.saved_month || 0).toFixed(0) }}</span><br>
-              <span class="text-faint">API 환산 ${{ (cost.api_equiv_month || 0).toFixed(0) }} · {{ formatTokens(cost.total_tokens) }}</span>
-            </div>
-          </div>
-          <div class="dash-costbar mt-3">
-            <span class="dash-cost-opus" :style="{ width: (cost.pct && cost.pct.opus || 0) + '%' }"></span>
-            <span class="dash-cost-sonnet" :style="{ width: (cost.pct && cost.pct.sonnet || 0) + '%' }"></span>
-            <span class="dash-cost-haiku" :style="{ width: (cost.pct && cost.pct.haiku || 0) + '%' }"></span>
-          </div>
-          <div class="dash-cost-legend mt-2">
-            <span class="text-faint w-100 mb-1">모델별 (API 환산)</span>
-            <span><i class="dot dash-cost-opus"></i>Opus ${{ famCost('opus') }}</span>
-            <span><i class="dot dash-cost-sonnet"></i>Sonnet ${{ famCost('sonnet') }}</span>
-            <span><i class="dot dash-cost-haiku"></i>Haiku ${{ famCost('haiku') }}</span>
-          </div>
-        </div>
-      </div>
-      <div class="col-12 col-lg-6">
-        <div class="card p-4 h-100">
-          <h2 class="h6 mb-3"><i class="bi bi-activity me-1"></i>AI 가동현황 <span class="text-faint fw-normal small">최근 7일</span></h2>
-          <div class="row text-center g-0">
-            <div class="col-4">
-              <div class="pd-stat-value" style="font-size:1.5rem">{{ activity.sessions || 0 }}</div>
-              <div class="pd-stat-sub">세션</div>
-            </div>
-            <div class="col-4 border-start border-hairline">
-              <div class="pd-stat-value" style="font-size:1.5rem">{{ formatTokens(activity.messages) }}</div>
-              <div class="pd-stat-sub">메시지</div>
-            </div>
-            <div class="col-4 border-start border-hairline">
-              <div class="pd-stat-value" style="font-size:1.5rem">{{ formatTokens(activity.tools) }}</div>
-              <div class="pd-stat-sub">도구호출</div>
-            </div>
-          </div>
-          <div class="mt-3 pt-3 border-top border-hairline">
-            <h2 class="h6 mb-2">프로젝트별 AI 투입 Top5</h2>
-            <div v-if="aiTop.length">
-              <component v-for="p in aiTop" :key="p.project_key"
-                :is="p.project_id ? 'router-link' : 'div'"
-                :to="p.project_id ? ('/projects/' + p.project_id) : undefined"
-                class="dash-rank-row text-decoration-none">
-                <span class="dash-rank-name">{{ p.project_name || displayKey(p.project_key) }}</span>
-                <span class="dash-rank-track"><span class="dash-rank-fill" :style="{ width: p.pct + '%' }"></span></span>
-                <span class="dash-rank-val">{{ p.session_count }}세션</span>
-              </component>
-            </div>
-            <p v-else class="text-muted small mb-0">세션 데이터가 없습니다.</p>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <!-- 열린 이슈 (admin) -->
     <div v-if="admin && openIssues.length" class="card p-4">
       <div class="d-flex justify-content-between align-items-center mb-2">
@@ -230,13 +203,12 @@ export default {
     return {
       summary: {},
       loading: true,
-      admin: isAdmin(),
+      admin: isSuperAdmin(),
+      myAutoProjects: [],
     }
   },
   computed: {
     inbox() { return this.summary.inbox || {} },
-    cost() { return this.summary.ai_cost || {} },
-    activity() { return this.summary.ai_activity || {} },
     openIssues() { return this.summary.open_issues_top || [] },
     recentActivities() { return this.summary.recent_activities || [] },
     activeProjects() {
@@ -245,10 +217,8 @@ export default {
     autoEnabled() {
       return !!(this.summary.autonomy_enabled)
     },
-    aiTop() {
-      const list = this.summary.project_ai_top || []
-      const max = Math.max(...list.map(p => p.session_count || 0), 1)
-      return list.map(p => ({ ...p, pct: Math.round((p.session_count || 0) / max * 100) }))
+    totalCostToday() {
+      return this.myAutoProjects.reduce((sum, p) => sum + (p.cost_today_usd || 0), 0)
     }
   },
   async mounted() {
@@ -261,12 +231,13 @@ export default {
       const { data: autoData } = await useApi('/api/lead/autonomy')
       if (autoData) this.summary = { ...this.summary, autonomy_enabled: autoData.enabled }
     }
+    // 내 자율 프로젝트 현황(전체 사용자) — 본인 소유/공유 프로젝트 기준(H-3로 이미 스코프됨),
+    // 실패해도 대시보드 전체엔 영향 없음. /workspaces는 cost_today_usd 등 사이클 통계를 안 주므로
+    // 대신 /lead/status(projects[])를 쓴다 — autonomy.vue와 동일 소스, 필드 그대로 재사용 가능.
+    const { data: statusData } = await useApi('/api/lead/status')
+    if (statusData) this.myAutoProjects = statusData.projects || []
   },
   methods: {
-    famCost(fam) {
-      const v = (this.cost.by_family && this.cost.by_family[fam]) || 0
-      return v.toFixed(2)
-    },
     issueColor(i) {
       if (i.status !== 'open') return 'success'
       return { critical: 'danger', high: 'danger', medium: 'warning', low: 'secondary' }[i.severity] || 'warning'
@@ -286,21 +257,35 @@ export default {
       }
       return MAP[a.action] || String(a.action || '활동').replace(/_/g, ' ')
     },
-    displayKey(key) {
-      if (!key) return '—'
-      return key.replace(/^g--workspace-/, '').replace(/-/g, ' ')
-    },
     relativeTime(iso) {
+      // 과거(활동·최근실행)뿐 아니라 미래(다음 실행 예정)도 표현한다.
       if (!iso) return '—'
       const diff = Date.now() - new Date(iso).getTime()
-      const min = Math.floor(diff / 60000)
+      const abs = Math.abs(diff)
+      const future = diff < 0
+      const min = Math.floor(abs / 60000)
       if (min < 1) return '방금'
-      if (min < 60) return `${min}분 전`
+      if (min < 60) return future ? `${min}분 후` : `${min}분 전`
       const h = Math.floor(min / 60)
-      if (h < 24) return `${h}시간 전`
-      return `${Math.floor(h / 24)}일 전`
+      if (h < 24) return future ? `${h}시간 후` : `${h}시간 전`
+      return future ? `${Math.floor(h / 24)}일 후` : `${Math.floor(h / 24)}일 전`
+    },
+    cycleColor(s) {
+      return { done: 'success', failed: 'danger', running: 'info', claimed: 'info', queued: 'secondary', approved: 'primary' }[s] || 'secondary'
+    },
+    cycleLabel(s) {
+      return { done: '완료', failed: '실패', running: '실행 중', claimed: '실행 중', queued: '대기', approved: '승인됨', rejected: '반려', expired: '만료' }[s] || s || '—'
+    },
+    projectStatusLabel(s) {
+      return { planning: '기획', design: '설계', development: '개발', testing: '테스트', active: '진행', paused: '중단', done: '완료', archived: '보관' }[s] || s || '진행'
     },
     formatTokens,
   }
 }
 </script>
+
+<style>
+.home-auto-card { padding: 1rem; transition: box-shadow 0.15s, border-color 0.15s; }
+.home-auto-card:hover { border-color: var(--color-primary); box-shadow: var(--shadow-soft, 0 4px 16px rgba(0,0,0,0.08)); }
+.home-auto-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; }
+</style>

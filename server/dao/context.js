@@ -1,6 +1,8 @@
 // Context Router 데이터(malgnai-mcp 통합 DB) 읽기 전용 DAO.
 // decisions / issues / memories 는 MCP(에이전트)가 기록하고, 웹앱은 조회만 한다.
 // DB 통합(2026-06-24) 이후 같은 SQLite 파일을 공유하므로 직접 SELECT 가능.
+import { projectAccessWhere } from '../lib/project-access.js'
+
 export default class ContextDao {
   constructor(db) { this.db = db }
 
@@ -15,12 +17,19 @@ export default class ContextDao {
     return (await stmt.all()).results
   }
 
-  async issues(projectId, { status, severity, limit = 50 } = {}) {
+  // user(선택, 2026-07-14) — 지정하면 소유자/협업자 프로젝트로 스코핑. project_id 없는 전역
+  //   이슈는 이 스코프에 걸리지 않아 제외된다(홈 대시보드 사용자 필터 누락 버그 수정).
+  async issues(projectId, { status, severity, limit = 50, user } = {}) {
     const where = []
     const args = []
     if (projectId) { where.push('i.project_id = ?'); args.push(projectId) }
     if (status) { where.push('i.status = ?'); args.push(status) }
     if (severity) { where.push('i.severity = ?'); args.push(severity) }
+    if (user) {
+      const scope = projectAccessWhere('p.owner_user_id', 'i.project_id')
+      where.push(scope.sql)
+      args.push(...scope.bind(user))
+    }
     const clause = where.length ? 'WHERE ' + where.join(' AND ') : ''
     // 열린 이슈 우선 → severity 높은 순 → 최신순.
     args.push(limit)

@@ -7,12 +7,13 @@ import r4 from './api/commands.js'
 import r5 from './api/console.js'
 import r6 from './api/context.js'
 import r7 from './api/dashboard.js'
-import r8 from './api/lead.js'
-import r9 from './api/monitor.js'
-import r10 from './api/projects.js'
-import r11 from './api/push.js'
-import r12 from './api/system.js'
-import r13 from './api/users.js'
+import r8 from './api/feature-requests.js'
+import r9 from './api/lead.js'
+import r10 from './api/monitor.js'
+import r11 from './api/projects.js'
+import r12 from './api/push.js'
+import r13 from './api/system.js'
+import r14 from './api/users.js'
 
 export default function register(app) {
   app.route('/api/activities', r0)
@@ -23,10 +24,11 @@ export default function register(app) {
   app.route('/api/console', r5)
   app.route('/api/context', r6)
   app.route('/api/dashboard', r7)
-  app.route('/api/lead', r8)
-  app.route('/api/monitor', r9)
-  app.route('/api/projects', r10)
-  app.route('/api/push', r11)
-  app.route('/api/system', r12)
-  app.route('/api/users', r13)
+  app.route('/api/feature-requests', r8)
+  app.route('/api/lead', r9)
+  app.route('/api/monitor', r10)
+  app.route('/api/projects', r11)
+  app.route('/api/push', r12)
+  app.route('/api/system', r13)
+  app.route('/api/users', r14)
 }

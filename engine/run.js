@@ -10,7 +10,17 @@
  * 이 프로세스는 HTTP 를 전혀 쓰지 않는다(fetch/포트 바인딩 없음) — 웹서버가 죽어 있어도 동작한다
  *   (§1 배경 문제 2 해소). 공유 지점은 오직 같은 sqlite 파일(engine/db.js) 하나다.
  *
- * 틱 순서: (1) isTickEnabled 확인 → false 면 즉시 종료 → (2) runSpawnDue(db) → (3) safetyPollOnce(db).
+ * 틱 순서: (1) isTickEnabled 확인 → false 면 즉시 종료 → (2) runSpawnDue(db) →
+ *   (3) reviewFeatureRequestsOnce(db) → (4) safetyPollOnce(db).
+ *
+ * reviewFeatureRequestsOnce(engine/feature-review.js, 2026-07-14 신설)는 사용자가 웹앱에서 제출한
+ *   "기능 개선 요청"을 완전자동(사람 승인 개입 없음)으로 심사한다. 승인되면 memories(FEEDBACK)에
+ *   적재해 다음 project_cycle(=runSpawnDue가 스폰)이 그대로 반영하게 한다 — 새 실행 파이프라인이
+ *   아니라 기존 project_cycle → 승인함 게이트를 그대로 재사용한다. runSpawnDue 다음·safetyPollOnce
+ *   이전에 두는 이유: 이번 틱에 승인된 요청이 있으면 다음 스폰 시점에 이미 memories에 반영되어
+ *   있어야 project_cycle 프롬프트(engine/spawn.js가 매 스폰마다 FEEDBACK 을 조회)에 최대한 빨리
+ *   실린다(순서를 바꿔도 정확성엔 영향 없음 — 다음 틱에 스폰되면 어차피 반영됨 — 하지만 지연을
+ *   한 틱이라도 줄이는 게 이득이라 이 순서를 택했다).
  *
  * §6 리스크 "fire-and-forget → 프로세스 조기 종료": runSpawnDue 가 스폰 직후 시작하는
  *   dispatchApprovedCommand(...) 는 원래 fire-and-forget 이다(상시 프로세스인 웹앱은 안전하지만,
@@ -27,6 +37,7 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { openEngineDb, ROOT } from './db.js'
 import { isTickEnabled } from './settings.js'
 import { runSpawnDue } from './spawn.js'
+import { reviewFeatureRequestsOnce } from './feature-review.js'
 import { safetyPollOnce } from './safety-poll.js'
 
 const LOG_DIR = join(ROOT, 'logs')
@@ -45,7 +56,7 @@ function logLine(obj) {
  * runEngineTick — 엔진 1틱의 전체 로직(db 를 인자로 받는 순수 async 함수 — 단위 테스트에서
  *   실제 launchd 프로세스 기동 없이 인메모리 db 로 호출 가능).
  * @param {object} db  D1 호환 어댑터(engine/db.js 의 openEngineDb().db 또는 테스트용 인메모리).
- * @returns {Promise<{skipped:boolean, reason?:string, spawnResult?:object, pollResult?:object}>}
+ * @returns {Promise<{skipped:boolean, reason?:string, spawnResult?:object, featureReviewResult?:object, pollResult?:object}>}
  */
 export async function runEngineTick(db) {
   // 가장 먼저 확인 — 캐너리의 핵심 안전장치(§5 Phase 2).
@@ -62,10 +73,14 @@ export async function runEngineTick(db) {
     await Promise.allSettled(pendingDispatches)
   }
 
+  // 기능 개선 요청 완전자동 심사(engine/feature-review.js, 2026-07-14 신설) — 큐 1건만 처리하고
+  //   다음 틱으로 넘긴다(safetyPollOnce와 동일하게 "틱당 1건" 예산으로 폭주를 막는다).
+  const featureReviewResult = await reviewFeatureRequestsOnce(db)
+
   const pollResult = await safetyPollOnce(db)
 
-  logLine({ event: 'tick_done', spawn: spawnResult, poll: pollResult })
-  return { skipped: false, spawnResult, pollResult }
+  logLine({ event: 'tick_done', spawn: spawnResult, featureReview: featureReviewResult, poll: pollResult })
+  return { skipped: false, spawnResult, featureReviewResult, pollResult }
 }
 
 async function main() {

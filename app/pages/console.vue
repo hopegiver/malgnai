@@ -35,15 +35,15 @@
             <div class="skeleton-line" style="height:14px;width:80%"></div>
           </div>
           <div v-else-if="sessionsError" class="p-3 small text-danger">{{ sessionsError }}</div>
-          <div v-else-if="!sessions.length" class="p-3 text-center text-muted small">대화 기록이 없습니다.</div>
+          <div v-else-if="!displaySessions.length" class="p-3 text-center text-muted small">대화 기록이 없습니다.</div>
           <div v-else class="console-session-items">
             <button
-              v-for="s in sessions"
+              v-for="s in displaySessions"
               :key="s.session_id"
               type="button"
               class="console-session-item"
-              :class="{ active: s.session_id === currentSessionId }"
-              @click="selectSession(s.session_id)">
+              :class="{ active: s.session_id === currentSessionId || s.session_id === '__pending__' || s.session_id === activeTurnId, pending: s.__pending }"
+              @click="onSessionClick(s)">
               <div class="d-flex align-items-center justify-content-between gap-1">
                 <span class="console-session-title">{{ truncate(s.title, 42) }}</span>
                 <span class="console-session-status" :class="'status-' + (s.last_status || 'unknown')" :title="s.last_status"></span>
@@ -70,8 +70,8 @@
             @change="onSessionSelectChange"
             aria-label="이전 대화 선택">
             <option value="">새 대화</option>
-            <option v-for="s in sessions" :key="s.session_id" :value="s.session_id">
-              {{ truncate(s.title, 42) }} · {{ formatDate(s.last_at) }} · {{ s.turn_count }}턴
+            <option v-for="s in displaySessions" :key="s.session_id" :value="s.session_id">
+              {{ s.__pending ? '● ' : '' }}{{ truncate(s.title, 42) }} · {{ formatDate(s.last_at) }} · {{ s.turn_count }}턴
             </option>
           </select>
           <div v-if="sessionsError" class="small text-danger mt-1">{{ sessionsError }}</div>
@@ -182,6 +182,7 @@ export default {
       sessionsPageSize: 10,
       sessionsError: '',
       currentSessionId: null,
+      pendingNewSession: null,
       turns: [],
       turnsLoading: false,
       draft: '',
@@ -195,6 +196,16 @@ export default {
       monitorFallback: false,
       terminatingId: null,
     }
+  },
+  computed: {
+    // 신규 세션의 첫 턴이 아직 session_id 를 못 받아 서버 목록(GET /sessions)에 안 잡히는 동안
+    // 사이드바에 임시로 보여줄 플레이스홀더를 맨 앞에 얹는다(실행중/대기중 표시용). 서버도 같은
+    // 턴을 is_pending 행(session_id=turn id)으로 돌려줄 수 있으니, 내가 보낸 턴과 겹치면 서버쪽
+    // 사본은 제외하고 로컬 플레이스홀더(더 실시간)만 남긴다.
+    displaySessions() {
+      if (!this.pendingNewSession) return this.sessions
+      return [this.pendingNewSession, ...this.sessions.filter(s => s.session_id !== this.pendingNewSession.turnId)]
+    },
   },
   async mounted() {
     await this.loadProjects()
@@ -230,6 +241,7 @@ export default {
     async onProjectChange() {
       this.stopPolling()
       this.currentSessionId = null
+      this.pendingNewSession = null
       this.turns = []
       this.sendError = ''
       this.waitingBanner = ''
@@ -245,11 +257,16 @@ export default {
     startNewSession() {
       this.stopPolling()
       this.currentSessionId = null
+      this.pendingNewSession = null
       this.turns = []
       this.sendError = ''
       this.waitingBanner = ''
       this.inputDisabled = false
       this.draft = ''
+      this.activeTurnId = null
+      this.liveLog = []
+      this.logCursor = 0
+      this.monitorFallback = false
       this.$nextTick(() => this.$refs.inputBox?.focus())
     },
 
@@ -264,7 +281,7 @@ export default {
         this.sessionsError = typeof error === 'string' ? error : '세션 목록을 불러오지 못했습니다.'
         return
       }
-      this.sessions = data.sessions || []
+      this.sessions = (data.sessions || []).map(this.normalizeSession)
       this.sessionsHasMore = !!data.has_more
     },
     async loadMoreSessions() {
@@ -273,26 +290,69 @@ export default {
       const { data, error } = await useApi(`/api/console/sessions?project_id=${this.selectedProjectId}&limit=${this.sessionsPageSize}&offset=${this.sessions.length}`)
       this.sessionsLoadingMore = false
       if (error) return
-      this.sessions = [...this.sessions, ...(data.sessions || [])]
+      this.sessions = [...this.sessions, ...(data.sessions || []).map(this.normalizeSession)]
       this.sessionsHasMore = !!data.has_more
     },
+    // 서버가 준 is_pending(진행중 여부)·is_synthetic(session_id 자리에 command.id 가 온 단건 행인지)
+    // 를 프론트 표기/라우팅용 __pending·__synthetic 으로 통일.
+    normalizeSession(s) {
+      return { ...s, __pending: !!s.is_pending, __synthetic: !!s.is_synthetic }
+    },
     async selectSession(sessionId) {
-      if (sessionId === this.currentSessionId) return
+      if (!sessionId || sessionId === this.currentSessionId) return
       this.stopPolling()
       this.currentSessionId = sessionId
+      this.pendingNewSession = null
       localStorage.setItem('console_currentSessionId', sessionId)
       this.sendError = ''
       this.waitingBanner = ''
+      this.activeTurnId = null
+      this.liveLog = []
+      this.logCursor = 0
+      this.monitorFallback = false
       await this.loadTurns()
     },
-    // 모바일 세션 select 박스 전용: 빈 값이면 새 대화, 아니면 기존 selectSession 재사용
+    // 사이드바 항목 클릭 진입점: 진짜 세션(session_id 로 GROUP BY 된 행)은 selectSession,
+    // session_id 미배정 단건 행(synthetic — 진행중이든 이미 종결됐든)은 viewPendingTurn 으로 분기.
+    onSessionClick(s) {
+      if (s.session_id === '__pending__') return // 내가 방금 보낸 것 — 이미 오른쪽에 보이는 중
+      if (s.__synthetic) { this.viewPendingTurn(s.session_id); return }
+      this.selectSession(s.session_id)
+    },
+    // session_id 가 배정되지 않은 단건 턴(synthetic — 진행중 또는 session_id 없이 종결됨)을 조회해
+    // 오른쪽 대화창에 띄운다. 아직 진행중이면 폴링에 합류하고, 이미 종결됐으면 resumeTurn 이 곧
+    // 종결로 판정해 폴링을 멈춘다(turnId 는 findConsoleSessions 의 synthetic 행에서 session_id
+    // 자리에 온 command.id).
+    async viewPendingTurn(turnId) {
+      if (turnId === this.activeTurnId) return
+      this.stopPolling()
+      this.currentSessionId = null
+      this.pendingNewSession = null
+      localStorage.removeItem('console_currentSessionId')
+      this.sendError = ''
+      this.waitingBanner = ''
+      this.turnsLoading = true
+      const { data, error } = await useApi(`/api/console/turns/${turnId}?project_id=${this.selectedProjectId}`)
+      this.turnsLoading = false
+      if (error || !data.turn) {
+        this.sendError = typeof error === 'string' ? error : '대화 내용을 불러오지 못했습니다.'
+        return
+      }
+      this.turns = [data.turn]
+      this.scrollToBottom()
+      this.activeTurnId = data.turn.id
+      this.inputDisabled = true
+      this.resumeTurn(data.turn)
+    },
+    // 모바일 세션 select 박스 전용: 빈 값이면 새 대화, 아니면 onSessionClick 재사용
     onSessionSelectChange(e) {
       const val = e.target.value
       if (!val) {
         this.startNewSession()
-      } else {
-        this.selectSession(val)
+        return
       }
+      const target = this.displaySessions.find(s => s.session_id === val)
+      if (target) this.onSessionClick(target)
     },
     async loadTurns() {
       if (!this.currentSessionId) return
@@ -327,6 +387,7 @@ export default {
       return '생각 중...'
     },
     onKeydown(e) {
+      if (e.isComposing || e.keyCode === 229) return
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault()
         this.sendMessage()
@@ -370,6 +431,7 @@ export default {
       if (error) {
         this.sendError = typeof error === 'string' ? error : '메시지 전송에 실패했습니다.'
         this.turns = this.turns.filter(t => t.id !== tempId)
+        this.pendingNewSession = null
         this.inputDisabled = false
         this.draft = message
         return
@@ -385,6 +447,19 @@ export default {
       }
       this.turns = this.turns.map(t => (t.id === tempId ? realTurn : t))
       this.activeTurnId = command.id
+
+      // 신규 세션의 첫 턴 — session_id 가 아직 없어 서버 세션 목록에 안 잡히는 동안
+      // 사이드바에 보여줄 임시 플레이스홀더(완료되면 finishTurn 에서 정리됨).
+      this.pendingNewSession = realTurn.session_id ? null : {
+        session_id: '__pending__',
+        turnId: command.id,
+        __pending: true,
+        title: message,
+        last_status: realTurn.status,
+        last_at: realTurn.created_at,
+        turn_count: 1,
+        total_cost_usd: null,
+      }
       this.liveLog = []
       this.logCursor = 0
       this.monitorFallback = false
@@ -486,7 +561,19 @@ export default {
       } else {
         // 진행 중 상태 갱신(claimed → running 등)
         this.turns = this.turns.map(t => (t.id === turnId ? { ...t, status: 'running' } : t))
+        this.syncSidebarStatus(turn.session_id, 'running')
         return 1000
+      }
+    },
+    // 진행 중인 턴의 상태 변화를 사이드바(기존 세션 점 색 / 신규세션 플레이스홀더)에도 실시간 반영.
+    syncSidebarStatus(sessionId, status) {
+      if (sessionId) {
+        const idx = this.sessions.findIndex(s => s.session_id === sessionId)
+        if (idx >= 0 && this.sessions[idx].last_status !== status) {
+          this.sessions = this.sessions.map((s, i) => (i === idx ? { ...s, last_status: status } : s))
+        }
+      } else if (this.pendingNewSession) {
+        this.pendingNewSession = { ...this.pendingNewSession, last_status: status }
       }
     },
     pushLiveLog(entry) {
@@ -505,6 +592,7 @@ export default {
     applyTurnUpdate(turnId, turnData) {
       if (!turnData) return
       this.turns = this.turns.map(t => (t.id === turnId ? { ...t, ...turnData } : t))
+      this.syncSidebarStatus(turnData.session_id, turnData.status)
     },
     finishTurn(turnId, finalTurn) {
       this.stopPolling()
@@ -512,6 +600,7 @@ export default {
       this.liveLog = []
       this.activeTurnId = null
       this.inputDisabled = false
+      this.pendingNewSession = null
       if (finalTurn && finalTurn.session_id && !this.currentSessionId) {
         this.currentSessionId = finalTurn.session_id
         this.loadSessions()

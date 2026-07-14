@@ -23,7 +23,8 @@ fi
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] retro start" >> "$LOG"
 
 # run claude headless with the retro prompt via stdin (unattended).
-cat "$PROMPT" | claude -p --dangerously-skip-permissions >> "$LOG" 2>&1
+# --model 고정: 미지정 시 haiku/구버전 sonnet 등으로 자동배정되는 걸 방지(worker-exec.js와 동일 정책).
+cat "$PROMPT" | claude -p --model claude-sonnet-5 --dangerously-skip-permissions >> "$LOG" 2>&1
 
 # update last-retro marker (epoch ms)
 node -e "const fs=require('fs');fs.writeFileSync(process.argv[1], String(Date.now()))" "$MARKER"

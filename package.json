@@ -19,7 +19,8 @@
     "test": "playwright test",
     "test:ui": "playwright test --ui",
     "test:api": "vitest run test/routes/",
-    "test:unit": "vitest run test/lib/"
+    "test:unit": "vitest run test/lib/",
+    "cleanup:test-data": "node bin/cleanup-test-data.js"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

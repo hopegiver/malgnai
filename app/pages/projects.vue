@@ -79,6 +79,11 @@
           <!-- 설명 -->
           <div v-if="p.description" class="text-muted text-truncate mb-3" style="font-size:13px">{{ p.description }}</div>
 
+          <!-- 소유자 -->
+          <div v-if="p.owner_user_id" class="text-faint text-truncate mb-2" style="font-size:12px">
+            <i class="bi bi-person me-1"></i>{{ p.owner_user_id }}
+          </div>
+
           <div class="mt-auto">
             <div class="border-top border-hairline pt-3">
               <!-- 마지막 활동 -->

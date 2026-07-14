@@ -312,6 +312,9 @@ async function renameTaskIdToCommandId(db) {
  * (totp_enabled=0). 이미 admin 이 있으면 아무것도 하지 않는다(멱등).
  * 이로써 기존 ADMIN_PASSWORD 로 계속 로그인할 수 있다.
  * 비번 미설정/이미 사용자 존재 시 no-op.
+ *
+ * role='super_admin'(락아웃 방지) — 빈 DB에 생성되는 최초 유일 계정은 반드시 최고권한이어야
+ *   사용자관리/자율제어판 등 super_admin 전용 기능에 아무도 접근 못 하는 상황을 피할 수 있다.
  */
 async function seedAdminUser(db, adminPassword) {
   if (!adminPassword) return // 비번 없으면 시드 불가(개발 기본비번은 로그인 측에서 처리).
@@ -322,7 +325,7 @@ async function seedAdminUser(db, adminPassword) {
   if (total > 0) return // 다른 사용자가 이미 있으면 자동 시드 안 함(운영 데이터 보호).
   const { hash, salt } = await hashPassword(adminPassword)
   try {
-    await usersDao.create({ username: ADMIN_USERNAME, passwordHash: hash, passwordSalt: salt, role: 'admin' })
+    await usersDao.create({ username: ADMIN_USERNAME, passwordHash: hash, passwordSalt: salt, role: 'super_admin' })
   } catch { /* 동시 부팅 경쟁 등으로 이미 생성됐으면 무시 */ }
 }
 

@@ -169,8 +169,12 @@ export function summarizeStreamEvent(evt) {
  *   2026-07-09). true 면 STAGED_EXECUTION_PROMPT(NEXT_PHASE 자동 이어달리기 유도)와 coo 페르소나
  *   강제(--agent coo)를 모두 끈다 — 사람이 실시간 채팅 중인데 매 턴 끝에 자동으로 다음 단계
  *   command 가 생성·실행되면 채팅 흐름과 충돌하고, coo 페르소나 강제도 자유 대화 UX에 안 맞는다.
+ * @param {function} onChild (SIGTERM 그레이스풀 셧다운 드레인용, 신규) spawn 성공 직후 자식
+ *   프로세스(ChildProcess) 레퍼런스를 caller 에 넘기는 콜백. dispatch-worker.js 가 이걸로
+ *   activeDispatches 맵에 child 를 채워, 서버 종료 시 남은 실행을 SIGTERM 으로 정리할 수 있게 한다.
+ *   미지정이면 기존과 완전히 동일하게 동작(하위 호환, 순수 추가 파라미터).
  */
-export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfile, resumeSessionId = null, onChunk = null, onEvent = null, interactive = false) {
+export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfile, resumeSessionId = null, onChunk = null, onEvent = null, interactive = false, onChild = null) {
   return new Promise((res) => {
     // env 스크럽: 인입 인증 키 등 불필요한 비밀을 자식 프로세스에 노출하지 않는다.
     const scrubbedEnv = { ...process.env }
@@ -245,6 +249,7 @@ export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfi
       // stdin='ignore': claude 는 -p 로 프롬프트를 받으므로 stdin 불필요. 열어두면 3초간 stdin 을
       //   기다려 "no stdin data received in 3s" 경고를 뱉고(3초 낭비), 타임아웃 시 그 경고가 에러로 남는다.
       child = spawn(bin, argv, { cwd, env: scrubbedEnv, stdio: ['ignore', 'pipe', 'pipe'] })
+      if (onChild) try { onChild(child) } catch { /* caller 콜백 실패는 실행 자체를 막지 않는다 */ }
     } catch (err) {
       cleanup()
       res({ exitCode: 1, stdout: '', stderr: '', spawnError: err.message, sandboxed })

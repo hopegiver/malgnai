@@ -1,6 +1,6 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/connection.js";
-import { CADENCE_VALUES } from "../../server/lib/cadence.js";
+import { CADENCE_VALUES, nextRunAtIso } from "../../server/lib/cadence.js";
 import { RISK_APPROVAL_THRESHOLD_VALUES, KPI_COMPLETE_ACTION_VALUES } from "../../server/lib/autonomy.js";
 
 /**
@@ -94,6 +94,9 @@ export function projectAutonomyUpdate(params) {
     } else {
       fields.cadence = params.cadence;
     }
+    // next_run_at 즉시 재계산(issue 083809e3) — 안 하면 옛 cadence로 계산된 next_run_at이 그대로
+    // 남아, 그 예약 시각이 도달할 때까지(최대 옛 주기 하나만큼) 새 cadence가 반영되지 않는다.
+    fields.next_run_at = nextRunAtIso(fields.cadence, new Date());
   }
 
   // autonomy_level(선택, 자유 라벨 — 게이트엔 미영향, 표시/메타용).

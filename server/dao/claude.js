@@ -201,7 +201,17 @@ export default class ClaudeDao {
   // projects.path 의 마지막 경로 세그먼트를 SQL 에서 추출(RTRIM 트릭)해 소문자 비교.
   // 같은 프로젝트의 서로 다른 키(예: g--workspace-malgnai + -Users-...-malgnai)는
   // COALESCE(p.id, project_key) 로 묶어 한 행으로 합산. 매칭 안 되면 project_name=null.
-  async getProjectSessionAggregates({ limit = 10 } = {}) {
+  // user(선택, 2026-07-14) — 지정하면 소유자/협업자 프로젝트만 집계에 포함한다. 프로젝트에
+  //   매칭 안 된 세션(p.id null)은 소유권을 확인할 수 없으므로 함께 제외된다(홈 대시보드
+  //   "프로젝트별 AI 투입 Top" 사용자 필터 누락 버그 수정).
+  async getProjectSessionAggregates({ limit = 10, user } = {}) {
+    const args = []
+    let scopeClause = ''
+    if (user) {
+      scopeClause = `AND p.id IN (SELECT id FROM projects WHERE owner_user_id = ? OR id IN (SELECT project_id FROM project_collaborators WHERE user = ?))`
+      args.push(user, user)
+    }
+    args.push(limit)
     return (await this.db.prepare(
       `SELECT MAX(s.project_key) AS project_key,
               p.id   AS project_id,
@@ -219,10 +229,11 @@ export default class ClaudeDao {
          ON p.folder <> ''
         AND (LOWER(s.project_key) = p.folder
              OR LOWER(s.project_key) LIKE '%-' || p.folder)
+       WHERE 1=1 ${scopeClause}
        GROUP BY COALESCE(p.id, s.project_key)
        ORDER BY session_count DESC
        LIMIT ?`
-    ).bind(limit).all()).results
+    ).bind(...args).all()).results
   }
 
   // 최근 N일 가동 현황(claude_stats 집계). 대시보드 "AI 가동현황".

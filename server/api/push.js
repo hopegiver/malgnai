@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { createPushSubscriptionDAO } from '../dao/push-subscriptions.js'
 import { sendPushNotification } from '../lib/push-notifier.js'
 import { authMiddleware } from '../middleware/auth.js'
+import { isSuperAdmin } from '../lib/roles.js'
 
 const pushRouter = new Hono()
 pushRouter.use('*', authMiddleware)
@@ -90,15 +91,15 @@ pushRouter.get('/subscriptions', (c) => {
 
 /**
  * POST /api/push/test
- * Send test notification (admin only)
+ * Send test notification (super_admin only)
  */
 pushRouter.post('/test', async (c) => {
   try {
     const userId = c.get('user')?.sub
     const userRole = c.get('user')?.role
 
-    if (!userId || userRole !== 'admin') {
-      return c.json({ error: 'Admin only' }, 403)
+    if (!userId || !isSuperAdmin(userRole)) {
+      return c.json({ error: 'Super admin only' }, 403)
     }
 
     const result = await sendPushNotification(c.env.DB, [userId], {

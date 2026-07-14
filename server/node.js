@@ -19,6 +19,7 @@ import { serve } from '@hono/node-server'
 
 import { wrapD1 } from './db/sqlite-adapter.js'
 import { createApp } from './index.js'
+import { drainActiveDispatches } from './lib/dispatch-worker.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
@@ -129,7 +130,33 @@ if (!process.env.ADMIN_PASSWORD) {
 
 const app = createApp(env)
 
-serve({ fetch: app.fetch, port: PORT, hostname: HOST }, (info) => {
+const httpServer = serve({ fetch: app.fetch, port: PORT, hostname: HOST }, (info) => {
   console.log(`[malgnai] Node 서버 기동 — http://${HOST}:${info.port} (외부는 cloudflared 터널 경유)`)
   console.log(`[malgnai] DB=${DB_PATH}  ASSETS=${APP_DIR}  ENV=${ENVIRONMENT}`)
 })
+
+// ── 그레이스풀 셧다운: SIGTERM/SIGINT 드레인 ─────────────────────────
+// direct 명령(POST /api/commands {direct:true})·AI콘솔 채팅(task_type='console')은
+// server/lib/dispatch-worker.js#dispatchApprovedCommand 를 통해 이 웹서버 프로세스 자신의
+// 자식으로 claude CLI 를 실행한다(server 프로세스 = LaunchAgent com.malgnai.server). 재시작/배포로
+// 이 프로세스가 그냥 죽으면 진행 중이던 실행이 중간에 끊기고 자식은 고아 프로세스로 남으며 DB
+// command row 도 'running' 에 영구히 머문다(대표 확인 불편 사항, 2026-07-14).
+// project_cycle(자율 사이클)은 별도 프로세스 com.malgnai.engine(engine/run.js, 60초 틱)에서
+// 이 웹서버와 무관하게 실행되므로 여기서 신경 쓸 대상이 아니다.
+let shuttingDown = false
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return
+  shuttingDown = true
+  console.log(`[malgnai] ${signal} 수신 — 새 연결 차단, 진행 중인 direct/콘솔 명령 드레인 시작(상한 60초)`)
+  // 새 연결 accept 를 막는다(이미 맺어진 연결에는 영향 없음 — Node http.Server.close() 표준 동작).
+  try { httpServer.close() } catch (e) { console.error(`[malgnai] httpServer.close() 실패: ${e.message}`) }
+  try {
+    await drainActiveDispatches(DB, 60000)
+  } catch (e) {
+    console.error(`[malgnai] drainActiveDispatches 중 오류: ${e.message}`)
+  }
+  console.log('[malgnai] 드레인 완료 — 종료')
+  process.exit(0)
+}
+process.on('SIGTERM', () => { gracefulShutdown('SIGTERM') })
+process.on('SIGINT', () => { gracefulShutdown('SIGINT') })

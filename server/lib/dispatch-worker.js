@@ -53,7 +53,94 @@ import { sendApprovalNotification } from './push-notifier.js'
 
 const TERMINAL_STATUSES = ['done', 'failed', 'rejected', 'expired']
 
+// SIGTERM 그레이스풀 셧다운 드레인용(2026-07-14 신설, server/node.js 참조).
+//   commandId → { promise, child, taskType, forced }. promise 는 "이 commandId 의 dispatch
+//   실행이 끝났다(runClaude 결과 처리 + DB 업데이트까지 다 끝났다)"를 나타낸다. child 는
+//   runClaude 의 onChild 콜백으로 채워지는 실제 자식 프로세스(ChildProcess) 레퍼런스 —
+//   상한 초과 시 drainActiveDispatches 가 이걸로 SIGTERM 을 보낸다(best-effort, DB 반영은
+//   더 이상 이 close 이벤트를 기다리지 않는다 — 아래 forced 플래그 참조). taskType 은 상한
+//   초과 시 콘솔/그 외를 구분해 다른 종결 상태를 쓰기 위함. forced 는 드레인이 이미 이
+//   commandId 의 DB 상태를 강제로 확정했다는 표시 — dispatchApprovedCommand 의 자연 완료
+//   경로가 뒤늦게 도착해도 이 플래그를 보고 DB 재기록을 스킵한다(이중 기록 레이스 차단).
+//   project_cycle 등 다른 호출부가 섞여 들어와도 무해하다(어차피 웹서버 프로세스에서 그
+//   경로는 쓰이지 않음).
+export const activeDispatches = new Map()
+
 function nowIso() { return new Date().toISOString() }
+
+/**
+ * drainActiveDispatches — SIGTERM 수신 시 진행 중인 direct/console 실행이 끝나기를 기다린다.
+ *   (reviewer 지적 2건 수정, 2026-07-14)
+ *   버그1(스냅샷 고정 레이스): 드레인 시작 시점의 activeDispatches 를 한 번만 스냅샷하면,
+ *     httpServer.close() 이후에도 이미 열린 keep-alive 연결로 새 direct/console 명령이 들어와
+ *     새 엔트리가 추가될 수 있다 — 그 새 엔트리는 이 함수가 한 번도 확인하지 못한 채 드레인이
+ *     끝나버릴 수 있었다. 폴링 루프로 매 반복마다 그 시점의 activeDispatches 를 다시 스냅샷해
+ *     새로 들어온 엔트리도 자연히 포함시킨다.
+ *   버그2(유예 타임아웃 후 DB 영구 running): kill('SIGTERM') 을 보내고 close 이벤트(자연 완료
+ *     경로)를 기다리는 방식은, 자식이 SIGTERM 을 씹으면(sandbox-exec 래핑 등) DB 가 running 에
+ *     영구히 남았다. 이제 상한 초과 시 close 이벤트를 전혀 기다리지 않고 드레인이 직접, 즉시
+ *     DB 상태를 확정한다(콘솔=failed, 그 외=approved 로 되돌려 엔진이 재실행하게 함).
+ * @param {object} db D1 호환 db — 상한 초과 시 CommandsDao 로 직접 DB 를 쓰기 위함.
+ * @param {number} timeoutMs 정상 종료를 기다리는 상한(기본 60초).
+ * @returns {Promise<{ total: number, completed: number, forcedConsole: number, forcedRequeued: number }>}
+ */
+export async function drainActiveDispatches(db, timeoutMs = 60000) {
+  const total = activeDispatches.size
+  if (total === 0) {
+    console.log('[dispatch-worker] 드레인 대상 없음 — 즉시 종료 가능')
+    return { total: 0, completed: 0, forcedConsole: 0, forcedRequeued: 0 }
+  }
+  console.log(`[dispatch-worker] 드레인 시작 — 진행 중 ${total}건, 상한 ${timeoutMs}ms`)
+
+  const POLL_INTERVAL_MS = 500
+  const deadline = Date.now() + timeoutMs
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  // 매 반복마다 "그 시점" 스냅샷을 다시 떠서 대기한다 — 대기 도중 새로 등록된 엔트리도
+  //   다음 반복에서 자연히 포함된다(버그1 수정).
+  while (activeDispatches.size > 0 && Date.now() < deadline) {
+    const snapshot = Array.from(activeDispatches.values()).map((e) => e.promise)
+    const remainingMs = Math.max(0, deadline - Date.now())
+    const waitMs = Math.min(POLL_INTERVAL_MS, remainingMs || POLL_INTERVAL_MS)
+    await Promise.race([Promise.all(snapshot), sleep(waitMs)])
+  }
+
+  if (activeDispatches.size === 0) {
+    console.log('[dispatch-worker] 드레인 완료 — 모든 실행이 상한 내 정상 종료')
+    return { total, completed: total, forcedConsole: 0, forcedRequeued: 0 }
+  }
+
+  // 상한 초과: 남아있는 엔트리는 close 이벤트를 기다리지 않고 이 함수가 직접 DB 를 확정한다(버그2 수정).
+  const remaining = Array.from(activeDispatches.entries())
+  console.error(`[dispatch-worker] 드레인 타임아웃(${timeoutMs}ms) — 남은 ${remaining.length}건 강제 처리`)
+  const dao = new CommandsDao(db)
+  let forcedConsole = 0
+  let forcedRequeued = 0
+  for (const [commandId, entry] of remaining) {
+    // 자연 완료 경로가 이후 도착해도 DB 를 재기록하지 않도록 먼저 마킹한다.
+    entry.forced = true
+    if (entry.child) {
+      try { entry.child.kill('SIGTERM') } catch (e) {
+        console.error(`[dispatch-worker] commandId=${commandId} kill 실패(무시하고 진행): ${e.message}`)
+      }
+    }
+    try {
+      if (entry.taskType === 'console') {
+        await dao.updateStatus(commandId, { status: 'failed', error: '서버 재시작(SIGTERM) 드레인 상한 초과' })
+        execMonitor.end(commandId, 'failed')
+        forcedConsole++
+      } else {
+        await dao.updateStatus(commandId, { status: 'approved', error: null })
+        execMonitor.end(commandId, 'requeued')
+        forcedRequeued++
+      }
+    } catch (e) {
+      console.error(`[dispatch-worker] commandId=${commandId} 드레인 강제 DB 반영 실패: ${e.message}`)
+    }
+  }
+  console.log(`[dispatch-worker] 드레인 종료 — console 실패처리 ${forcedConsole}건, 그 외 재큐잉 ${forcedRequeued}건`)
+  return { total, completed: total - remaining.length, forcedConsole, forcedRequeued }
+}
 
 // project_cycle 출력이 WORKER/CYCLE JSON 으로 파싱 안 될 때의 최소 적재(server/api/lead.js 의
 // recordCycleParseFailure 와 동형 — HTTP 라운드트립 없는 이 경로 전용으로 로컬 재구현).
@@ -144,94 +231,117 @@ export async function dispatchApprovedCommand(db, commandId) {
       taskType: command.task_type || 'direct',
     })
 
-    const { exitCode, stdout, stderr, spawnError } = await runClaude(
-      promptText, project.path, maxTurns, allowedTools, sandboxProfile, resumeSid,
-      (chunk) => execMonitor.chunk(commandId, chunk),
-      (item) => execMonitor.progress(commandId, item),
-      interactive
-    )
-    const parsed = parseClaudeJson(stdout)
-    // poll(bin/lib/poll-commands.js)과 동일한 에러 우선순위: spawn 자체 실패 > claude stdout JSON 의
-    //   구조화 에러(예: max-turns 초과) > stderr 원문.
-    const errorMsg = spawnError
-      ? `spawn error: ${spawnError}`
-      : (exitCode !== 0 ? truncate(parsed.cliError || stderr || 'non-zero exit', 2000) : null)
+    // SIGTERM 드레인용 등록(server/node.js 참조) — runClaude 호출 직전부터, 이 실행의
+    //   결과 처리(DB 업데이트 등)까지 전부 끝나는 시점까지 커버한다. child 는 runClaude 의
+    //   onChild 콜백이 채운다. 어떤 경로로 끝나든(정상/예외) finally 에서 반드시 해제한다.
+    let resolveDispatchDone
+    const dispatchDone = new Promise((resolve) => { resolveDispatchDone = resolve })
+    activeDispatches.set(commandId, { promise: dispatchDone, child: null, taskType: command.task_type || null, forced: false })
 
-    const finalStatus = exitCode === 0 ? 'done' : 'failed'
-    execMonitor.end(commandId, finalStatus, { costUsd: parsed.cost_usd })
-
-    await dao.updateStatus(commandId, {
-      status: finalStatus,
-      exit_code: exitCode,
-      result: truncateForTask(parsed.result, command.task_type, RESULT_MAX_CHARS),
-      cost_usd: parsed.cost_usd,
-      session_id: parsed.session_id,
-      error: errorMsg,
-    })
-
-    // (§11 후속 다중 라운드) resume 워커가 "또 승인 필요"(NEEDS_APPROVAL: 신호)로 끝났으면 같은
-    //   session_id 로 새 resume command 를 승인함에 재큐잉한다(세션당 라운드 상한 내에서). exit 0 일 때만.
-    if (exitCode === 0 && isResume) {
-      const rq = maybeRequeueResume(db, command, parsed.result)
-      if (rq.requeued) {
-        logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'resume_requeue', detail: `다음 라운드 승인 필요 → command ${rq.newId} 큐잉`, created_at: nowIso() })
-      } else if (rq.reason) {
-        logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'resume_requeue_skip', detail: rq.reason, created_at: nowIso() })
-      }
-    }
-
-    // (단계 자동 이어달리기) STAGED_EXECUTION_PROMPT 를 본 워커가 "NEXT_PHASE:" 신호로 끝났으면
-    //   다음 단계 command 를 자가승인 생성 + 즉시 클레임 시도한다(재승인 없이 자동 완결, 사용자 요청).
-    //   project_cycle/resume 은 함수 내부에서 자동 no-op(각자 별도 체계를 이미 가짐).
-    if (exitCode === 0) {
-      const pc = maybeRequeuePhase(db, command, parsed.result)
-      if (pc.requeued) {
-        logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'phase_chain_create', detail: `다음 단계 command ${pc.newId} 생성${pc.claimed ? ' (즉시 실행)' : ' (프로젝트 실행 중 → 안전망 poll 대기)'}`, created_at: nowIso() })
-        if (pc.claimed) {
-          // await(예외적으로) — 위 파일 docstring 참고: 엔진 프로세스가 호출자일 때 다음 단계
-          //   실행이 끝나기 전에 틱이 종료되면 안 되므로, 이 재귀 호출만은 fire-and-forget 하지 않는다.
-          await dispatchApprovedCommand(db, pc.newId).catch((e) =>
-            logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: e.message, created_at: nowIso() }))
-        }
-      } else if (pc.reason) {
-        logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'phase_chain_skip', detail: pc.reason, created_at: nowIso() })
-      }
-    }
-
-    // §2.3-5: exitCode===0 이고 task_type==='project_cycle' 이면 사이클 결과 적재.
-    //   §2.4(사람 즉시스폰)에는 사실 도달 안 함(project_cycle 은 spawn-due 전용 생성물이라 승인함에
-    //   안 옴) — 방어적으로만 남겨둔다. §2.7(spawn-due 즉시디스패치)에서는 이게 주 경로다.
-    if (exitCode === 0 && command.task_type === 'project_cycle') {
-      const extracted = extractEmbeddedJson(parsed.result ?? stdout)
-      if (extracted.ok) {
-        try {
-          const report = db.transaction((tx) => ingestCycleResultTx(tx, command, extracted.value))
-          // (신규) proposal 이 승인함(queued)에 등록됐으면(=사람 승인이 실제로 필요한 건만) 진동 포함
-          //   푸시 알림을 발송한다. tx 는 이미 끝났으므로 tx 밖 fire-and-forget(sendApprovalNotification
-          //   자체가 async). 'approved'(자동집행)는 승인 요청이 아니므로 알림 대상에서 제외.
-          if (report.proposal_created && report.proposal_status === 'queued' && project.owner_user_id) {
-            const p = extracted.value?.proposal || {}
-            const title = p.task_type || truncate(p.instruction || '', 40) || '새 명령'
-            sendApprovalNotification(db, project.owner_user_id, {
-              id: report.proposal_command_id, title, status: 'queued',
-            }).catch((e) => logActivity(db, {
-              project_id: command.project_id, agent_name: 'system',
-              action: 'push_notify_error', detail: e.message, created_at: nowIso(),
-            }))
-          }
-        } catch (e) {
-          logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: `ingestCycleResultTx failed: ${e.message}`, created_at: nowIso() })
-        }
+    try {
+      const { exitCode, stdout, stderr, spawnError } = await runClaude(
+        promptText, project.path, maxTurns, allowedTools, sandboxProfile, resumeSid,
+        (chunk) => execMonitor.chunk(commandId, chunk),
+        (item) => execMonitor.progress(commandId, item),
+        interactive,
+        (child) => { const entry = activeDispatches.get(commandId); if (entry) entry.child = child }
+      )
+      // (2026-07-14 reviewer 지적 — 이중 기록 레이스 차단) 드레인 상한 초과로 이미
+      //   drainActiveDispatches 가 이 commandId 의 DB 상태를 강제 확정했으면(entry.forced),
+      //   여기서는 그 결과를 덮어쓰지 않고 자연 완료 경로 전체를 스킵한다. 특히 direct 계열을
+      //   드레인이 'approved'로 되돌려 엔진 재실행을 의도했는데, 이 경로가 뒤늦게 도착해
+      //   'failed'/'done'으로 덮어쓰면 그 의도가 깨진다.
+      const entry = activeDispatches.get(commandId)
+      if (entry?.forced) {
+        console.log(`[dispatch-worker] commandId=${commandId} 드레인에서 이미 강제 처리됨 — 자연 완료 경로 스킵`)
       } else {
-        recordCycleParseFailureTx(db, command, extracted.error, stdout)
+      const parsed = parseClaudeJson(stdout)
+      // poll(bin/lib/poll-commands.js)과 동일한 에러 우선순위: spawn 자체 실패 > claude stdout JSON 의
+      //   구조화 에러(예: max-turns 초과) > stderr 원문.
+      const errorMsg = spawnError
+        ? `spawn error: ${spawnError}`
+        : (exitCode !== 0 ? truncate(parsed.cliError || stderr || 'non-zero exit', 2000) : null)
+
+      const finalStatus = exitCode === 0 ? 'done' : 'failed'
+      execMonitor.end(commandId, finalStatus, { costUsd: parsed.cost_usd })
+
+      await dao.updateStatus(commandId, {
+        status: finalStatus,
+        exit_code: exitCode,
+        result: truncateForTask(parsed.result, command.task_type, RESULT_MAX_CHARS),
+        cost_usd: parsed.cost_usd,
+        session_id: parsed.session_id,
+        error: errorMsg,
+      })
+
+      // (§11 후속 다중 라운드) resume 워커가 "또 승인 필요"(NEEDS_APPROVAL: 신호)로 끝났으면 같은
+      //   session_id 로 새 resume command 를 승인함에 재큐잉한다(세션당 라운드 상한 내에서). exit 0 일 때만.
+      if (exitCode === 0 && isResume) {
+        const rq = maybeRequeueResume(db, command, parsed.result)
+        if (rq.requeued) {
+          logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'resume_requeue', detail: `다음 라운드 승인 필요 → command ${rq.newId} 큐잉`, created_at: nowIso() })
+        } else if (rq.reason) {
+          logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'resume_requeue_skip', detail: rq.reason, created_at: nowIso() })
+        }
       }
-    } else if (exitCode !== 0) {
-      // §2.3-5: exitCode≠0 이면 ingestCommandFailureTx(project_cycle 여부 무관 — 분기 단순화).
-      try {
-        db.transaction((tx) => ingestCommandFailureTx(tx, command, errorMsg))
-      } catch (e) {
-        logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: `ingestCommandFailureTx failed: ${e.message}`, created_at: nowIso() })
+
+      // (단계 자동 이어달리기) STAGED_EXECUTION_PROMPT 를 본 워커가 "NEXT_PHASE:" 신호로 끝났으면
+      //   다음 단계 command 를 자가승인 생성 + 즉시 클레임 시도한다(재승인 없이 자동 완결, 사용자 요청).
+      //   project_cycle/resume 은 함수 내부에서 자동 no-op(각자 별도 체계를 이미 가짐).
+      if (exitCode === 0) {
+        const pc = maybeRequeuePhase(db, command, parsed.result)
+        if (pc.requeued) {
+          logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'phase_chain_create', detail: `다음 단계 command ${pc.newId} 생성${pc.claimed ? ' (즉시 실행)' : ' (프로젝트 실행 중 → 안전망 poll 대기)'}`, created_at: nowIso() })
+          if (pc.claimed) {
+            // await(예외적으로) — 위 파일 docstring 참고: 엔진 프로세스가 호출자일 때 다음 단계
+            //   실행이 끝나기 전에 틱이 종료되면 안 되므로, 이 재귀 호출만은 fire-and-forget 하지 않는다.
+            await dispatchApprovedCommand(db, pc.newId).catch((e) =>
+              logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: e.message, created_at: nowIso() }))
+          }
+        } else if (pc.reason) {
+          logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'phase_chain_skip', detail: pc.reason, created_at: nowIso() })
+        }
       }
+
+      // §2.3-5: exitCode===0 이고 task_type==='project_cycle' 이면 사이클 결과 적재.
+      //   §2.4(사람 즉시스폰)에는 사실 도달 안 함(project_cycle 은 spawn-due 전용 생성물이라 승인함에
+      //   안 옴) — 방어적으로만 남겨둔다. §2.7(spawn-due 즉시디스패치)에서는 이게 주 경로다.
+      if (exitCode === 0 && command.task_type === 'project_cycle') {
+        const extracted = extractEmbeddedJson(parsed.result ?? stdout)
+        if (extracted.ok) {
+          try {
+            const report = db.transaction((tx) => ingestCycleResultTx(tx, command, extracted.value))
+            // (신규) proposal 이 승인함(queued)에 등록됐으면(=사람 승인이 실제로 필요한 건만) 진동 포함
+            //   푸시 알림을 발송한다. tx 는 이미 끝났으므로 tx 밖 fire-and-forget(sendApprovalNotification
+            //   자체가 async). 'approved'(자동집행)는 승인 요청이 아니므로 알림 대상에서 제외.
+            if (report.proposal_created && report.proposal_status === 'queued' && project.owner_user_id) {
+              const p = extracted.value?.proposal || {}
+              const title = p.task_type || truncate(p.instruction || '', 40) || '새 명령'
+              sendApprovalNotification(db, project.owner_user_id, {
+                id: report.proposal_command_id, title, status: 'queued',
+              }).catch((e) => logActivity(db, {
+                project_id: command.project_id, agent_name: 'system',
+                action: 'push_notify_error', detail: e.message, created_at: nowIso(),
+              }))
+            }
+          } catch (e) {
+            logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: `ingestCycleResultTx failed: ${e.message}`, created_at: nowIso() })
+          }
+        } else {
+          recordCycleParseFailureTx(db, command, extracted.error, stdout)
+        }
+      } else if (exitCode !== 0) {
+        // §2.3-5: exitCode≠0 이면 ingestCommandFailureTx(project_cycle 여부 무관 — 분기 단순화).
+        try {
+          db.transaction((tx) => ingestCommandFailureTx(tx, command, errorMsg))
+        } catch (e) {
+          logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: `ingestCommandFailureTx failed: ${e.message}`, created_at: nowIso() })
+        }
+      }
+      }
+    } finally {
+      activeDispatches.delete(commandId)
+      resolveDispatchDone()
     }
   } catch (e) {
     // §2.3-6: 전체 try/catch — 실패해도 throw 하지 않고 logActivity 로만 감사.

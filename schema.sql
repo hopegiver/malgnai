@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS claude_stats (id TEXT PRIMARY KEY, date TEXT NOT NULL
 
 CREATE TABLE IF NOT EXISTS claude_token_stats (id TEXT PRIMARY KEY, date TEXT NOT NULL, model TEXT NOT NULL, tokens INTEGER DEFAULT 0);
 
-CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, host TEXT, instruction TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','approved','claimed','running','done','failed','rejected','expired')), permission_mode TEXT NOT NULL DEFAULT 'allowlist' CHECK(permission_mode IN ('allowlist','acceptEdits','bypass')), created_by TEXT, claimed_by TEXT, claimed_at TEXT, exit_code INTEGER, result TEXT, cost_usd REAL, session_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, task_type TEXT, business TEXT, customer TEXT, risk_level TEXT DEFAULT 'low', ai_summary TEXT, evidence TEXT, recommended_action TEXT, review_status TEXT, review_note TEXT, reviewed_by TEXT, reviewed_at TEXT, idempotency_key TEXT, applied_rule_id TEXT, title TEXT, assignee_agent_name TEXT, parent_command_id TEXT, root_command_id TEXT, level INTEGER DEFAULT 0, result_json TEXT, options_json TEXT);
+CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, host TEXT, instruction TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','approved','claimed','running','done','failed','rejected','expired')), permission_mode TEXT NOT NULL DEFAULT 'allowlist' CHECK(permission_mode IN ('allowlist','acceptEdits','bypass')), created_by TEXT, claimed_by TEXT, claimed_at TEXT, exit_code INTEGER, result TEXT, cost_usd REAL, session_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, task_type TEXT, business TEXT, customer TEXT, risk_level TEXT DEFAULT 'low', ai_summary TEXT, evidence TEXT, recommended_action TEXT, review_status TEXT, review_note TEXT, reviewed_by TEXT, reviewed_at TEXT, idempotency_key TEXT, applied_rule_id TEXT, title TEXT, assignee_agent_name TEXT, parent_command_id TEXT, root_command_id TEXT, level INTEGER DEFAULT 0, result_json TEXT, options_json TEXT, retry_of_id TEXT);
 
 CREATE TABLE IF NOT EXISTS decisions (
   id TEXT PRIMARY KEY,
@@ -63,6 +63,23 @@ CREATE TABLE IF NOT EXISTS decisions (
   importance INTEGER NOT NULL DEFAULT 3,   -- 1(낮음)~5(높음)
   created_at TEXT NOT NULL
 , agent_name TEXT);
+
+-- 기능 개선 요청(사용자 제출 → 엔진 완전자동 심사). 사람 승인 개입 없음: 심사는
+-- engine/feature-review.js(reviewFeatureRequestsOnce)가 매 엔진 틱마다 pending 1건을 claim해
+-- claude 로 승인/반려를 판정한다. 승인되면 memories(FEEDBACK)에 적재되어 기존 project_cycle 이
+-- 다음 자율 사이클에서 그대로 반영한다(새 실행 파이프라인 없음, project_cycle 재사용).
+CREATE TABLE IF NOT EXISTS feature_requests (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  requester_user_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','reviewing','approved','rejected')),
+  review_reason TEXT,
+  reviewed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+, review_attempts INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE IF NOT EXISTS issues (
   id TEXT PRIMARY KEY,
@@ -101,6 +118,10 @@ CREATE TABLE IF NOT EXISTS projects (
   updated_at TEXT NOT NULL
 , kind TEXT DEFAULT 'dev', lead_agent_name TEXT, goal TEXT, kpi_json TEXT, autonomy_level TEXT DEFAULT 'L1', cadence TEXT, autonomy_enabled TEXT DEFAULT '0', owner_user_id TEXT, next_run_at TEXT, last_run_at TEXT, custom_instruction TEXT, risk_approval_threshold TEXT DEFAULT 'high', kpi_complete_action TEXT DEFAULT 'continue');
 
+-- users.role: 3단계 'super_admin'(최고관리자) | 'admin' | 'user' (server/lib/roles.js ROLES).
+--   admin과 user는 권한상 완전히 동일하다(라벨만 다름, 둘 다 프로젝트 소유권/공유 기준으로만 스코핑).
+--   super_admin만 사용자관리·자율제어판·시스템재시작·설정·전체 프로젝트 모니터링(읽기전용)에 접근.
+--   컬럼은 TEXT라 값 확장에 DDL 불요 — 2단계→3단계 전환 데이터 이관은 migrations/012-*.sql.
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, totp_secret TEXT, totp_enabled INTEGER NOT NULL DEFAULT 0, created_at TEXT, updated_at TEXT, role TEXT NOT NULL DEFAULT 'admin');
 
 -- refresh token(장기, 30일, 회전형) — access JWT(4h) 만료 전 재발급용. 원문은 저장하지 않고
@@ -169,6 +190,10 @@ CREATE INDEX IF NOT EXISTS idx_csu_project_key ON claude_session_usage (project_
 CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(created_at);
 
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id);
+
+CREATE INDEX IF NOT EXISTS idx_feature_requests_project ON feature_requests (project_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_feature_requests_status ON feature_requests (status, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_issues_project ON issues(project_id);
 

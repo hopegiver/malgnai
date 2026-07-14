@@ -39,8 +39,8 @@
                 <span v-if="isMe(u)" class="badge bg-light text-dark ms-1">나</span>
               </td>
               <td>
-                <span class="badge" :class="u.role === 'admin' ? 'bg-primary' : 'bg-light text-dark'">
-                  {{ u.role === 'admin' ? '관리자' : '일반' }}
+                <span class="badge" :class="roleBadgeClass(u.role)">
+                  {{ roleLabel(u.role) }}
                 </span>
               </td>
               <td>
@@ -84,8 +84,9 @@
         <div class="mb-3">
           <label class="form-label small fw-medium">권한</label>
           <select class="form-select form-select-sm" v-model="form.role">
-            <option value="user">일반 (모니터링만)</option>
-            <option value="admin">관리자 (사용자 관리 가능)</option>
+            <option value="user">일반</option>
+            <option value="admin">관리자</option>
+            <option value="super_admin">최고관리자 (사용자 관리 가능)</option>
           </select>
         </div>
 
@@ -133,8 +134,8 @@ export default {
     }
   },
   async mounted() {
-    // 관리자만 접근 가능(메뉴는 숨기지만 URL 직접 접근 방어). API 도 403 으로 막힌다.
-    if (!isAdmin()) {
+    // 최고관리자만 접근 가능(메뉴는 숨기지만 URL 직접 접근 방어). API 도 403 으로 막힌다.
+    if (!isSuperAdmin()) {
       this.$router.replace('/')
       return
     }
@@ -149,6 +150,16 @@ export default {
     },
     isMe(u) {
       return !!this.me && u.username === this.me
+    },
+    roleLabel(role) {
+      if (role === 'super_admin') return '최고관리자'
+      if (role === 'admin') return '관리자'
+      return '일반'
+    },
+    roleBadgeClass(role) {
+      if (role === 'super_admin') return 'bg-danger'
+      if (role === 'admin') return 'bg-primary'
+      return 'bg-light text-dark'
     },
     async loadMe() {
       const { data } = await useApi('/api/auth/me')
@@ -169,7 +180,7 @@ export default {
       this.$nextTick(() => this.$refs.usernameInput?.focus())
     },
     openEdit(u) {
-      this.form = { id: u.id, username: u.username, password: '', role: u.role === 'admin' ? 'admin' : 'user' }
+      this.form = { id: u.id, username: u.username, password: '', role: ['super_admin', 'admin', 'user'].includes(u.role) ? u.role : 'user' }
       this.modalError = ''
       this.modal = true
       this.$nextTick(() => this.$refs.usernameInput?.focus())

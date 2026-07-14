@@ -7,6 +7,7 @@ import { verifyPassword, hashPassword } from '../utils/password.js'
 import { newSecret, otpauthUrl, qrDataUrl, verifyCode } from '../utils/totp.js'
 import { checkLoginThrottle, recordLoginFailure, recordLoginSuccess } from '../lib/login-throttle.js'
 import { generateRefreshToken, hashRefreshToken, REFRESH_TOKEN_TTL_SECONDS, REUSE_GRACE_MS } from '../lib/refresh-token.js'
+import { normalizeRole } from '../lib/roles.js'
 
 const router = new Hono()
 
@@ -18,7 +19,8 @@ const TOKEN_TTL_SECONDS = 60 * 60 * 4 // 4h
  */
 async function issueTokenPair(c, user) {
   const refreshTokensDao = new RefreshTokensDao(c.env.DB)
-  const role = user.role === 'admin' ? 'admin' : 'user'
+  // 3단계 값(super_admin/admin/user)을 그대로 통과시킨다(화이트리스트 검증은 하되 축소하지 않음).
+  const role = normalizeRole(user.role)
 
   const token = await signJwt({ sub: user.username, role }, c.env.JWT_SECRET, TOKEN_TTL_SECONDS)
 
@@ -205,7 +207,7 @@ router.get('/me', authMiddleware, async (c) => {
   const user = await usersDao.findByUsername(payload.sub)
   if (!user) return authError(c, 'invalid_credentials')
   return c.json({
-    user: { username: user.username, role: user.role === 'admin' ? 'admin' : 'user' },
+    user: { username: user.username, role: normalizeRole(user.role) },
     totp_enabled: !!user.totp_enabled,
   })
 })

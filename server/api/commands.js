@@ -11,6 +11,8 @@ import { maybeRequeuePhase } from '../lib/phase-chain.js'
 import { logActivity } from '../lib/activity-log.js'
 import { execMonitor } from '../lib/exec-monitor.js'
 import { sendApprovalNotification } from '../lib/push-notifier.js'
+import { getProjectRole, roleAtLeast } from '../lib/project-access.js'
+import { isSuperAdmin } from '../lib/roles.js'
 
 const router = new Hono()
 
@@ -138,11 +140,16 @@ router.get('/', authMiddleware, async (c) => {
   const limit = Number(c.req.query('limit')) || 50
   const offset = Number(c.req.query('offset')) || 0
   const dao = new CommandsDao(c.env.DB)
+  // super_admin은 모니터링 목적으로 소유권 스코프를 건너뛴다(projects.js GET '/' 와 동일 패턴,
+  // 2026-07-14 3단계 role 확장 시 이 라우트만 누락됐던 구멍 수정).
+  const me = c.get('user')
+  const user = isSuperAdmin(me?.role) ? undefined : me?.sub
   const commands = await dao.findAll({
     project_id: c.req.query('project_id'),
     status,
     inbox,
     risk_level,
+    user,
     limit,
     offset,
   })
@@ -228,11 +235,21 @@ router.patch('/:id/review', authMiddleware, async (c) => {
   const existing = await dao.findById(id)
   if (!existing) return notFound(c, 'Command not found')
 
+  // 소유권 체크(2026-07-14) — /approvals 화면의 핵심 mutation(승인/반려/수정요청)에 접근제어가
+  //   없으면 GET /commands 에서 목록을 숨겨도 command id 를 다른 경로로 알아낸 사용자가 남의
+  //   프로젝트 커맨드를 승인/반려할 수 있었다(조회는 막고 쓰기는 열려있던 구멍). PUT /:id/autonomy
+  //   와 동일하게 editor 이상(소유자 또는 editor 공유자)만 허용 — viewer 는 승인 액션 불가.
+  //   project_id 는 스키마상 NOT NULL(실측 0건 예외)이지만, 혹시 못 찾으면(project 삭제 등)
+  //   role 판정이 자연히 null 이 되어 동일하게 404 로 막힌다(별도 분기 불필요).
+  const project = existing.project_id ? await new ProjectsDao(c.env.DB).findById(existing.project_id) : null
+  const role = await getProjectRole(c.env.DB, project, reviewed_by)
+  if (!roleAtLeast(role, 'editor')) return notFound(c, 'Command not found')
+
   const result = c.env.DB.transaction((tx) => reviewCommandTx(tx, { id, decision, review_note, reviewed_by }))
   if (!result.command) return conflict(c, 'Command already reviewed or in terminal state')
 
-  // Push notification to project owner about approval decision
-  const project = result.command.project_id ? await new ProjectsDao(c.env.DB).findById(result.command.project_id) : null
+  // Push notification to project owner about approval decision. project는 위 소유권 체크에서
+  // 이미 조회했다(project_id는 review로 바뀌지 않으므로 재조회 불필요).
   if (project?.owner_user_id) {
     sendApprovalNotification(c.env.DB, project.owner_user_id, result.command).catch((e) => {
       console.error('[Push] Failed to send approval notification:', e.message)
@@ -314,10 +331,15 @@ router.patch('/:id/terminate', authMiddleware, async (c) => {
   const command = await new CommandsDao(c.env.DB).findById(id)
   if (!command) return notFound(c, 'Command not found')
 
-  // 프로젝트 소유자만 강제 종료 가능 (또는 admin)
+  // 프로젝트 소유자 또는 editor 공유자만 강제 종료 가능. role(admin/user)과 무관하게
+  // owner_user_id/project_collaborators 소유권 기준으로만 판정한다(전역 관리자 전체보기 없음 —
+  // 기존 `project.owner_id !== user?.sub && user?.role !== 'admin'` 검사는 스키마에 없는
+  // owner_id 컬럼을 참조해 사실상 항상 첫 조건이 true였고 role='admin' 이면 소유권 무관하게
+  // 통과하던 버그였다. 두 계정 모두 role=admin이라 사실상 무력화되어 있었다).
   const user = c.get('user')
   const project = await new ProjectsDao(c.env.DB).findById(command.project_id)
-  if (!project || (project.owner_id !== user?.sub && user?.role !== 'admin')) {
+  const role = await getProjectRole(c.env.DB, project, user?.sub)
+  if (!roleAtLeast(role, 'editor')) {
     return c.json({ error: 'Unauthorized' }, 403)
   }
 
@@ -349,6 +371,113 @@ router.patch('/:id/terminate', authMiddleware, async (c) => {
   })
 
   return c.json({ command: updated })
+})
+
+/**
+ * POST /api/commands/:id/retry  [JWT]  실패 명령 재실행 — 새 command row 생성(원본은 mutate하지 않음).
+ *
+ * 설계 결정(2026-07-14 대표 지시로 변경 — direct:true 자가승인):
+ *  - editor 이상 권한자가 "재실행" 버튼을 누른 행위 자체가 승인이다 — 승인함(queued)에 다시 올려
+ *    이중 승인을 요구하지 않는다. §3-1 "로컬 직접 명령"과 동일하게 dao.create({direct:true})로
+ *    자가승인('approved')하고, §7 active-1이 비어 있으면 즉시 클레임+디스패치까지 시도한다
+ *    (프로젝트 상세 "작업 카드 만들기" direct:true 전환과 동일 정책, decision `ea7a0ad1`).
+ *  - session_id 있으면 §9 resume 인프라 재사용(task_type='resume', 원본 session_id 그대로).
+ *  - session_id 없으면 처음부터 재실행(instruction/host/permission_mode/business/customer/risk_level
+ *    클론, task_type도 클론하되 원본이 'resume'이면 null 폴백).
+ *  - §7 active-1 불변식: 같은 project_id에 claimed/running 이 있으면 409(재실행 row 자체를 만들지 않음).
+ *  - 재실행 계보는 retry_of_id(신규 컬럼)로만 추적 — parent_command_id/root_command_id는 phase-chain의
+ *    MAX_PHASE_ROUNDS 카운트를 오염시키므로 재사용하지 않는다.
+ */
+router.post('/:id/retry', authMiddleware, async (c) => {
+  const id = c.req.param('id')
+  const dao = new CommandsDao(c.env.DB)
+  const command = await dao.findById(id)
+  if (!command) return notFound(c, 'Command not found')
+
+  const user = c.get('user')
+  const project = command.project_id ? await new ProjectsDao(c.env.DB).findById(command.project_id) : null
+  const role = await getProjectRole(c.env.DB, project, user?.sub)
+  if (!roleAtLeast(role, 'editor')) {
+    return c.json({ error: 'Unauthorized' }, 403)
+  }
+
+  if (command.status !== 'failed') {
+    return conflict(c, `Cannot retry command in ${command.status} status`)
+  }
+
+  // §7 active-1 불변식: 같은 프로젝트에 이미 진행 중인 명령이 있으면 재실행 row 자체를 만들지 않는다.
+  const active = await c.env.DB.prepare(
+    `SELECT id FROM commands WHERE project_id=? AND status IN ('claimed','running') LIMIT 1`
+  ).bind(command.project_id).first()
+  if (active) {
+    return conflict(c, '프로젝트에 이미 진행 중인 명령이 있어 재실행할 수 없습니다')
+  }
+
+  const created_by = user?.sub || null
+  const baseTitle = (command.title || command.instruction || '').slice(0, 80)
+  const hasSession = !!command.session_id
+
+  const fields = hasSession
+    ? {
+        // §9 resume 인프라 재사용. instruction은 승인함 카드 표시용 설명 텍스트만 — 실제 재개 프롬프트는
+        // buildResumePrompt(review_note)가 담당(resume-loop.js).
+        instruction: '[재실행] 이전 세션이 실패했습니다. 이어서 진행해주세요.',
+        host: null,
+        permission_mode: 'allowlist',
+        business: null,
+        customer: null,
+        task_type: 'resume',
+        session_id: command.session_id,
+      }
+    : {
+        // 세션 시작 전 실패 → 처음부터 재실행. 원본 필드 클론.
+        instruction: command.instruction,
+        host: command.host,
+        permission_mode: command.permission_mode,
+        business: command.business,
+        customer: command.customer,
+        task_type: command.task_type === 'resume' ? null : command.task_type,
+        session_id: null,
+      }
+
+  const newCommand = await dao.create({
+    id: crypto.randomUUID(),
+    project_id: command.project_id,
+    created_by,
+    risk_level: command.risk_level || 'low',
+    title: `[재실행] ${baseTitle}`,
+    retry_of_id: command.id,
+    direct: true,
+    ...fields,
+  })
+
+  // (§3-1과 동일 패턴) 자가승인된 명령은 즉시 실행이 주경로다. 프로젝트가 비어 있으면 타겟클레임을
+  // 따내 곧바로 dispatch. 이미 뭔가 실행 중이면(위 §7 체크 이후 경합 발생 등) 'approved'로 남아
+  // 안전망 poll/엔진이 프로젝트가 비는 대로 집어간다.
+  const claimed = c.env.DB.transaction((tx) => claimApprovedForProject(tx, newCommand.id))
+  if (claimed) {
+    dispatchApprovedCommand(c.env.DB, newCommand.id).catch((e) =>
+      logActivity(c.env.DB, {
+        project_id: command.project_id, agent_name: 'system',
+        action: 'instant_dispatch_error', detail: e.message, created_at: new Date().toISOString(),
+      }))
+  }
+
+  logActivity(c.env.DB, {
+    project_id: command.project_id,
+    agent_name: created_by || 'unknown',
+    action: 'command_retry',
+    detail: `원본 명령 ${command.id} → 재실행 명령 ${newCommand.id} 자가승인 생성 (session_id ${hasSession ? '있음, resume' : '없음, 처음부터'})`,
+    created_at: new Date().toISOString(),
+  })
+
+  if (project?.owner_user_id) {
+    sendApprovalNotification(c.env.DB, project.owner_user_id, newCommand).catch((e) => {
+      console.error('[Push] Failed to send approval notification:', e.message)
+    })
+  }
+
+  return c.json({ command: newCommand }, 201)
 })
 
 export default router

@@ -1,13 +1,14 @@
 /**
  * lead.js — 분산(distributed) 자율 루프 적재 라우트.
  *
- *  GET/PUT /api/lead/autonomy   [JWT]        마스터 자율 스위치(kill-switch). 현행 유지.
+ *  GET  /api/lead/autonomy      [JWT]              마스터 자율 스위치(kill-switch) 조회.
+ *  PUT  /api/lead/autonomy      [JWT,super_admin]  마스터 자율 스위치 토글. 2026-07-14 super_admin 가드 신설(구멍 수정).
  *  GET  /api/lead/status        [JWT]        자율 제어판 현황(읽기 전용). 현행 유지.
  *  GET  /api/lead/engine-settings [JWT]       engine.* 설정(§4.2 이관 5키+tick_enabled) 조회. 2026-07-12 신설.
- *  PUT  /api/lead/engine-settings [JWT,admin] engine.* 설정 1건 수정(화이트리스트 밖 키는 400). 2026-07-12 신설.
+ *  PUT  /api/lead/engine-settings [JWT,super_admin] engine.* 설정 1건 수정(화이트리스트 밖 키는 400). 2026-07-12 신설.
  *  GET  /api/lead/app-settings    [JWT]       app_settings 범용 조회(autonomy_enabled/engine.* 제외). 2026-07-13 신설.
- *  PUT  /api/lead/app-settings    [JWT,admin] app_settings 임의 키 upsert(예약 키는 400). 2026-07-13 신설.
- *  DELETE /api/lead/app-settings/:key [JWT,admin] app_settings 키 삭제(예약 키는 400). 2026-07-13 신설.
+ *  PUT  /api/lead/app-settings    [JWT,super_admin] app_settings 임의 키 upsert(예약 키는 400). 2026-07-13 신설.
+ *  DELETE /api/lead/app-settings/:key [JWT,super_admin] app_settings 키 삭제(예약 키는 400). 2026-07-13 신설.
  *
  * ⚠️ central 경로는 제거됐다(단순 코어 전환, docs/design/simple-core.md).
  *   중앙 LEAD 오케스트레이터(/ingest, autonomous-projects, autonomy_mode 스위치)는 삭제.
@@ -30,12 +31,14 @@ import { authMiddleware } from '../middleware/auth.js'
 import { badRequest, forbidden } from '../utils/response.js'
 import { DEFAULT_BUDGET } from '../lib/autonomy.js'
 import { logActivity } from '../lib/activity-log.js'
+import { isSuperAdmin } from '../lib/roles.js'
 
 const router = new Hono()
 
-async function requireAdmin(c, next) {
+// 최고관리자(role='super_admin') 전용 가드 — 마스터 킬스위치·엔진 설정·앱 설정은 super_admin만.
+async function requireSuperAdmin(c, next) {
   const me = c.get('user')
-  if (!me || me.role !== 'admin') return forbidden(c, '관리자 권한이 필요합니다.')
+  if (!me || !isSuperAdmin(me.role)) return forbidden(c, '최고관리자 권한이 필요합니다.')
   await next()
 }
 
@@ -79,6 +82,10 @@ function isProjectAutonomyOn(p) {
  * 저장소: app_settings.autonomy_enabled('1'|'0'). 기본 OFF('0')=R0(LEAD auto 자식 전부 승인대기).
  * OFF 로 두면 박동/규칙/큐를 건드리지 않아도 즉시 모든 auto 배정이 멈춘다(ingest 게이트가 강등).
  * 운영자 액션이므로 JWT 필수(X-API-Key 자동화 경로로는 못 켠다).
+ *
+ * ⚠️ (2026-07-14 3단계 role 확장) PUT 은 최고관리자(super_admin) 전용으로 강화됐다 — 이전엔
+ *   requireAdmin 류 가드가 전혀 없어 **로그인만 하면 아무 사용자나** 전역 자율운영을 켜고 끌 수
+ *   있는 구멍이었다(GET 은 현황 조회라 그대로 authMiddleware 만 유지).
  */
 const AUTONOMY_KEY = 'autonomy_enabled'
 
@@ -90,7 +97,7 @@ router.get('/autonomy', authMiddleware, async (c) => {
   return c.json({ enabled, raw: row?.value ?? null, updated_at: row?.updated_at ?? null })
 })
 
-router.put('/autonomy', authMiddleware, async (c) => {
+router.put('/autonomy', authMiddleware, requireSuperAdmin, async (c) => {
   const body = await c.req.json().catch(() => ({}))
   if (typeof body.enabled !== 'boolean') return badRequest(c, 'enabled (boolean) is required')
   const db = c.env.DB
@@ -141,6 +148,22 @@ router.put('/autonomy', authMiddleware, async (c) => {
 router.get('/status', authMiddleware, async (c) => {
   const db = c.env.DB
   const one = async (sql, ...args) => (await db.prepare(sql).bind(...args).first()) || {}
+  // (2026-07-14 Critical H-3 수정) 이 라우트는 이미 authMiddleware가 있어 인증은 됐지만 소유권
+  //   WHERE가 전혀 없어 아래 모든 집계·projects 배열이 로그인한 모든 사용자에게 전체 노출됐다
+  //   (/autonomy 화면이 실제로 호출하는 엔드포인트). "화면마다 자기 프로젝트만" 원칙에 맞춰
+  //   집계(costRow/workerRow/apprRow)와 projectRows 전부 owner/collaborator 기준으로 좁힌다.
+  //   AUTONOMY_KEY(마스터 킬스위치)는 전역 설정이라 그대로 둔다.
+  // (2026-07-14 3단계 role 확장 후속 수정) super_admin은 모니터링 목적으로 이 소유권 스코프를
+  //   전부 건너뛴다(projects.js/commands.js 와 동일한 super_admin bypass 원칙, getMonitorableProject
+  //   와 동형 — 읽기 전용 라우트라 문제 없음). OWNED를 '1=1'로 무조건참 처리하고 그에 맞춰
+  //   bind 인자도 0개로 줄인다(placeholder 수가 실제 바인딩 값 수와 항상 일치해야 하므로).
+  const me = c.get('user')
+  const user = me?.sub
+  const superAdmin = isSuperAdmin(me?.role)
+  const OWNED = superAdmin
+    ? '1=1'
+    : '(owner_user_id = ? OR id IN (SELECT project_id FROM project_collaborators WHERE user = ?))'
+  const ownedArgs = superAdmin ? [] : [user, user]
 
   // 1) 자율 스위치.
   const autoRow = await db.prepare('SELECT value, updated_at FROM app_settings WHERE key = ?')
@@ -159,37 +182,44 @@ router.get('/status', authMiddleware, async (c) => {
     .bind('engine.daily_cost_limit_usd').first()
   const dailyLimit = engineLimitRow ? Number(engineLimitRow.value) : Number(DEFAULT_BUDGET.daily_cost_limit_usd)
 
-  // 3) 오늘 자율 비용 = 자율대상 프로젝트(autonomy_enabled='1') 전체 command 의 오늘 SUM(cost_usd).
+  // 3) 오늘 자율 비용 = 자율대상 프로젝트(autonomy_enabled='1') 중 내 소유/공유 프로젝트 command 의
+  //    오늘 SUM(cost_usd). (H-3) 소유권 무관 시스템 전체 합계였던 것을 사용자 스코프로 좁힘.
   const costRow = await one(
     `SELECT COALESCE(SUM(cost_usd), 0) AS total FROM commands
-      WHERE project_id IN (SELECT id FROM projects WHERE autonomy_enabled = '1')
-        AND date(created_at,'localtime') = date('now','localtime')`
+      WHERE project_id IN (SELECT id FROM projects WHERE autonomy_enabled = '1' AND ${OWNED})
+        AND date(created_at,'localtime') = date('now','localtime')`,
+    ...ownedArgs,
   )
   const todayCost = Number(costRow.total) || 0
   const costPct = dailyLimit > 0 ? Math.min(100, Math.round((todayCost / dailyLimit) * 100)) : 0
 
-  // 4) 실행 중 워커 = 자율대상 프로젝트의 claimed/running command.
+  // 4) 실행 중 워커 = 자율대상 프로젝트 중 내 소유/공유 프로젝트의 claimed/running command.
   const workerRow = await one(
     `SELECT COUNT(*) AS running FROM commands
-      WHERE project_id IN (SELECT id FROM projects WHERE autonomy_enabled = '1')
-        AND status IN ('claimed','running')`
+      WHERE project_id IN (SELECT id FROM projects WHERE autonomy_enabled = '1' AND ${OWNED})
+        AND status IN ('claimed','running')`,
+    ...ownedArgs,
   )
 
-  // 5) 최근 자율 사이클 — 가장 최신 project_cycle command(분산 스폰 단위). tasks JOIN 없었으므로 무변경.
+  // 5) 최근 자율 사이클 — 가장 최신 project_cycle command(분산 스폰 단위). (H-3 연장) COO 지시에
+  //    명시되진 않았으나 동일 정보노출 성격(다른 사용자 프로젝트의 사이클 id/비용/에러가 그대로
+  //    보임)이라 취지에 맞춰 함께 스코프한다 — 일관성 없이 이 하나만 열어두는 게 더 이상해서.
   const lastCycle = await db.prepare(
     `SELECT c.id, c.status, c.cost_usd, c.error, c.exit_code, c.created_at, c.updated_at
        FROM commands c
       WHERE c.task_type = 'project_cycle'
+        AND c.project_id IN (SELECT id FROM projects WHERE ${OWNED})
       ORDER BY c.created_at DESC LIMIT 1`
-  ).first()
+  ).bind(...ownedArgs).first()
 
-  // 6) 승인 대기 중인 커맨드 수 = 자율대상 프로젝트의 승인대기함(queued + review 미처리).
-  //    단, project_cycle 스폰 command 는 워커 실행 대기(poll 이 곧 claim)이지 '승인 대기'가 아니므로
-  //    제외한다. 승인 대상은 사람 커맨드/워커 proposal 뿐(task_type != 'project_cycle').
+  // 6) 승인 대기 중인 커맨드 수 = 자율대상 프로젝트 중 내 소유/공유 프로젝트의 승인대기함
+  //    (queued + review 미처리). project_cycle 스폰 command 는 워커 실행 대기(poll 이 곧 claim)이지
+  //    '승인 대기'가 아니므로 제외한다. 승인 대상은 사람 커맨드/워커 proposal 뿐(task_type != 'project_cycle').
   const apprRow = await one(
     `SELECT COUNT(*) AS pending FROM commands
-      WHERE project_id IN (SELECT id FROM projects WHERE autonomy_enabled = '1')
-        AND status = 'queued' AND review_status IS NULL AND task_type != 'project_cycle'`
+      WHERE project_id IN (SELECT id FROM projects WHERE autonomy_enabled = '1' AND ${OWNED})
+        AND status = 'queued' AND review_status IS NULL AND task_type != 'project_cycle'`,
+    ...ownedArgs,
   )
 
   // 7) 프로젝트별 자율 상태 목록 — 자율 ON(= isProjectAutonomyOn 기준)인 프로젝트만.
@@ -227,9 +257,10 @@ router.get('/status', authMiddleware, async (c) => {
         AND p.autonomy_enabled = '1'
         AND (p.cadence IS NULL OR p.cadence != 'off')
         AND p.lead_agent_name IS NOT NULL AND p.lead_agent_name != ''
+        AND ${superAdmin ? '1=1' : '(p.owner_user_id = ? OR p.id IN (SELECT project_id FROM project_collaborators WHERE user = ?))'}
       ORDER BY p.name ASC
       LIMIT 20
-    `).all()).results || []
+    `).bind(...ownedArgs).all()).results || []
   } catch { projectRows = [] }
 
   return c.json({
@@ -278,10 +309,10 @@ router.get('/engine-settings', authMiddleware, async (c) => {
  * PUT /api/lead/engine-settings  [JWT, admin]  — engine.* 설정 화이트리스트 1건 수정.
  * body: { key: string, value: string|number }
  *
- * 관리자 전용(system.js requireAdmin 과 동일 패턴) — 엔진 튜닝값은 자율 실행에 직접 영향을 주므로
+ * 최고관리자 전용(system.js requireSuperAdmin 과 동일 패턴) — 엔진 튜닝값은 자율 실행에 직접 영향을 주므로
  * 일반 user 롤에게는 열어주지 않는다. 화이트리스트 밖 키는 400(임의 app_settings 오염 방지).
  */
-router.put('/engine-settings', authMiddleware, requireAdmin, async (c) => {
+router.put('/engine-settings', authMiddleware, requireSuperAdmin, async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const { key, value } = body
   const def = ENGINE_SETTINGS_MAP.get(key)
@@ -344,7 +375,7 @@ router.get('/app-settings', authMiddleware, async (c) => {
  * autonomy_enabled/engine.* 는 예약 키라 거부(각자 전용 라우트로 유도). 그 외 키는 자유 텍스트라
  * engine-settings 와 달리 타입 검증 없이 그대로 저장한다(value='' 도 허용).
  */
-router.put('/app-settings', authMiddleware, requireAdmin, async (c) => {
+router.put('/app-settings', authMiddleware, requireSuperAdmin, async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const { key, value } = body
   if (typeof key !== 'string' || key.trim() === '') return badRequest(c, 'key가 필요합니다')
@@ -375,7 +406,7 @@ router.put('/app-settings', authMiddleware, requireAdmin, async (c) => {
  *
  * autonomy_enabled/engine.* 는 예약 키라 거부. 존재하지 않는 키는 404.
  */
-router.delete('/app-settings/:key', authMiddleware, requireAdmin, async (c) => {
+router.delete('/app-settings/:key', authMiddleware, requireSuperAdmin, async (c) => {
   const key = c.req.param('key')
   if (isReservedSettingKey(key)) {
     return badRequest(c, '이 키는 자율 제어판(/autonomy)에서 관리합니다')

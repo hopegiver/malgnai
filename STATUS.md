@@ -1,5 +1,5 @@
 # STATUS — malgnai
-_최종 갱신: 2026-07-14 — 자가평가 KPI로 자율운영이 의도치 않게 꺼졌던 사고(issue `54d2193d`)를 `kpi_complete_action`(기본 continue) 신설로 구조적 해결(decision `bd36cf0d`) 후, 대표 승인(command `c76ae6b2`) 받아 autonomy_enabled=true 재활성화 完 — DB 실측 확인. project-cycle-prompt.js도 "KPI 달성=무조건 종료 선언" 지시를 제거해 워커가 더 이상 project_status=completed를 오발동하지 않도록 정합. 커밋 대기 3건(옵션칩·모니터버그·이번 기능) 누적, 조만간 정리 필요._
+_최종 갱신: 2026-07-14 — 자율엔진(coo·hourly) 워킹트리 재점검: 신규 미커밋 변경 없음(클린 상태 확인). 지난 사이클 이후 다른 세션이 커밋한 루트 잡동사니 정리(`febb4b2`)·과잉 e2e 테스트 제거(`6a56f3a`)를 STATUS.md에 반영. 문서드리프트 0건(check-docs 전체 일치)·최근 24h 자율사이클 실패 0건 재확인(KPI 양쪽 target 충족).
 <!-- malgnai-mcp project_id: b00eaa81-7cea-4e38-b1bc-8cb024974cd9 -->
 
 > **malgnai** = **"AI 자율 프로젝트 운영 플랫폼"** — 직원들이 각자 로그인해 자기 업무 프로젝트를 생성하면 AI가 그 프로젝트를 스스로 진행(기획→설계→개발→검증). ⚠️ **2026-07-02 비전 재정의: "1인 회사 운영 OS" 개념 폐기**(decision `e11f376d`). 자율 LEAD 루프 + 승인함 엔진은 라이브(R1)이며 새 비전의 뼈대로 재활용.
@@ -9,8 +9,7 @@ _최종 갱신: 2026-07-14 — 자가평가 KPI로 자율운영이 의도치 않
 
 ## 🟢 현재 라이브 상태
 
-- **[07-14] 승인함 구조화 선택지 기능 — 구현/검증 完, 커밋 대기**: `commands.options_json`(migrations/010) + MCP `command_add options` 파라미터 + `/approvals` 옵션 칩 UI. 대표가 "선택형 질문인데 입력창이 없다"고 지적한 갭 해소. decision `70dd5eea`.
-- **[07-14] 실행모니터 완료항목 미제거 버그 수정 — 구현/검증 完, 커밋 대기**: `engine/safety-poll.js` postMonitorEvent('end') await 누락(race)이 원인, 최소수정 1파일. decision `8cdc959a`.
+- **⚠️ 자율엔진↔인터랙티브 세션 git 워킹트리 공유 위험(issue `86fa7c85`) — 07-14 정책으로 절반 해소**: "커밋 전 사람 승인"이 전제였던 우회 문제는 대표 지시("AI 작업은 승인 없이 바로 커밋, push/force만 별개")로 전제 자체가 사라져 해소. 다만 **동일 워킹트리를 여러 프로세스(coo·hourly 사이클 + 인터랙티브 세션)가 동시에 건드리는 문제는 여전**: 지난 세션 dangling commit `3c79d8d` 유실 사고가 있었으나(SIGTERM 수정분), 이번 사이클에선 반대로 다른 세션이 재작성해둔 미커밋 변경을 검증 후 그대로 커밋 완료(위 완료목록 `d6ce9d7`) — 협업이 실제로 작동한 사례. 동시편집 충돌 방지 관점의 격리(worktree 분리 등)는 여전히 검토 대상.
 - **malgnai 자율 재가동 중(coo·hourly, project `b00eaa81`, DB 실측 `autonomy_enabled=1` 확인, 07-14 재점검)** — 목표: "지속 자기관찰·개선"(엔진↔웹앱분리는 완결돼 폐기). custom_instruction: 게이트(비용상한/연속실패) 재활성화·엔진 안전판단 변경은 승인함 경유, 사소한 수정만 자동. KPI: 문서드리프트 target 0건, 오류건수 target 0건(측정불가 "완성도" 점수는 폐기). kpi_complete_action=continue라 KPI 달성해도 자동종료 안 됨.
 - **유일 실동작 자율 안전게이트 = `risk_approval_threshold`**(기본 high, low/medium만 자동집행 후보) — `server/lib/autonomy.js#riskAllowsAuto()`. 기존 비용상한/연속실패 게이트 3종은 여전히 DEV MODE로 우회 중이며 재활성화는 반복 보류(decision `583239ac`/`83785da8`/`37cb6f3d`) — **먼저 상의 없이 건드리지 말 것**. 안정성 판단은 감이 아니라 `/autonomy`의 실측 실패율(cycles_failed/cycles_total, commit `b075ac1`)로.
 - **엔진↔웹앱 분리 Phase 0~3 完(07-12/07-13)** — `com.malgnai.engine`이 유일한 실행경로, 구 HTTP 라우트 3종 물리삭제 완료(commit `9be5b60`). Phase 4(선택·저우선순위: cycle-ingest/autonomy.js를 engine/로 물리이전)만 남음. 실시간모니터 브리징 race 버그는 07-14 수정 完(decision `8cdc959a`).
@@ -19,14 +18,14 @@ _최종 갱신: 2026-07-14 — 자가평가 KPI로 자율운영이 의도치 않
 
 ## ✅ 최근 완료 (상세=MCP decision id)
 
-- **[07-13] PWA 재로그인 불편 해소 — refresh token(30일·회전형) 인증연장, 동시성버그 발견·수정** — commit `dfa17c2`/`9aec31d`. auth 단위30/30.
-- **[07-13] 위험도 승인 임계값(`risk_approval_threshold`)+cadence 3/6/12h 추가 — 유일 실동작 안전게이트 신설** — commit `db1a580`/`9aec31d`, decision `4763f164`. 후속 risk_level 판단기준 프롬프트 보강 commit `3ea9c74`.
-- **[07-13] 자율실행 웹서버즉시스폰 제거→엔진전용화 + 승인함 3종 memories 통일기록** — commit `cf0ad61`, decision `3e17ff4b`. e2e 검증 중 발견한 project-null 가드 누락 near-miss도 즉시 수정(issue `3a291e8c` resolved, memory `3ce2bc0b`).
-- **[07-13] 모바일 하단탭바+승인함 푸시알림 배선+PWA아이콘 캐시버스팅+app_settings 범용CRUD** — commit `b083102`/`da6e121`. 고아 malgnai-lead 문구 정리 commit `460e388`.
-- **[07-13] 엔진↔웹앱분리 Phase 3 완결(410 Gone 라우트 물리삭제) + 엔진→서버 실시간모니터 브릿지 복구** — commit `9be5b60`/`ecfbd9a`/`b9da9cf`.
-- **[07-13] 자율제어판 관찰 대시보드 확장(비용/실패율/최근결과) + malgnai 자율 재가동** — commit `b075ac1`, decision `779cfe24`.
-- **[07-13] 자율설정 확장(custom_instruction+KPI 자동완성) + MCP `project_autonomy_get/update` 신설** — commit `9948c66`.
-- _그 이전(07-12 engine설정UI·비용한도버그, 07-11 AI콘솔UX·phase-chain E2E, 07-10 승인함뱃지·로그인버그, 07-08 실행모니터, 07-07 UI/UX재설계 등)은 `get_current_context`/`memory_search`로 조회._
+- **[07-14] 루트 잡동사니 정리 + 과잉 e2e 테스트 제거** — 다른 세션이 커밋한 정리 작업 확인(구현노트 md·vue-zero.js.bak·스크린샷 PNG·일회성 테스트 스크립트 삭제 `febb4b2`, 프로젝트 생성 왕복 phase-chain e2e 삭제 — 단위테스트로 충분 `6a56f3a`). 워킹트리는 현재 클린.
+- **[07-14] 워킹트리 미커밋 변경 검증 후 커밋 — 콘솔 IME Enter 버그 + 프로젝트 소유자 표시 + 검증 스킬** — hourly 점검 중 다른 세션이 만들어둔 미커밋 diff(console.vue, projects.vue, .claude/skills/verify) 발견. 내용 검토 결과: (1) 한글 등 IME 조합 중 Enter로 메시지가 조기 전송되던 버그를 `e.isComposing`/`keyCode 229` 체크로 방지, (2) 프로젝트 카드에 `owner_user_id` 표시(다중 소유권 모델 도입 이후 구분 필요), (3) 웹앱 런타임 검증 레시피 스킬(서버/인증/Playwright/IME 검증법) 신규. 서버 프로세스 단수 확인(동시편집 아님)·owner_user_id 필드 실재 확인(`SELECT *` 포함)·정적서빙 200 확인 후 커밋. commit `ebc5486`.
+- **[07-14] 홈 대시보드 사용자 필터 누락 버그 수정** — `commands.inboxSummary()`만 소유권 스코프(projectAccessWhere)가 적용되고 프로젝트 카운트/목록·최근 활동·열린 이슈·프로젝트별 AI 투입 Top은 그대로 시스템 전체가 노출되던 버그. 4개 DAO에 optional user 스코프 추가, 기계 전체 집계(ai_cost·ai_activity)는 super_admin 전용으로 숨김(대표 확인). chhwi(admin) 토큰 실측 검증 完. decision `b2897939`. commit `c5ed199`.
+- **[07-14] 명령 재실행 — direct:true 자가승인으로 정정** — 초기엔 "재실행도 승인함 queued 재경유"로 구현했으나(decision `869e528b`) 대표 지시로 뒤집힘: 재실행 버튼을 누른 행위 자체가 승인이므로 §3-1과 동일하게 자가승인('approved')+즉시 클레임/디스패치. `retry_of_id` 컬럼(migrations/015, phase-chain MAX_PHASE_ROUNDS 오염 방지로 parent/root_command_id 미재사용)·session_id 유무 분기(resume 재사용/원본 클론)·§7 active-1 체크는 그대로 유지. curl로 전체 파이프라인 실측 검증. decision `88ea8b75`. commit `93d75d5`+`40c2a14`.
+- **[07-14] 프로젝트 상세 "작업 카드 만들기" 승인함 우회(direct:true 자가승인)** — submitTask가 POST /api/commands에 direct:true를 실어 기존 §3-1 자가승인 경로(로컬명령과 동일)를 재사용, status='approved'로 즉시 실행 큐행. 실측 검증(curl+JWT) 完. decision `ea7a0ad1`. commit `fe04850`.
+- **[07-14] 콘솔 세션 목록 activeTurnId 미초기화 버그 수정** — selectSession/startNewSession이 activeTurnId(진행중 턴 추적 state)를 리셋 안 해 pending 행을 본 뒤 다른 세션 클릭 시 두 행이 동시에 active + stuck 행 재클릭 무반응. `app/pages/console.vue` 수정. issue `ea23298b` resolved, memory `35a6c608`(교훈). commit `6cf785b`.
+- **[07-14] 콘솔 세션 목록 상태필터 완전 제거 + is_synthetic 라우팅 분리** — `findConsoleSessions`가 session_id 미배정 행을 status로 걸러내던 것(stale-reap 실패 턴 누락, issue `f8017ff3` resolved)을 없애 전부 노출, is_pending(표시)과 is_synthetic(라우팅) 역할 분리로 종결된 synthetic 행 클릭 404 방지. commit `f4fdd7c`+`e38309e`. memory `79ba3ba4`(교훈).
+- _그 이전(commands/dashboard/lead super_admin 확장, 기능요청 자동심사 파이프라인 `c7239ac` 등)은 `get_current_context`/`memory_search`로 조회._
 
 ## 🚧 차단 없는 백로그 (비차단)
 

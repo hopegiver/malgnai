@@ -1,3 +1,5 @@
+import { projectAccessWhere } from '../lib/project-access.js'
+
 /**
  * CommandsDao — 웹→로컬 명령 실행 파이프라인의 명령 큐(inbox) DAO.
  *
@@ -58,6 +60,9 @@ export default class CommandsDao {
     // (2026-07-14) 선택형 질문 옵션. [{label, description?}, ...] 배열이면 그대로 JSON 직렬화해 저장,
     //   미지정/빈 배열이면 NULL(자유텍스트 질문).
     options,
+    // (2026-07-14) 실패 명령 재실행 계보. 원본 command.id(nullable) — parent/root_command_id와는
+    //   별개 트랙(phase-chain.js의 MAX_PHASE_ROUNDS 카운트 오염 방지, migrations/015 주석 참고).
+    retry_of_id,
   }) {
     const now = new Date().toISOString()
     const status = direct ? 'approved' : 'queued'
@@ -69,8 +74,8 @@ export default class CommandsDao {
       `INSERT INTO commands (id, project_id, host, instruction, status, permission_mode, created_by, created_at, updated_at,
                              task_type, business, customer, risk_level, ai_summary, evidence, recommended_action,
                              title, assignee_agent_name, parent_command_id, root_command_id, level,
-                             review_status, reviewed_by, reviewed_at, session_id, idempotency_key, options_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                             review_status, reviewed_by, reviewed_at, session_id, idempotency_key, options_json, retry_of_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       id,
       project_id,
@@ -99,6 +104,7 @@ export default class CommandsDao {
       session_id || null,
       idempotency_key || null,
       options_json,
+      retry_of_id || null,
     ).run()
     return await this.findById(id)
   }
@@ -108,14 +114,29 @@ export default class CommandsDao {
    *  - inbox='pending' → status='queued' AND review_status IS NULL (검토 대기 중만)
    *  - inbox='done'    → review_status IS NOT NULL (검토 완료)
    *  - risk_level      → 정확 일치(API 레이어에서 low/medium/high 검증)
+   *  - user            → 소유권 스코핑(2026-07-14). 지정되면 그 프로젝트의 owner_user_id=user
+   *    이거나 project_collaborators 로 공유받은 프로젝트의 커맨드만 본다. project_id 를 함께
+   *    지정해도 이 조건이 AND 로 함께 걸리므로, 남의 project_id 를 넣어도(우회 목적) 소유권이
+   *    없으면 결과가 그냥 비어 나온다(별도 사전 체크 불필요 — WHERE 레벨에서 이미 차단됨).
+   *    project_id 가 NULL 인 커맨드(현재 0건, 실측 확인)는 owner_user_id 도 project_collaborators
+   *    매칭도 없으므로 이 필터에서 자동 제외된다 — "소유자 불명 레코드는 누구에게도 노출하지
+   *    않는다"가 안전한 기본값이라 별도 예외 처리를 두지 않았다.
    */
-  async findAll({ project_id, status, inbox, risk_level, limit = 50, offset = 0 } = {}) {
+  async findAll({ project_id, status, inbox, risk_level, user, limit = 50, offset = 0 } = {}) {
     // commands 를 c 로, projects 를 p 로 별칭 — projects 에도 status/created_at 이 있어
     // JOIN 시 컬럼이 모호해지므로 모든 조건/정렬 컬럼을 c. 로 한정한다.
     // project_name: 승인 카드가 "어느 프로젝트"인지 보여줄 수 있도록 함께 반환(옛 business/customer 대체).
     const conds = []
     const vals = []
     if (project_id) { conds.push('c.project_id = ?'); vals.push(project_id) }
+    if (user) {
+      // 소유권 스코핑 로직은 project-access.js의 projectAccessWhere로 통일한다 — inboxSummary()도
+      // 동일 함수를 쓴다(대시보드 "승인 대기" 카운트와 이 목록이 서로 다른 스코프를 쓰면 홈 화면
+      // 숫자와 /approvals 실제 목록이 어긋나는 버그가 난다, 2026-07-14 수정).
+      const scope = projectAccessWhere('p.owner_user_id', 'c.project_id')
+      conds.push(scope.sql)
+      vals.push(...scope.bind(user))
+    }
     // status: 배열이면 IN 조건(실행 모니터의 active='claimed,running'/recent='done,failed' 폴링용,
     //   2026-07-14). 문자열이면 기존과 동일한 단일 일치.
     if (Array.isArray(status) && status.length) {
@@ -156,29 +177,51 @@ export default class CommandsDao {
   }
 
   /**
-   * inboxSummary — B-4 경영 통제센터 집계.
+   * inboxSummary — B-4 경영 통제센터 집계(홈 대시보드 "승인 대기" 배너의 소스).
    * 단일 패스로 승인 대기(pending)·위험도 분포·실패·자동생성·총비용을 모아 반환.
    * 인덱스(idx_commands_claim: status 선두)를 타도록 status 기준 집계.
+   *
+   * @param {string|undefined} user — 호출한 사용자(JWT sub). 지정하면 findAll({user})과 **동일한**
+   *   projectAccessWhere 스코프(소유자 owner_user_id 또는 project_collaborators 공유자)로 집계를
+   *   제한한다. 미지정(레거시 호출부) 시 스코핑 없이 시스템 전체를 집계한다.
+   *   ⚠️ 2026-07-14 버그 수정: 이 함수가 원래 스코프 없이 시스템 전체 pending 을 셌기 때문에,
+   *   홈 대시보드가 보여주는 "승인 대기 N건"이 /approvals(GET /api/commands?inbox=pending, user로
+   *   스코핑됨)에는 안 보이는 남의 프로젝트 건까지 포함해 숫자가 어긋났다(issue: 대시보드 클릭해도
+   *   승인함에 안 보이는 항목). PATCH /:id/review 도 소유자/editor 공유자만 승인 가능해(super_admin
+   *   bypass 없음, project-access.js 주석 참고) "실제로 클릭해서 처리 가능한 건수"의 정답은 항상
+   *   이 스코프다 — role 에 따른 예외를 두지 않는다.
    * @returns { pending, pending_high, pending_medium, pending_low, failed, scheduled_pending, total_cost_usd }
    */
-  async inboxSummary() {
+  async inboxSummary(user) {
+    const scope = user ? projectAccessWhere('p.owner_user_id', 'c.project_id') : null
+    const join = scope ? 'LEFT JOIN projects p ON p.id = c.project_id' : ''
+    const scopeVals = scope ? scope.bind(user) : []
+
     // 검토 대기 = status='queued' AND review_status IS NULL (승인함과 동일 정의).
+    const pendingConds = [`c.status='queued'`, `c.review_status IS NULL`]
+    if (scope) pendingConds.push(scope.sql)
     const pending = await this.db.prepare(
       `SELECT
          COUNT(*) AS pending,
-         SUM(CASE WHEN risk_level='high'   THEN 1 ELSE 0 END) AS pending_high,
-         SUM(CASE WHEN risk_level='medium' THEN 1 ELSE 0 END) AS pending_medium,
-         SUM(CASE WHEN risk_level='low' OR risk_level IS NULL THEN 1 ELSE 0 END) AS pending_low,
-         SUM(CASE WHEN created_by='scheduler' THEN 1 ELSE 0 END) AS scheduled_pending
-       FROM commands
-       WHERE status='queued' AND review_status IS NULL`
-    ).first()
+         SUM(CASE WHEN c.risk_level='high'   THEN 1 ELSE 0 END) AS pending_high,
+         SUM(CASE WHEN c.risk_level='medium' THEN 1 ELSE 0 END) AS pending_medium,
+         SUM(CASE WHEN c.risk_level='low' OR c.risk_level IS NULL THEN 1 ELSE 0 END) AS pending_low,
+         SUM(CASE WHEN c.created_by='scheduler' THEN 1 ELSE 0 END) AS scheduled_pending
+       FROM commands c ${join}
+       WHERE ${pendingConds.join(' AND ')}`
+    ).bind(...scopeVals).first()
+
+    const failedConds = [`c.status='failed'`]
+    if (scope) failedConds.push(scope.sql)
     const failed = await this.db.prepare(
-      `SELECT COUNT(*) AS failed FROM commands WHERE status='failed'`
-    ).first()
+      `SELECT COUNT(*) AS failed FROM commands c ${join} WHERE ${failedConds.join(' AND ')}`
+    ).bind(...scopeVals).first()
+
+    const costWhere = scope ? `WHERE ${scope.sql}` : ''
     const cost = await this.db.prepare(
-      `SELECT COALESCE(SUM(cost_usd), 0) AS total_cost_usd FROM commands`
-    ).first()
+      `SELECT COALESCE(SUM(c.cost_usd), 0) AS total_cost_usd FROM commands c ${join} ${costWhere}`
+    ).bind(...scopeVals).first()
+
     return {
       pending: pending?.pending || 0,
       pending_high: pending?.pending_high || 0,
@@ -301,28 +344,45 @@ export default class CommandsDao {
   /**
    * findConsoleSessions — Claude Code 웹콘솔(project_id 스코프)의 세션 목록(최신순 페이지네이션).
    *   세션당 1행: 턴 수·최근 시각·누적 비용·제목(첫 턴 instruction 원문, 프론트가 truncate)·
-   *   마지막 턴 상태. task_type='console' AND session_id IS NOT NULL 인 것만 대상(첫 턴은
-   *   session_id 가 아직 없어 목록에 안 잡히는 게 정상 — 워커 응답으로 세션이 생긴 뒤부터 노출).
+   *   마지막 턴 상태. session_id 가 배정된 세션은 GROUP BY 로 합산하고, 아직 session_id 를 못 받은
+   *   진행중 첫 턴(다른 탭/다른 사용자가 막 보낸 신규 대화 포함)은 자신의 command id 를 임시
+   *   session_id 로 삼아 UNION — status 조건 없이 전부 노출한다(issue f8017ff3: 엔진 reapStaleCycles
+   *   가 session_id 없이 곧장 failed 처리하는 경우가 있어, 상태로 걸러내면 그 턴이 영영 안 보임).
+   *   is_pending 은 실제 진행중(approved/claimed/running)일 때만 1 — 종결된 상태(done/failed 등)는
+   *   0 으로 내려 프론트가 "실행중" 표시(●, 폴링 진입)를 하지 않고 조용히 제목만 보여주게 한다.
+   *   is_synthetic=1 인 행은 session_id 자리에 command.id 가 들어있다는 뜻(진짜 세션이 아님) —
+   *   프론트는 이 플래그로 클릭 시 /sessions/:id/turns(그룹 세션 조회) 대신 /turns/:id(단건 조회)로
+   *   라우팅해야 한다(is_pending 으로 라우팅 분기하면 종결된 synthetic 행에서 404 남).
    *
    * 세션이 쌓일수록 목록 조회가 무거워지는 걸 막기 위해 limit+1개를 가져와 실제 limit개를
    *   초과하면 has_more=true 로 알린다(별도 COUNT(*) 쿼리 없이 한 방에 다음 페이지 존재 여부 판단).
    */
   async findConsoleSessions(project_id, { limit = 10, offset = 0 } = {}) {
     const rows = (await this.db.prepare(
-      `SELECT session_id,
-              COUNT(*) AS turn_count,
-              MAX(created_at) AS last_at,
-              COALESCE(SUM(cost_usd),0) AS total_cost_usd,
-              (SELECT instruction FROM commands c2 WHERE c2.session_id=c.session_id
-                 AND c2.task_type='console' ORDER BY c2.created_at ASC LIMIT 1) AS title,
-              (SELECT status FROM commands c3 WHERE c3.session_id=c.session_id
-                 AND c3.task_type='console' ORDER BY c3.created_at DESC LIMIT 1) AS last_status
-         FROM commands c
-        WHERE c.project_id = ? AND c.task_type = 'console' AND c.session_id IS NOT NULL
-        GROUP BY c.session_id
+      `SELECT * FROM (
+         SELECT session_id,
+                COUNT(*) AS turn_count,
+                MAX(created_at) AS last_at,
+                COALESCE(SUM(cost_usd),0) AS total_cost_usd,
+                (SELECT instruction FROM commands c2 WHERE c2.session_id=c.session_id
+                   AND c2.task_type='console' ORDER BY c2.created_at ASC LIMIT 1) AS title,
+                (SELECT status FROM commands c3 WHERE c3.session_id=c.session_id
+                   AND c3.task_type='console' ORDER BY c3.created_at DESC LIMIT 1) AS last_status,
+                0 AS is_pending, 0 AS is_synthetic
+           FROM commands c
+          WHERE c.project_id = ? AND c.task_type = 'console' AND c.session_id IS NOT NULL
+          GROUP BY c.session_id
+          UNION ALL
+         SELECT id AS session_id, 1 AS turn_count, created_at AS last_at,
+                COALESCE(cost_usd,0) AS total_cost_usd, instruction AS title, status AS last_status,
+                CASE WHEN status IN ('approved','claimed','running') THEN 1 ELSE 0 END AS is_pending,
+                1 AS is_synthetic
+           FROM commands
+          WHERE project_id = ? AND task_type = 'console' AND session_id IS NULL
+       )
         ORDER BY last_at DESC
         LIMIT ? OFFSET ?`
-    ).bind(project_id, limit + 1, offset).all()).results
+    ).bind(project_id, project_id, limit + 1, offset).all()).results
     const has_more = rows.length > limit
     return { sessions: has_more ? rows.slice(0, limit) : rows, has_more }
   }

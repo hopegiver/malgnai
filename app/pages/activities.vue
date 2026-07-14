@@ -393,6 +393,13 @@
             <div>생성: {{ formatDate(detailCommand.created_at) }}</div>
             <div>수정: {{ formatDate(detailCommand.updated_at) }}</div>
           </div>
+          <div v-if="detailCommand.status === 'failed'" class="d-flex justify-content-end mt-3">
+            <button class="btn btn-sm btn-outline-secondary" :disabled="retryingCommandId === detailCommand.id"
+                    @click="retryCommand(detailCommand)">
+              <span v-if="retryingCommandId === detailCommand.id" class="spinner-border spinner-border-sm me-1"></span>
+              <i v-else class="bi bi-arrow-clockwise me-1"></i>재실행
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -566,6 +573,7 @@ export default {
       cmdLimit: 50,
       cmdHasMore: false,
       detailCommand: null,
+      retryingCommandId: null,
 
       // ===== 활동 로그 =====
       activities: [],
@@ -836,6 +844,20 @@ export default {
     },
     showCommandDetail(cmd) {
       this.detailCommand = cmd
+    },
+    async retryCommand(cmd) {
+      this.retryingCommandId = cmd.id
+      try {
+        const { error } = await useApi(`/api/commands/${cmd.id}/retry`, { method: 'POST' })
+        if (error) {
+          alert('재실행 실패: ' + (typeof error === 'string' ? error : '알 수 없는 오류'))
+          return
+        }
+        this.detailCommand = null
+        await this.loadCommands()
+      } finally {
+        this.retryingCommandId = null
+      }
     },
 
     // ===== 활동 로그 메서드 =====

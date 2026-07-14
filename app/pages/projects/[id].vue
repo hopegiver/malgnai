@@ -445,6 +445,14 @@
                     <span v-if="terminatingId === cmd.id" class="spinner-border spinner-border-sm"></span>
                     <i v-else class="bi bi-stop-fill"></i>
                   </button>
+                  <button v-if="cmd.status === 'failed'"
+                    class="btn btn-sm btn-outline-secondary py-0 px-2"
+                    @click="retryCommand(cmd.id)"
+                    :disabled="retryingId === cmd.id"
+                    title="명령 재실행">
+                    <span v-if="retryingId === cmd.id" class="spinner-border spinner-border-sm"></span>
+                    <i v-else class="bi bi-arrow-clockwise"></i>
+                  </button>
                   <small class="text-faint text-nowrap">{{ formatDate(cmd.created_at) }}</small>
                 </div>
               </div>
@@ -1078,6 +1086,7 @@ export default {
       monitorTimer: null,
       monitorCursors: {},
       terminatingId: null,
+      retryingId: null,
     }
   },
   computed: {
@@ -1508,11 +1517,15 @@ export default {
       const description = this.newTask.description.trim()
       const { data, error } = await useApi('/api/commands', {
         method: 'POST',
+        // (2026-07-14 대표 지시) 프로젝트 상세 "작업 카드 만들기"는 승인함을 거치지 않고
+        //   direct:true 자가승인(approved)으로 곧바로 실행 큐에 올린다. "로컬에 직접 명령"과
+        //   동일한 §3-1 자가승인 경로를 재사용(콘솔·자율엔진 cycle 등 다른 생성 경로는 불변).
         body: {
           project_id: this.$route.params.id,
           instruction: description || title,
           title,
-          assignee_agent_name: this.newTask.agent_name || null
+          assignee_agent_name: this.newTask.agent_name || null,
+          direct: true
         }
       })
       this.submittingTask = false
@@ -1734,6 +1747,21 @@ export default {
         await this.loadCommands()
       } finally {
         this.terminatingId = null
+      }
+    },
+    async retryCommand(commandId) {
+      this.retryingId = commandId
+      try {
+        const { error } = await useApi(`/api/commands/${commandId}/retry`, {
+          method: 'POST',
+        })
+        if (error) {
+          alert('재실행 실패: ' + (typeof error === 'string' ? error : '알 수 없는 오류'))
+          return
+        }
+        await this.loadCommands()
+      } finally {
+        this.retryingId = null
       }
     }
   }

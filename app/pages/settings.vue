@@ -28,8 +28,8 @@
         </div>
         <div v-if="role" class="d-flex align-items-center justify-content-between mt-2">
           <span class="text-muted small">권한</span>
-          <span class="badge" :class="role === 'admin' ? 'bg-primary' : 'bg-secondary'">
-            {{ role === 'admin' ? '관리자' : '일반' }}
+          <span class="badge" :class="roleBadgeClass">
+            {{ roleLabel }}
           </span>
         </div>
       </div>
@@ -183,7 +183,7 @@
       </div>
 
       <!-- 시스템 (관리자 전용) -->
-      <div v-if="role === 'admin'" class="card p-4 mt-3">
+      <div v-if="role === 'super_admin'" class="card p-4 mt-3">
         <h5 class="mb-1"><i class="bi bi-hdd-stack me-2"></i>시스템</h5>
         <p class="text-muted small mb-3">서버 프로세스를 재시작합니다. 진행 중인 요청/작업이 중단될 수 있습니다.</p>
 
@@ -198,7 +198,7 @@
       </div>
 
       <!-- 시스템 설정 (기타 app_settings, 관리자 전용) -->
-      <div v-if="role === 'admin'" class="card p-4 mt-3">
+      <div v-if="role === 'super_admin'" class="card p-4 mt-3">
         <div class="d-flex justify-content-between align-items-center mb-2">
           <h5 class="mb-0"><i class="bi bi-database-gear me-2"></i>시스템 설정 (기타)</h5>
           <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="appSettingsLoading" @click="loadAppSettings">
@@ -333,6 +333,18 @@ export default {
       addError: '',
     }
   },
+  computed: {
+    roleLabel() {
+      if (this.role === 'super_admin') return '최고관리자'
+      if (this.role === 'admin') return '관리자'
+      return '일반'
+    },
+    roleBadgeClass() {
+      if (this.role === 'super_admin') return 'bg-danger'
+      if (this.role === 'admin') return 'bg-primary'
+      return 'bg-secondary'
+    },
+  },
   mounted() {
     this.load()
   },
@@ -356,7 +368,7 @@ export default {
       this.setup = null
       this.enableCode = ''
       this.disableCode = ''
-      if (this.role === 'admin') this.loadAppSettings()
+      if (this.role === 'super_admin') this.loadAppSettings()
     },
     showToast(msg) {
       this.toast = msg

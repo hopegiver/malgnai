@@ -58,11 +58,11 @@
           <i class="bi bi-clock-history"></i>
           활동 로그
         </router-link>
-        <router-link v-if="admin" to="/claude" class="admin-nav-item" :class="{ 'is-active': $route.path === '/claude' }" @click="closeSidebarOnMobile">
+        <router-link v-if="staff" to="/claude" class="admin-nav-item" :class="{ 'is-active': $route.path === '/claude' }" @click="closeSidebarOnMobile">
           <i class="bi bi-bar-chart"></i>
           AI 비용
         </router-link>
-        <router-link v-if="admin" to="/insights" class="admin-nav-item" :class="{ 'is-active': $route.path.startsWith('/insights') }" @click="closeSidebarOnMobile">
+        <router-link v-if="staff" to="/insights" class="admin-nav-item" :class="{ 'is-active': $route.path.startsWith('/insights') }" @click="closeSidebarOnMobile">
           <i class="bi bi-graph-up"></i>
           인사이트
         </router-link>
@@ -72,6 +72,10 @@
         <router-link v-if="admin" to="/users" class="admin-nav-item" :class="{ 'is-active': $route.path.startsWith('/users') }" @click="closeSidebarOnMobile">
           <i class="bi bi-people"></i>
           사용자 관리
+        </router-link>
+        <router-link to="/feature-requests" class="admin-nav-item" :class="{ 'is-active': $route.path.startsWith('/feature-requests') }" @click="closeSidebarOnMobile">
+          <i class="bi bi-lightbulb"></i>
+          기능 요청
         </router-link>
         <router-link to="/settings" class="admin-nav-item" :class="{ 'is-active': $route.path.startsWith('/settings') }" @click="closeSidebarOnMobile">
           <i class="bi bi-gear"></i>
@@ -85,7 +89,7 @@
         </div>
         <div class="d-flex flex-column overflow-hidden">
           <span class="admin-user-name text-truncate">{{ userName }}</span>
-          <span class="admin-user-email">{{ admin ? '관리자' : '멤버' }}</span>
+          <span class="admin-user-email">{{ admin ? '최고관리자' : '멤버' }}</span>
         </div>
         <button class="admin-icon-btn ms-auto flex-shrink-0" title="로그아웃" @click="signOut">
           <i class="bi bi-box-arrow-right"></i>
@@ -143,7 +147,7 @@
         <i class="bi bi-clock-history"></i>
         <span>활동 로그</span>
       </router-link>
-      <router-link v-if="admin" to="/claude" class="admin-tab-item" :class="{ 'is-active': $route.path === '/claude' }">
+      <router-link v-if="staff" to="/claude" class="admin-tab-item" :class="{ 'is-active': $route.path === '/claude' }">
         <i class="bi bi-bar-chart"></i>
         <span>AI 비용</span>
       </router-link>
@@ -170,7 +174,8 @@ export default {
   data() {
     return {
       isSidebarOpen: false,
-      admin: isAdmin(),
+      admin: isSuperAdmin(),
+      staff: isStaff(),
       pendingCount: 0,
       autonomyEnabled: false,
       _approvalsUpdatedHandler: null,
@@ -198,6 +203,7 @@ export default {
       if (p.startsWith('/projects')) return [{ label: '프로젝트' }]
       if (p.startsWith('/approvals')) return [{ label: '승인함' }]
       if (p.startsWith('/console')) return [{ label: 'AI 콘솔' }]
+      if (p.startsWith('/feature-requests')) return [{ label: '기능 요청' }]
       if (p.startsWith('/autonomy')) return [{ label: '자율 제어판' }]
       if (p.startsWith('/agents')) return [{ label: '에이전트' }]
       if (p.startsWith('/activities')) return [{ label: '활동 로그' }]

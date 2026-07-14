@@ -21,6 +21,7 @@ import { claimApprovedForProject } from '../lib/instant-dispatch.js'
 import { dispatchApprovedCommand } from '../lib/dispatch-worker.js'
 import { logActivity } from '../lib/activity-log.js'
 import { MAX_INSTRUCTION_LEN } from './commands.js'
+import { getMonitorableProject } from '../lib/project-access.js'
 
 const router = new Hono()
 
@@ -45,10 +46,10 @@ router.post('/turns', authMiddleware, async (c) => {
     return badRequest(c, `message must be 1~${MAX_INSTRUCTION_LEN} characters`)
   }
 
-  const project = await new ProjectsDao(c.env.DB).findById(project_id)
+  const created_by = c.get('user')?.sub || null
+  const project = await getMonitorableProject(c.env.DB, new ProjectsDao(c.env.DB), project_id, created_by, c.get('user')?.role)
   if (!project) return notFound(c, 'Project not found')
 
-  const created_by = c.get('user')?.sub || null
   const id = crypto.randomUUID()
 
   // 리뷰 2026-07-09 Major-2/3 대응:
@@ -144,6 +145,8 @@ function createConsoleTurnTx(tx, { id, project_id, instruction, session_id, idem
 router.get('/sessions', authMiddleware, async (c) => {
   const project_id = c.req.query('project_id')
   if (!project_id) return badRequest(c, 'project_id is required')
+  const project = await getMonitorableProject(c.env.DB, new ProjectsDao(c.env.DB), project_id, c.get('user')?.sub, c.get('user')?.role)
+  if (!project) return notFound(c, 'Project not found')
   const limit = Math.min(Math.max(parseInt(c.req.query('limit'), 10) || 10, 1), 100)
   const offset = Math.max(parseInt(c.req.query('offset'), 10) || 0, 0)
   const dao = new CommandsDao(c.env.DB)
@@ -157,6 +160,8 @@ router.get('/sessions', authMiddleware, async (c) => {
 router.get('/sessions/:session_id/turns', authMiddleware, async (c) => {
   const project_id = c.req.query('project_id')
   if (!project_id) return badRequest(c, 'project_id is required')
+  const project = await getMonitorableProject(c.env.DB, new ProjectsDao(c.env.DB), project_id, c.get('user')?.sub, c.get('user')?.role)
+  if (!project) return notFound(c, 'Project not found')
   const session_id = c.req.param('session_id')
   const dao = new CommandsDao(c.env.DB)
   const turns = await dao.findConsoleTurns(project_id, session_id)
@@ -174,6 +179,8 @@ router.get('/sessions/:session_id/turns', authMiddleware, async (c) => {
 router.get('/turns/:id', authMiddleware, async (c) => {
   const project_id = c.req.query('project_id')
   if (!project_id) return badRequest(c, 'project_id is required')
+  const project = await getMonitorableProject(c.env.DB, new ProjectsDao(c.env.DB), project_id, c.get('user')?.sub, c.get('user')?.role)
+  if (!project) return notFound(c, 'Project not found')
   const dao = new CommandsDao(c.env.DB)
   const command = await dao.findById(c.req.param('id'))
   if (!command || command.task_type !== 'console' || command.project_id !== project_id) {

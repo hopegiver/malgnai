@@ -192,7 +192,7 @@
         </div>
         <p class="small text-muted mb-3">
           <code>com.malgnai.engine</code> 튜닝값입니다. 코드 재배포 없이 여기서 바로 반영됩니다(<code>app_settings</code> 저장).
-          <span v-if="!admin">읽기 전용 — 수정은 관리자만 가능합니다.</span>
+          <span v-if="!admin">읽기 전용 — 수정은 최고관리자만 가능합니다.</span>
         </p>
         <div v-if="settingsError" class="alert alert-danger py-2 small">{{ settingsError }}</div>
         <div v-if="settingsLoading && !engineSettings.length" class="text-muted small py-2">불러오는 중…</div>
@@ -283,7 +283,7 @@ export default {
       toast: '',
       toastTimer: null,
       confirm: { open: false, target: false },
-      admin: isAdmin(),
+      admin: isSuperAdmin(),
       engineSettings: [],
       draft: {},
       saving: {},

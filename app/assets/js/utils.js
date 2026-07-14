@@ -268,9 +268,15 @@ function tokenPayload() {
   }
 }
 
-/** 현재 로그인 사용자가 관리자(role==='admin')인지. */
-function isAdmin() {
-  return tokenPayload()?.role === 'admin'
+/** 현재 로그인 사용자가 최고관리자(role==='super_admin')인지. admin/user는 권한상 동일(라벨만 다름) — UI 가드는 이 이진 판단 하나만 쓴다. */
+function isSuperAdmin() {
+  return tokenPayload()?.role === 'super_admin'
+}
+
+/** 현재 로그인 사용자가 staff(super_admin 또는 admin)인지. user(일반)만 false. */
+function isStaff() {
+  const role = tokenPayload()?.role
+  return role === 'super_admin' || role === 'admin'
 }
 
 /**

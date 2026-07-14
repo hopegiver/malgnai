@@ -16,7 +16,9 @@ DIST_DIR="${MALGNAI_PUBLIC_DIR:-$HOME/workspace/malgnai-public}"
 
 # 배포에서 제외할 경로 (docs/는 main repo에서 이미 git 미추적이라 archive에 안 잡힘)
 # .mcp.json·.claude/settings.local.json은 로컬 절대경로·개인 권한설정이라 공개저장소 부적합
-EXCLUDE_PATHS=(test e2e .mcp.json .claude/settings.local.json)
+# IMPLEMENTATION_SUMMARY.md·.vscode·*.bak·shot-*.png·test-*.mjs는 스크래치/디버그성
+# 산출물이라 실수로 시크릿·내부 경로가 섞여 들어갈 위험이 있어 원천 배제(issue 9ef79dbd 후속조치)
+EXCLUDE_PATHS=(test e2e .mcp.json .claude/settings.local.json IMPLEMENTATION_SUMMARY.md .vscode "*.bak" "shot-*.png" "test-*.mjs")
 
 if [ ! -d "$DIST_DIR/.git" ]; then
   echo "error: $DIST_DIR 에 git 저장소가 없습니다. 먼저 git init 하세요." >&2
@@ -31,7 +33,11 @@ find "$DIST_DIR" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 git -C "$REPO_ROOT" archive HEAD | tar -x -C "$DIST_DIR"
 
 for p in "${EXCLUDE_PATHS[@]}"; do
-  rm -rf "${DIST_DIR:?}/$p"
+  if [[ "$p" == *"*"* ]]; then
+    find "$DIST_DIR" -name "$p" -exec rm -rf {} +
+  else
+    rm -rf "${DIST_DIR:?}/$p"
+  fi
 done
 
 cd "$DIST_DIR"
