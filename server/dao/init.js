@@ -19,7 +19,7 @@ export const AUTONOMOUS_KINDS = ['dev', 'research', 'marketing', 'proposal', 'in
 
 // ── 부트스트랩 시드: 마스터 자율 스위치(kill-switch) ──
 // 멱등(있으면 no-op). 비파괴 — 기존 행을 DROP/덮어쓰지 않고, 없을 때만 INSERT/보강.
-// ⚠️ central(malgnai-lead) 시드(내부운영 프로젝트·malgnai-lead 에이전트·autonomy_mode 스위치)는
+// ⚠️ central 시드(내부운영 프로젝트·전용 에이전트·autonomy_mode 스위치)는
 //   단순 코어 전환(docs/design/simple-core.md)으로 제거됨. distributed 는 사용자 생성 프로젝트의
 //   지정 에이전트(projects.lead_agent_name)로 동작하므로 별도 LEAD 시드가 필요 없다.
 // P3(2026-07-03): 실행 규칙 엔진(execution_rules) 자체를 제거 — SEED_RULES/seedExecutionRules 및
@@ -38,6 +38,19 @@ async function seedLeadLoop(db) {
     try {
       await db.prepare(
         `INSERT INTO app_settings (key, value, updated_at) VALUES ('autonomy_enabled', '0', ?)`
+      ).bind(now).run()
+    } catch { /* 동시 부팅 경쟁 무시 */ }
+  }
+
+  // (e) 엔진↔웹앱 분리(§4.2) 이관 대상 키 중 미착수였던 마지막 항목 — project_cycle 워커의
+  //     안전 기본 max_turns(tool-profiles.js DEFAULT_MAX_TURNS). 없을 때만 INSERT, 기존 값 보존.
+  const existingMaxTurns = await db.prepare(
+    `SELECT key FROM app_settings WHERE key = 'engine.max_turns_default'`
+  ).first()
+  if (!existingMaxTurns) {
+    try {
+      await db.prepare(
+        `INSERT INTO app_settings (key, value, updated_at) VALUES ('engine.max_turns_default', '8', ?)`
       ).bind(now).run()
     } catch { /* 동시 부팅 경쟁 무시 */ }
   }

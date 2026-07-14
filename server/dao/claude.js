@@ -1,28 +1,6 @@
 export default class ClaudeDao {
   constructor(db) { this.db = db }
 
-  // --- History ---
-  async syncHistory(items) {
-    const stmt = this.db.prepare(
-      'INSERT OR REPLACE INTO claude_history (id, display, project, timestamp, created_at) VALUES (?, ?, ?, ?, ?)'
-    )
-    for (const h of items) {
-      await stmt.bind(h.id, h.display, h.project, h.timestamp, h.created_at).run()
-    }
-    return items.length
-  }
-
-  async findHistory({ project, limit = 50, offset = 0 } = {}) {
-    if (project) {
-      return (await this.db.prepare(
-        'SELECT * FROM claude_history WHERE project = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?'
-      ).bind(project, limit, offset).all()).results
-    }
-    return (await this.db.prepare(
-      'SELECT * FROM claude_history ORDER BY timestamp DESC LIMIT ? OFFSET ?'
-    ).bind(limit, offset).all()).results
-  }
-
   // --- Stats ---
   // 일별 통계는 매일 갱신되는 트랜스크립트(projects/*/*.jsonl)를 sync 단계에서 날짜별로 집계한 값이다.
   async syncStats(items) {
@@ -171,10 +149,19 @@ export default class ClaudeDao {
     return items.length
   }
 
-  async findProjectSessionsByKey(projectKey, { limit = 100, offset = 0 } = {}) {
+  async findProjectSessionsByKey(projectKey, { search, limit = 100, offset = 0 } = {}) {
+    const conds = ['project_key = ?']
+    const vals = [projectKey]
+    if (search) {
+      conds.push('(title LIKE ? OR last_prompt LIKE ?)')
+      const pattern = '%' + search.replace(/[\\%_]/g, '\\$&') + '%'
+      vals.push(pattern, pattern)
+    }
+    const where = conds.join(' AND ')
+    vals.push(limit, offset)
     return (await this.db.prepare(
-      'SELECT * FROM claude_project_sessions WHERE project_key = ? ORDER BY started_at DESC LIMIT ? OFFSET ?'
-    ).bind(projectKey, limit, offset).all()).results
+      `SELECT * FROM claude_project_sessions WHERE ${where} ORDER BY started_at DESC LIMIT ? OFFSET ?`
+    ).bind(...vals).all()).results
   }
 
   // 프로젝트 폴더명(basename)으로 세션 매칭. 같은 프로젝트라도 머신/OS가 바뀌면
@@ -193,10 +180,19 @@ export default class ClaudeDao {
   }
 
   // 전역 프로젝트 세션 목록(최신순).
-  async findProjectSessionsAll({ limit = 100, offset = 0 } = {}) {
+  async findProjectSessionsAll({ search, limit = 100, offset = 0 } = {}) {
+    const conds = []
+    const vals = []
+    if (search) {
+      conds.push('(title LIKE ? OR last_prompt LIKE ?)')
+      const pattern = '%' + search.replace(/[\\%_]/g, '\\$&') + '%'
+      vals.push(pattern, pattern)
+    }
+    const where = conds.length ? 'WHERE ' + conds.join(' AND ') : ''
+    vals.push(limit, offset)
     return (await this.db.prepare(
-      'SELECT * FROM claude_project_sessions ORDER BY started_at DESC LIMIT ? OFFSET ?'
-    ).bind(limit, offset).all()).results
+      `SELECT * FROM claude_project_sessions ${where} ORDER BY started_at DESC LIMIT ? OFFSET ?`
+    ).bind(...vals).all()).results
   }
 
   // 프로젝트별 AI 투입 집계(세션/메시지/도구 합계). 대시보드 "AI 투입 Top"에 사용.
@@ -274,6 +270,45 @@ export default class ClaudeDao {
         s.main_turns, s.main_input, s.main_output, s.main_cache_read, s.main_cache_write_1h, s.main_cache_write_5m,
         s.sub_turns, s.sub_input, s.sub_output, s.sub_cache_read, s.sub_cache_write_1h, s.sub_cache_write_5m,
         s.sub_agent_count, s.total_tokens, s.cost_usd, s.started_at, s.ended_at
+      ).run()
+    }
+    return items.length
+  }
+
+  // 증분 동기화 (실시간 감시 데몬): main 필드 업데이트, sub 필드 보존
+  async syncSessionUsageIncremental(items) {
+    const stmt = this.db.prepare(
+      `INSERT OR REPLACE INTO claude_session_usage
+       (session_id, project_key, cwd, git_branch, title, model,
+        main_turns, main_input, main_output, main_cache_read, main_cache_write_1h, main_cache_write_5m,
+        sub_turns, sub_input, sub_output, sub_cache_read, sub_cache_write_1h, sub_cache_write_5m,
+        sub_agent_count, total_tokens, cost_usd, started_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+
+    for (const item of items) {
+      // 기존 행에서 sub 값 보존 (incremental은 main만 업데이트)
+      const existing = await this.db.prepare(
+        `SELECT sub_turns, sub_input, sub_output, sub_cache_read, sub_cache_write_1h, sub_cache_write_5m, sub_agent_count
+         FROM claude_session_usage WHERE session_id = ?`
+      ).bind(item.session_id).first()
+
+      const title = item.title || (await this._titleFromCommand(item.session_id)) || '(제목 없음)'
+      const sub_turns = existing?.sub_turns || 0
+      const sub_input = existing?.sub_input || 0
+      const sub_output = existing?.sub_output || 0
+      const sub_cache_read = existing?.sub_cache_read || 0
+      const sub_cache_write_1h = existing?.sub_cache_write_1h || 0
+      const sub_cache_write_5m = existing?.sub_cache_write_5m || 0
+      const sub_agent_count = existing?.sub_agent_count || 0
+
+      await stmt.bind(
+        item.session_id, item.project_key, item.cwd, item.git_branch, title, item.model,
+        item.message_count || 0, item.main_input || 0, item.main_output || 0,
+        item.main_cache_read || 0, item.main_cache_write_1h || 0, item.main_cache_write_5m || 0,
+        sub_turns, sub_input, sub_output, sub_cache_read, sub_cache_write_1h, sub_cache_write_5m,
+        sub_agent_count, item.total_tokens || 0, item.cost_usd || 0,
+        item.started_at, item.ended_at
       ).run()
     }
     return items.length
@@ -369,8 +404,7 @@ export default class ClaudeDao {
 
   // --- Summary ---
   async getSummary() {
-    const [historyCount, statsDays, memoryCount, sessionCount, recent7, totalTokens] = await Promise.all([
-      this.db.prepare('SELECT COUNT(*) as cnt FROM claude_history').first(),
+    const [statsDays, memoryCount, sessionCount, recent7, totalTokens] = await Promise.all([
       this.db.prepare('SELECT COUNT(*) as cnt FROM claude_stats').first(),
       this.db.prepare('SELECT COUNT(*) as cnt FROM claude_memories').first(),
       this.db.prepare('SELECT COUNT(*) as cnt FROM claude_sessions').first(),
@@ -383,12 +417,64 @@ export default class ClaudeDao {
     ])
 
     return {
-      history_count: historyCount?.cnt || 0,
+      history_count: 0,
       stats_days: statsDays?.cnt || 0,
       memory_count: memoryCount?.cnt || 0,
       session_count: sessionCount?.cnt || 0,
       recent_7days: { messages: recent7?.cnt || 0 },
       total_tokens: totalTokens?.cnt || 0,
+    }
+  }
+
+  // --- Project Session File ---
+  async getProjectSessionFile(sessionId) {
+    const fs = await import('fs/promises')
+    const path = await import('path')
+
+    // 세션 정보 조회
+    const session = (await this.db.prepare(
+      'SELECT id, project_key, cwd, git_branch, title FROM claude_project_sessions WHERE id = ?'
+    ).bind(sessionId).first())
+
+    if (!process.env.HOME) throw new Error('HOME env not set')
+    const filePath = path.join(process.env.HOME, '.claude', 'projects', session.project_key, session.id + '.jsonl')
+
+    // 파일 읽기
+    const content = await fs.readFile(filePath, 'utf-8')
+
+    // JSONL 파싱 및 타입별 그룹화
+    const lines = content.split('\n').filter(l => l.trim())
+    const events = []
+    const typeMap = new Map()
+
+    for (const line of lines) {
+      try {
+        const obj = JSON.parse(line)
+        events.push(obj)
+
+        if (obj.type) {
+          if (!typeMap.has(obj.type)) typeMap.set(obj.type, [])
+          typeMap.get(obj.type).push(obj)
+        }
+      } catch (e) {
+        // JSON 파싱 실패 무시
+      }
+    }
+
+    // 타입별 요약
+    const summary = Array.from(typeMap.entries()).map(([type, items]) => ({
+      type,
+      count: items.length,
+      sample: items[0] // 첫 항목만 샘플로
+    }))
+
+    return {
+      session: { id: session.id, project_key: session.project_key, title: session.title, git_branch: session.git_branch },
+      file_path: filePath,
+      total_lines: lines.length,
+      events_count: events.length,
+      summary,
+      events: events.slice(0, 200) // 처음 200줄만 반환 (성능)
     }
   }
 }

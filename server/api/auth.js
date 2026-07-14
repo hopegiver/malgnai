@@ -2,25 +2,57 @@ import { Hono } from 'hono'
 import { signJwt, authMiddleware } from '../middleware/auth.js'
 import { badRequest, serverError } from '../utils/response.js'
 import UsersDao from '../dao/users.js'
+import RefreshTokensDao from '../dao/refresh-tokens.js'
 import { verifyPassword, hashPassword } from '../utils/password.js'
 import { newSecret, otpauthUrl, qrDataUrl, verifyCode } from '../utils/totp.js'
 import { checkLoginThrottle, recordLoginFailure, recordLoginSuccess } from '../lib/login-throttle.js'
+import { generateRefreshToken, hashRefreshToken, REFRESH_TOKEN_TTL_SECONDS, REUSE_GRACE_MS } from '../lib/refresh-token.js'
 
 const router = new Hono()
 
 const TOKEN_TTL_SECONDS = 60 * 60 * 4 // 4h
 
+/**
+ * user 에 대해 access token(4h JWT) + refresh token(30일, opaque, DB 저장)을 함께 발급한다.
+ * login/refresh 양쪽에서 공유. 로그인 시 opportunistic 하게 그 유저의 만료 토큰도 정리한다.
+ */
+async function issueTokenPair(c, user) {
+  const refreshTokensDao = new RefreshTokensDao(c.env.DB)
+  const role = user.role === 'admin' ? 'admin' : 'user'
+
+  const token = await signJwt({ sub: user.username, role }, c.env.JWT_SECRET, TOKEN_TTL_SECONDS)
+
+  const rawRefreshToken = generateRefreshToken()
+  const refreshTokenHash = await hashRefreshToken(rawRefreshToken)
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString()
+  await refreshTokensDao.create(user.id, refreshTokenHash, expiresAt)
+  // opportunistic cleanup: 이 유저의 만료된 refresh token 행을 함께 정리(실패해도 무시).
+  await refreshTokensDao.deleteExpiredForUser(user.id).catch(() => {})
+
+  return {
+    token,
+    expires_in: TOKEN_TTL_SECONDS,
+    refresh_token: rawRefreshToken,
+    refresh_expires_in: REFRESH_TOKEN_TTL_SECONDS,
+  }
+}
+
 /** 통일된 401 에러 응답(코드 키를 프론트 계약에 맞춤). */
 const authError = (c, code, status = 401) => c.json({ error: code }, status)
 
 /**
- * POST /api/auth/login  { username?, password, code? } → { token, expires_in }
+ * POST /api/auth/login  { username?, password, code? }
+ *   → { token, expires_in, refresh_token, refresh_expires_in }
  *
  * - username 없으면 'admin'.
  * - 비번 틀림 → 401 { error: 'invalid_credentials' }
  * - 비번 맞고 totp_enabled=1 인데 code 없음 → 401 { error: 'totp_required' }
  * - 비번 맞고 totp 켜짐 + code 틀림 → 401 { error: 'invalid_code' }
- * - 성공 → 200 { token, expires_in }  (sub=username)
+ * - 성공 → 200 { token, expires_in, refresh_token, refresh_expires_in }  (sub=username)
+ *
+ * [refresh token] access token(4h)과 별도로 30일 짜리 opaque refresh token 을 함께 발급한다.
+ * PWA 로 상시 설치해 쓰는 내부 도구 특성상 4h 마다 재로그인하는 불편을 줄이기 위함 —
+ * 클라이언트는 access token 만료 전/직후 POST /api/auth/refresh 로 재발급받는다.
  *
  * [로컬 직결 OTP 스킵] cf-ray/cf-connecting-ip 헤더가 없으면(=터널을 거치지 않은
  * 로컬 PC 직결 접속) totp_enabled 여도 코드 검증을 건너뛴다. 이 헤더는 Cloudflare
@@ -75,9 +107,93 @@ router.post('/login', async (c) => {
   }
 
   recordLoginSuccess(username)
-  const role = user.role === 'admin' ? 'admin' : 'user'
-  const token = await signJwt({ sub: user.username, role }, c.env.JWT_SECRET, TOKEN_TTL_SECONDS)
-  return c.json({ token, expires_in: TOKEN_TTL_SECONDS })
+  const tokens = await issueTokenPair(c, user)
+  return c.json(tokens)
+})
+
+/**
+ * POST /api/auth/refresh  { refresh_token } → { token, expires_in, refresh_token, refresh_expires_in }
+ *
+ * authMiddleware 없이 동작한다(access token 이 이미 만료된 상태에서 호출되는 경로이므로
+ * Authorization 헤더 검증을 걸면 안 된다). refresh token 은 1회용 회전형(rotation)이다:
+ * 매 호출마다 기존 토큰을 revoke 하고 새 access/refresh 쌍을 발급한다.
+ *
+ * - refresh_token 없음 → 400.
+ * - DB 에 없는 토큰 → 401 { error: 'invalid_refresh_token' }.
+ * - 만료된 토큰(최초 사용 경로) → 401 { error: 'invalid_refresh_token' }.
+ * - [재사용, grace window 이내] 이미 revoke 된 토큰이 **정상 회전(revoke_reason='rotated')으로**
+ *   revoke 후 REUSE_GRACE_MS(기본 10초) 이내에 다시 들어오면 — 탈취로 취급하지 않고 정상적인
+ *   동시 요청(같은 stale 토큰을 들고 있던 다른 병렬 호출/다른 탭)으로 간주해 그냥 새
+ *   access/refresh 쌍을 하나 더 발급한다. 다른 세션은 건드리지 않는다.
+ *   (server/lib/refresh-token.js REUSE_GRACE_MS 주석 참고, reviewer 리뷰로 재현된
+ *   collateral-revoke 버그의 완화책 — grace window 없이 즉시 전체 revoke하면 방금 정상
+ *   발급된 최신 토큰까지 같이 죽어 정상 사용자가 강제 로그아웃당했다.)
+ *   [주의] grace window 는 revoke_reason==='rotated' 인 경우에만 적용한다. logout 이나
+ *   탈취탐지(reuse_detected)로 revoke된 토큰은 timing 과 무관하게 항상 즉시 거부한다 —
+ *   그렇지 않으면 logout 직후/전체계정 revoke 직후에도 같은 grace window 로 되살아나는
+ *   회귀가 생긴다(2026-07-13 발견, server/dao/refresh-tokens.js 상단 주석 참고).
+ * - [탈취 감지] revoke_reason이 'rotated'가 아니거나(logout/이미 탈취탐지됨), 'rotated'라도
+ *   REUSE_GRACE_MS 를 넘긴 재사용은 진짜 탈취 신호로 간주해 그 유저의 모든 refresh token 을
+ *   강제 revoke(reuse_detected)하고 401 { error: 'invalid_refresh_token' }.
+ * - 정상(최초 사용) → 기존 토큰 revoke('rotated') + 새 access/refresh 쌍 발급, login 과 동일한 응답 형태.
+ */
+router.post('/refresh', async (c) => {
+  if (!c.env.JWT_SECRET) return serverError(c, 'JWT secret not configured')
+
+  const body = await c.req.json().catch(() => ({}))
+  const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token : ''
+  if (!refreshToken) return badRequest(c, 'refresh_token is required')
+
+  const refreshTokensDao = new RefreshTokensDao(c.env.DB)
+  const tokenHash = await hashRefreshToken(refreshToken)
+  const stored = await refreshTokensDao.findByHash(tokenHash)
+
+  if (!stored) return authError(c, 'invalid_refresh_token')
+
+  if (stored.revoked_at) {
+    const elapsedMs = Date.now() - new Date(stored.revoked_at).getTime()
+    const withinGrace = stored.revoke_reason === 'rotated' && elapsedMs <= REUSE_GRACE_MS
+    if (!withinGrace) {
+      // [탈취 감지] grace 대상이 아니거나(logout/이미 탈취탐지) grace window 밖의 재사용 —
+      // 이 유저의 모든 refresh token 을 강제 무효화한다.
+      await refreshTokensDao.revokeAllForUser(stored.user_id)
+      return authError(c, 'invalid_refresh_token')
+    }
+    // [grace window 이내, 정상 회전분] 정상적인 동시 요청으로 간주 — 이 토큰은 이미 revoke
+    // 되어 있으니 다시 revoke하지 않고, 다른 세션을 건드리지 않은 채 이 요청 몫의 새 쌍만 발급한다.
+  } else {
+    if (new Date(stored.expires_at).getTime() < Date.now()) {
+      return authError(c, 'invalid_refresh_token')
+    }
+    // 회전(rotation): 최초 사용이므로 이번에 쓴 토큰을 즉시 revoke한다.
+    await refreshTokensDao.revokeByHash(tokenHash, 'rotated')
+  }
+
+  const usersDao = new UsersDao(c.env.DB)
+  const user = await usersDao.findById(stored.user_id)
+  if (!user) return authError(c, 'invalid_refresh_token')
+
+  const tokens = await issueTokenPair(c, user)
+  return c.json(tokens)
+})
+
+/**
+ * POST /api/auth/logout  { refresh_token? } → { ok: true }
+ *
+ * authMiddleware 없이 동작한다(access token 이 이미 만료된 상태에서도 로그아웃을 호출할
+ * 수 있어야 한다). refresh_token 이 주어지면 해당 토큰만 revoke 한다. 존재하지 않거나
+ * 이미 revoke 된 토큰이어도 에러를 내지 않고 항상 200 { ok: true } 를 반환한다(로그아웃은
+ * 멱등이어야 하고, 토큰 유효성 정보를 노출할 이유가 없다).
+ */
+router.post('/logout', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token : ''
+  if (refreshToken && c.env.DB) {
+    const refreshTokensDao = new RefreshTokensDao(c.env.DB)
+    const tokenHash = await hashRefreshToken(refreshToken)
+    await refreshTokensDao.revokeByHash(tokenHash, 'logout').catch(() => {})
+  }
+  return c.json({ ok: true })
 })
 
 /**

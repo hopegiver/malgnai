@@ -3,6 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#5B6AF5">
+  <meta name="description" content="AI 자율 프로젝트 운영 플랫폼. 에이전트가 당신의 프로젝트를 자동으로 진행합니다.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="malgnai">
+  <link rel="manifest" href="/manifest.json">
   <title>맑은AI · 자율 프로젝트 운영</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1/font/bootstrap-icons.css" rel="stylesheet">
@@ -15,9 +21,28 @@
 <body>
   <div id="app"></div>
   <script>
-    VueZero.createApp({
-      auth: { enabled: true, loginPage: '/login', tokenKey: 'token' }
-    })
+    (async () => {
+      // vue-zero 라우터 auth guard는 localStorage.token의 JWT exp만 동기 검사해
+      // 만료 시 즉시 /login으로 리다이렉트한다(vendored 라이브러리라 수정 불가).
+      // guard가 돌기 전에, access token이 만료됐지만 refresh_token이 있으면
+      // 여기서 미리 갱신해 불필요한 재로그인을 막는다.
+      const token = localStorage.getItem('token')
+      let expired = true
+      if (token) {
+        try {
+          const payload = JSON.parse(atob(token.split('.')[1]))
+          expired = !payload.exp || payload.exp * 1000 <= Date.now()
+        } catch {
+          expired = true
+        }
+      }
+      if (expired && localStorage.getItem('refresh_token')) {
+        await refreshAccessToken()
+      }
+      VueZero.createApp({
+        auth: { enabled: true, loginPage: '/login', tokenKey: 'token' }
+      })
+    })()
   </script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5/dist/js/bootstrap.bundle.min.js"></script>
 </body>

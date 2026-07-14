@@ -196,6 +196,92 @@
           서버 재시작
         </button>
       </div>
+
+      <!-- 시스템 설정 (기타 app_settings, 관리자 전용) -->
+      <div v-if="role === 'admin'" class="card p-4 mt-3">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <h5 class="mb-0"><i class="bi bi-database-gear me-2"></i>시스템 설정 (기타)</h5>
+          <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="appSettingsLoading" @click="loadAppSettings">
+            <i class="bi bi-arrow-clockwise me-1"></i>새로고침
+          </button>
+        </div>
+        <p class="text-muted small mb-3">
+          자율 킬스위치·엔진 설정은 <router-link to="/autonomy">자율 제어판</router-link>에서 관리합니다. 여기서는 그 외 <code>app_settings</code> 키를 직접 다룹니다.
+        </p>
+
+        <div v-if="appSettingsError" class="alert alert-danger py-2 small mb-3" role="alert">
+          <i class="bi bi-exclamation-triangle me-2"></i>{{ appSettingsError }}
+        </div>
+
+        <div v-if="appSettingsLoading && !appSettings.length" class="text-muted small py-2">
+          <span class="spinner-border spinner-border-sm me-2"></span>불러오는 중…
+        </div>
+        <div v-else-if="!appSettings.length" class="text-muted small py-2">등록된 기타 설정이 없습니다.</div>
+        <div v-else class="table-responsive mb-3">
+          <table class="table table-sm align-middle mb-0">
+            <thead class="table-light">
+              <tr>
+                <th class="text-nowrap">키</th>
+                <th>값</th>
+                <th class="text-nowrap d-none d-md-table-cell">수정 시각</th>
+                <th class="text-nowrap" style="width:8rem"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="s in appSettings" :key="s.key">
+                <td class="text-nowrap font-monospace small">{{ s.key }}</td>
+                <td>
+                  <input
+                    v-if="editingKey === s.key"
+                    v-model="editValue"
+                    type="text"
+                    class="form-control form-control-sm"
+                    :disabled="savingKey === s.key"
+                    @keyup.enter="saveEdit(s)"
+                    @keyup.esc="cancelEdit"
+                  />
+                  <span v-else class="text-break">{{ s.value }}</span>
+                </td>
+                <td class="d-none d-md-table-cell text-nowrap small text-muted">{{ fmtDate(s.updated_at) }}</td>
+                <td class="text-nowrap">
+                  <template v-if="editingKey === s.key">
+                    <button type="button" class="btn btn-sm btn-primary me-1" :disabled="savingKey === s.key" @click="saveEdit(s)">
+                      <span v-if="savingKey === s.key" class="spinner-border spinner-border-sm"></span>
+                      <span v-else>저장</span>
+                    </button>
+                    <button type="button" class="btn btn-sm btn-light" :disabled="savingKey === s.key" @click="cancelEdit">취소</button>
+                  </template>
+                  <template v-else>
+                    <button type="button" class="btn btn-sm btn-outline-secondary me-1" title="수정" @click="startEdit(s)"><i class="bi bi-pencil"></i></button>
+                    <button type="button" class="btn btn-sm btn-outline-danger" title="삭제" :disabled="deletingKey === s.key" @click="deleteSetting(s)">
+                      <span v-if="deletingKey === s.key" class="spinner-border spinner-border-sm"></span>
+                      <i v-else class="bi bi-trash"></i>
+                    </button>
+                  </template>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <hr class="my-3" />
+
+        <h6 class="small fw-semibold mb-2">새 키 추가</h6>
+        <div v-if="addError" class="alert alert-danger py-2 small mb-2" role="alert">{{ addError }}</div>
+        <form class="d-flex flex-wrap gap-2 align-items-end" @submit.prevent="addSetting">
+          <div>
+            <label class="form-label small mb-1">키</label>
+            <input v-model.trim="newKey" type="text" class="form-control form-control-sm" style="width:14rem" placeholder="예: some.custom.key" :disabled="addBusy" />
+          </div>
+          <div>
+            <label class="form-label small mb-1">값</label>
+            <input v-model="newValue" type="text" class="form-control form-control-sm" style="width:14rem" :disabled="addBusy" />
+          </div>
+          <button type="submit" class="btn btn-sm btn-primary" :disabled="addBusy || !newKey">
+            <span v-if="addBusy" class="spinner-border spinner-border-sm me-1"></span>추가
+          </button>
+        </form>
+      </div>
     </div>
   </div>
 </template>
@@ -232,6 +318,19 @@ export default {
       // 서버 재시작 상태
       restarting: false,
       restartError: '',
+
+      // 시스템 설정(기타 app_settings) 상태
+      appSettings: [],
+      appSettingsLoading: false,
+      appSettingsError: '',
+      editingKey: '',
+      editValue: '',
+      savingKey: '',
+      deletingKey: '',
+      newKey: '',
+      newValue: '',
+      addBusy: false,
+      addError: '',
     }
   },
   mounted() {
@@ -257,6 +356,7 @@ export default {
       this.setup = null
       this.enableCode = ''
       this.disableCode = ''
+      if (this.role === 'admin') this.loadAppSettings()
     },
     showToast(msg) {
       this.toast = msg
@@ -370,6 +470,86 @@ export default {
       } catch {
         // 클립보드 권한 없을 때는 무음 — 사용자가 직접 선택/복사 가능(readonly input).
       }
+    },
+    isBlockedSettingKey(key) {
+      return key === 'autonomy_enabled' || key.startsWith('engine.')
+    },
+    async loadAppSettings() {
+      this.appSettingsLoading = true
+      this.appSettingsError = ''
+      const { data, error } = await useApi('/api/lead/app-settings')
+      this.appSettingsLoading = false
+      if (error) {
+        this.appSettingsError = `기타 설정을 불러오지 못했습니다: ${error}`
+        return
+      }
+      this.appSettings = data?.settings || []
+    },
+    startEdit(s) {
+      this.editingKey = s.key
+      this.editValue = s.value
+    },
+    cancelEdit() {
+      this.editingKey = ''
+      this.editValue = ''
+    },
+    async saveEdit(s) {
+      this.savingKey = s.key
+      const { data, error } = await useApi('/api/lead/app-settings', {
+        method: 'PUT',
+        body: { key: s.key, value: this.editValue },
+      })
+      this.savingKey = ''
+      if (error) {
+        this.appSettingsError = `${s.key} 저장에 실패했습니다: ${error}`
+        return
+      }
+      s.value = data.value
+      s.updated_at = data.updated_at
+      this.editingKey = ''
+      this.editValue = ''
+      this.showToast(`${s.key} 값을 저장했습니다.`)
+    },
+    async deleteSetting(s) {
+      if (!window.confirm(`'${s.key}' 설정을 삭제할까요? 되돌릴 수 없습니다.`)) return
+      this.appSettingsError = ''
+      this.deletingKey = s.key
+      const { error } = await useApi(`/api/lead/app-settings/${encodeURIComponent(s.key)}`, { method: 'DELETE' })
+      this.deletingKey = ''
+      if (error) {
+        this.appSettingsError = `${s.key} 삭제에 실패했습니다: ${error}`
+        return
+      }
+      this.appSettings = this.appSettings.filter(x => x.key !== s.key)
+      this.showToast(`${s.key} 설정을 삭제했습니다.`)
+    },
+    async addSetting() {
+      this.addError = ''
+      const key = (this.newKey || '').trim()
+      if (!key) return
+      if (this.isBlockedSettingKey(key)) {
+        this.addError = 'autonomy_enabled / engine.* 로 시작하는 키는 자율 제어판에서 관리합니다.'
+        return
+      }
+      this.addBusy = true
+      const { data, error } = await useApi('/api/lead/app-settings', {
+        method: 'PUT',
+        body: { key, value: this.newValue },
+      })
+      this.addBusy = false
+      if (error) {
+        this.addError = error
+        return
+      }
+      const idx = this.appSettings.findIndex(x => x.key === key)
+      if (idx >= 0) this.appSettings.splice(idx, 1, data)
+      else this.appSettings.push(data)
+      this.newKey = ''
+      this.newValue = ''
+      this.showToast(`${key} 설정을 추가했습니다.`)
+    },
+    fmtDate(s) {
+      return s ? new Date(s).toLocaleString('ko-KR') : ''
     },
   },
 }

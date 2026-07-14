@@ -55,10 +55,38 @@ router.get('/', async (c) => {
     haiku: byFamily.haiku / famTotal * 100,
   }
 
+  // 프로젝트 활동 상태 판정 헬퍼 (projects.js 의 함수들과 동일)
+  function isProjectAutonomyOn(p) {
+    if (!p) return false
+    const flag = p.autonomy_enabled
+    const on = flag === '1' || flag === 'true' || flag === 'on' || flag === 1 || flag === true
+    if (!on) return false
+    if (p.cadence && String(p.cadence).toLowerCase() === 'off') return false
+    if (!p.lead_agent_name) return false
+    return true
+  }
+
+  // 대시보드 active_projects: 자율 활성 우선 → 최근 업데이트 순서 정렬
+  const sortedProjects = allProjects
+    .map(p => ({
+      id: p.id,
+      name: p.name,
+      updated_at: p.updated_at,
+      autonomy_active: isProjectAutonomyOn(p),
+    }))
+    .sort((a, b) => {
+      // 자율 활성 먼저
+      if (a.autonomy_active !== b.autonomy_active) {
+        return a.autonomy_active ? -1 : 1
+      }
+      // 그 다음 최근 업데이트 순
+      return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+    })
+
   return c.json({
     total_projects: total,
     by_status: byStatus,
-    active_projects: allProjects.map(p => ({ id: p.id, name: p.name, updated_at: p.updated_at })),
+    active_projects: sortedProjects,
     recent_activities: recentActivities,
     agents: allAgents,
     inbox, // { pending, pending_high, pending_medium, pending_low, scheduled_pending, failed, total_cost_usd }

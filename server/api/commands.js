@@ -9,6 +9,8 @@ import { dispatchApprovedCommand } from '../lib/dispatch-worker.js'
 import { buildResumePrompt, maybeRequeueResume } from '../lib/resume-loop.js'
 import { maybeRequeuePhase } from '../lib/phase-chain.js'
 import { logActivity } from '../lib/activity-log.js'
+import { execMonitor } from '../lib/exec-monitor.js'
+import { sendApprovalNotification } from '../lib/push-notifier.js'
 
 const router = new Hono()
 
@@ -17,7 +19,7 @@ const router = new Hono()
 // (이 상한을 넘던 4022자 daily-lead-cycle instruction 이 스케줄러 경로에서 400 을 받아 자율 루프가
 //  조용히 멈추던 회귀를 해소 — 이슈 28876de3.) DB 컬럼(commands.instruction)은 TEXT 라 제약 없음.
 // 8000 은 현재+향후 프롬프트 하드닝 여유를 주면서도 단일 명령이 무한정 커지는 남용은 막는 합리적 상한.
-const MAX_INSTRUCTION_LEN = 8000
+export const MAX_INSTRUCTION_LEN = 8000
 
 const PERMISSION_MODES = ['allowlist', 'acceptEdits', 'bypass']
 const STATUSES = ['queued', 'approved', 'claimed', 'running', 'done', 'failed', 'rejected', 'expired']
@@ -27,8 +29,11 @@ const REVIEW_DECISIONS = ['approve', 'reject', 'request_changes']
 /**
  * POST /api/commands  [JWT]  웹 → 명령 생성
  * body: { project_id, instruction, host?, permission_mode?,
- *         task_type?, business?, customer?, risk_level?, ai_summary?, evidence?, recommended_action? }
+ *         task_type?, business?, customer?, risk_level?, ai_summary?, evidence?, recommended_action?,
+ *         options? }
  * 승인카드 메타(B-1)는 전부 선택. 기존 필수(project_id·instruction)는 불변.
+ * options: 선택형 질문일 때만 [{label, description?}, ...] 배열(주 사용처는 MCP command_add이지만
+ *   일관성을 위해 웹 생성 경로도 지원). 생략 시 NULL(자유텍스트 질문).
  */
 router.post('/', authMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}))
@@ -47,6 +52,12 @@ router.post('/', authMiddleware, async (c) => {
   // risk_level은 지정된 경우에만 검증(미지정 시 DAO에서 DEFAULT 'low').
   if (body.risk_level !== undefined && !RISK_LEVELS.includes(body.risk_level)) {
     return badRequest(c, `risk_level must be one of: ${RISK_LEVELS.join(', ')}`)
+  }
+  // options는 지정된 경우에만 검증(배열 + 각 항목 {label:string, description?:string}).
+  if (body.options !== undefined && body.options !== null) {
+    const valid = Array.isArray(body.options) &&
+      body.options.every((o) => o && typeof o === 'object' && typeof o.label === 'string')
+    if (!valid) return badRequest(c, 'options must be an array of {label, description?}')
   }
 
   const project = await new ProjectsDao(c.env.DB).findById(project_id)
@@ -70,6 +81,7 @@ router.post('/', authMiddleware, async (c) => {
     ai_summary: body.ai_summary,
     evidence: body.evidence,
     recommended_action: body.recommended_action,
+    options: body.options,
     direct,
   })
 
@@ -87,6 +99,14 @@ router.post('/', authMiddleware, async (c) => {
         }))
     }
   }
+
+  // Push notification to project owner
+  if (project.owner_user_id) {
+    sendApprovalNotification(c.env.DB, project.owner_user_id, command).catch((e) => {
+      console.error('[Push] Failed to send approval notification:', e.message)
+    })
+  }
+
   return c.json({ command }, 201)
 })
 
@@ -98,9 +118,17 @@ router.post('/', authMiddleware, async (c) => {
  *  - risk_level    → low|medium|high (그 외 400)
  */
 router.get('/', authMiddleware, async (c) => {
-  const status = c.req.query('status')
-  if (status && !STATUSES.includes(status)) {
-    return badRequest(c, `status must be one of: ${STATUSES.join(', ')}`)
+  // status: 단일값 또는 콤마구분 다중값(예: 'claimed,running') — 실행 모니터가 commands 테이블을
+  //   "지금 실행 중"/"최근 완료" 목록의 권위 소스로 폴링하면서 IN 조건이 필요해져 확장(2026-07-14).
+  //   기존 단일값 호출부(승인함 등)는 그대로 동작.
+  const statusParam = c.req.query('status')
+  let status = statusParam
+  if (statusParam) {
+    const statuses = statusParam.split(',').map((s) => s.trim()).filter(Boolean)
+    for (const s of statuses) {
+      if (!STATUSES.includes(s)) return badRequest(c, `status must be one of: ${STATUSES.join(', ')}`)
+    }
+    status = statuses.length === 1 ? statuses[0] : statuses
   }
   const risk_level = c.req.query('risk_level')
   if (risk_level && !RISK_LEVELS.includes(risk_level)) {
@@ -159,8 +187,12 @@ router.post('/claim', apiKeyMiddleware, async (c) => {
       sandbox_profile: resolveSandboxProfile(command.task_type),
       // (§9 원격 승인 재개) resume command 면 poll 이 claude --resume <sid> -p "<답변>" 로 실행하도록
       //   재개 세션 id 와 -p 페이로드를 실어 보낸다. buildResumePrompt 가 대표 답변 + 다음 라운드 신호
-      //   규약(§11 후속 다중 라운드)을 함께 싣는다. resume 가 아니면 둘 다 null(신규 실행).
-      resume_session_id: command.task_type === 'resume' ? (command.session_id || null) : null,
+      //   규약(§11 후속 다중 라운드)을 함께 싣는다. (Claude Code 웹콘솔, 2026-07-09) console 도 세션이
+      //   있으면 같은 채팅 세션을 이어받아야 하므로 resume_session_id 대상에 포함한다 — 단 resume_prompt
+      //   래핑은 resume 전용으로 유지(console 은 poll 이 command.instruction 원문을 그대로 쓰게 둔다,
+      //   bin/lib/poll-commands.js 의 promptText 폴백 참고).
+      resume_session_id: (command.task_type === 'resume' || command.task_type === 'console') && command.session_id
+        ? command.session_id : null,
       resume_prompt: command.task_type === 'resume' ? buildResumePrompt(command.review_note) : null,
     },
   })
@@ -174,10 +206,11 @@ router.post('/claim', apiKeyMiddleware, async (c) => {
  *  - 404 대상 command 없음
  *  - 409 이미 검토됨/대기상태 아님(동시성·멱등 — 조건부 UPDATE가 changes()==0)
  *
- * 실행 인프라 재설계(execution-infra-redesign.md §2.4, v3 최종): 내부 구현이
- *   CommandsDao.review()(async, HTTP 라운드트립 없음) → reviewCommandTx(동기 tx, review+타겟claim
- *   원자화) 로 교체됐다. **응답 계약(200/400/404/409, body)은 불변** — approve 시 이 요청이 타겟
- *   claim 을 따내면(claimedForSpawn) 백그라운드 실행(dispatchApprovedCommand)만 부작용으로 추가된다.
+ * 실행 인프라 재설계(execution-infra-redesign.md §2.4): 내부 구현이 CommandsDao.review()(async,
+ *   HTTP 라운드트립 없음) → reviewCommandTx(동기 tx) 로 교체됐다. **응답 계약(200/400/404/409, body)은
+ *   불변.** ⚠️ 2026-07-13 대표 결정("자율실행은 메인루프를 통해서만"): approve 시 웹서버가 즉시
+ *   claim+dispatchApprovedCommand 하던 부작용을 제거했다 — status='approved'로만 남고, 실행은 항상
+ *   engine/safety-poll.js 가 다음 엔진 틱(최대 60초)에 집어가 엔진 프로세스 안에서 수행한다.
  */
 router.patch('/:id/review', authMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}))
@@ -198,14 +231,12 @@ router.patch('/:id/review', authMiddleware, async (c) => {
   const result = c.env.DB.transaction((tx) => reviewCommandTx(tx, { id, decision, review_note, reviewed_by }))
   if (!result.command) return conflict(c, 'Command already reviewed or in terminal state')
 
-  if (result.claimedForSpawn) {
-    // fire-and-forget — HTTP 응답은 즉시 반환(§2.4: 상시 기동 Node 프로세스라 응답 후에도
-    //   백그라운드 Promise 가 이벤트루프에서 계속 실행된다).
-    dispatchApprovedCommand(c.env.DB, id).catch((e) =>
-      logActivity(c.env.DB, {
-        project_id: result.command.project_id, agent_name: 'system',
-        action: 'instant_dispatch_error', detail: e.message, created_at: new Date().toISOString(),
-      }))
+  // Push notification to project owner about approval decision
+  const project = result.command.project_id ? await new ProjectsDao(c.env.DB).findById(result.command.project_id) : null
+  if (project?.owner_user_id) {
+    sendApprovalNotification(c.env.DB, project.owner_user_id, result.command).catch((e) => {
+      console.error('[Push] Failed to send approval notification:', e.message)
+    })
   }
 
   return c.json({ command: result.command })
@@ -231,6 +262,21 @@ router.patch('/:id', apiKeyMiddleware, async (c) => {
   })
   if (!command) return notFound(c, 'Command not found')
 
+  // poll 경로(별도 프로세스 bin/loop.js)의 실행을 execMonitor에 반영 — poll은 execMonitor 싱글턴을
+  // 공유하지 않으므로, 상태 변경 보고(PATCH /:id) 시점에 서버 측에서 직접 갱신한다.
+  // dispatch-worker.js(서버 직접 실행)는 PATCH /:id를 호출하지 않으므로 중복 이벤트 없음.
+  if (body.status === 'running' && !execMonitor.active.has(command.id)) {
+    const proj = command.project_id ? await new ProjectsDao(c.env.DB).findById(command.project_id) : null
+    execMonitor.start(command.id, {
+      projectId: command.project_id || null,
+      projectName: proj ? (proj.name || proj.path?.split('/').pop() || '?') : '?',
+      instruction: (command.instruction || '').slice(0, 200),
+      taskType: command.task_type || 'direct',
+    })
+  } else if (body.status === 'done' || body.status === 'failed') {
+    execMonitor.end(command.id, body.status, { costUsd: body.cost_usd ?? null })
+  }
+
   // (§11 후속 다중 라운드) poll 이 resume 워커 결과를 보고할 때, "또 승인 필요"(NEEDS_APPROVAL:) 신호면
   //   같은 session_id 로 새 resume command 를 승인함에 재큐잉한다(exit 0 · 세션당 라운드 상한 내).
   if (command.task_type === 'resume' && Number(body.exit_code) === 0) {
@@ -255,6 +301,54 @@ router.patch('/:id', apiKeyMiddleware, async (c) => {
     }
   }
   return c.json({ command })
+})
+
+/**
+ * PATCH /api/commands/:id/terminate  [JWT]  명령 강제 종료 (running/claimed 상태만 가능)
+ * running 상태로 멈춰있는 명령을 강제 실패로 표시해 뒤의 명령들을 unblock.
+ */
+router.patch('/:id/terminate', authMiddleware, async (c) => {
+  const id = c.req.param('id')
+  if (!id) return badRequest(c, 'id is required')
+
+  const command = await new CommandsDao(c.env.DB).findById(id)
+  if (!command) return notFound(c, 'Command not found')
+
+  // 프로젝트 소유자만 강제 종료 가능 (또는 admin)
+  const user = c.get('user')
+  const project = await new ProjectsDao(c.env.DB).findById(command.project_id)
+  if (!project || (project.owner_id !== user?.sub && user?.role !== 'admin')) {
+    return c.json({ error: 'Unauthorized' }, 403)
+  }
+
+  // running/claimed 상태만 종료 가능
+  if (!['running', 'claimed', 'approved'].includes(command.status)) {
+    return conflict(c, `Cannot terminate command in ${command.status} status`)
+  }
+
+  const now = new Date().toISOString()
+  const updated = c.env.DB.transaction((tx) => {
+    tx.prepare(`
+      UPDATE commands
+      SET status='failed', error='Forcefully terminated by user', updated_at=?
+      WHERE id=?
+    `).bind(now, id).run()
+    return tx.prepare('SELECT * FROM commands WHERE id=?').bind(id).first()
+  })
+
+  if (updated) {
+    execMonitor.end(updated.id, 'failed', { costUsd: null })
+  }
+
+  logActivity(c.env.DB, {
+    project_id: command.project_id,
+    agent_name: user?.sub || 'unknown',
+    action: 'command_terminate',
+    detail: `명령 ${id} 강제 종료 (이전 상태: ${command.status})`,
+    created_at: now,
+  })
+
+  return c.json({ command: updated })
 })
 
 export default router

@@ -18,3 +18,6 @@ playwright-report/
 
 # 문서 창고 (git 추적 제외 — 디스크엔 유지, 이력만 안 쌓음)
 docs/
+
+# Workflow 도구가 만드는 임시 git worktree (자동정리 안 되면 잔존 → vitest 오염 원인)
+.claude/worktrees/

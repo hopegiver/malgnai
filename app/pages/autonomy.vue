@@ -65,8 +65,8 @@
               <span class="pd-stat-icon"><i class="bi bi-cash-coin"></i></span>
               <span class="pd-stat-label">오늘 자율 비용</span>
             </div>
-            <div class="pd-stat-value">${{ status.cost.today_usd.toFixed(2) }}</div>
-            <div class="pd-stat-sub">하루 예산 ${{ status.cost.daily_limit_usd.toFixed(2) }} · {{ status.cost.pct }}% 사용</div>
+            <div class="pd-stat-value">${{ (status.cost?.today_usd ?? 0).toFixed(2) }}</div>
+            <div class="pd-stat-sub">하루 예산 ${{ (status.cost?.daily_limit_usd ?? 0).toFixed(2) }} · {{ status.cost?.pct ?? 0 }}% 사용</div>
             <div class="pd-progress-track mt-2">
               <div class="pd-progress-fill"
                    :style="{ width: status.cost.pct + '%', background: costDanger ? '#c12c39' : 'var(--color-primary)' }"></div>
@@ -81,7 +81,7 @@
               <span class="pd-stat-icon"><i class="bi bi-cpu"></i></span>
               <span class="pd-stat-label">실행 중 워커</span>
             </div>
-            <div class="pd-stat-value">{{ status.workers.running }}</div>
+            <div class="pd-stat-value">{{ status.workers?.running ?? 0 }}</div>
             <div class="pd-stat-sub">claimed · running 상태</div>
           </div>
         </div>
@@ -90,12 +90,12 @@
         <div class="col-12 col-md-6 col-xl-3">
           <router-link to="/approvals" class="text-decoration-none">
             <div class="card p-3 h-100 pd-stat"
-                 :class="status.approvals.pending ? 'pd-stat--warning' : 'pd-stat--neutral'">
+                 :class="(status.approvals?.pending ?? 0) ? 'pd-stat--warning' : 'pd-stat--neutral'">
               <div class="pd-stat-top">
                 <span class="pd-stat-icon"><i class="bi bi-inbox"></i></span>
                 <span class="pd-stat-label">승인 대기 태스크</span>
               </div>
-              <div class="pd-stat-value">{{ status.approvals.pending }}</div>
+              <div class="pd-stat-value">{{ status.approvals?.pending ?? 0 }}</div>
               <div class="pd-stat-sub">
                 LEAD 생성 대기 <i class="bi bi-arrow-right-short"></i>승인대기함
               </div>
@@ -110,7 +110,7 @@
               <span class="pd-stat-icon"><i class="bi bi-arrow-repeat"></i></span>
               <span class="pd-stat-label">최근 자율 사이클</span>
             </div>
-            <template v-if="status.last_cycle">
+            <template v-if="status.last_cycle?.status">
               <div class="pd-stat-value" style="font-size: 1.25rem;">
                 <span :class="'badge bg-' + cycleColor(status.last_cycle.status)">
                   {{ cycleLabel(status.last_cycle.status) }}
@@ -137,52 +137,106 @@
         자율 스위치는 kill-switch 입니다. 끄면 다음 박동부터 모든 자율 배정이 즉시 승인 대기로 강등됩니다.
       </p>
 
-      <!-- 프로젝트별 자율 상태 -->
-      <div class="card p-4 mt-4" v-if="status.projects && status.projects.length">
-        <h2 class="h6 mb-3"><i class="bi bi-diagram-3 me-1"></i>프로젝트별 자율 상태</h2>
-        <div class="table-responsive">
-          <table class="table table-sm table-hover mb-0">
+      <!-- 프로젝트별 자율 상태 (자율 ON 프로젝트만 — OFF/켜기·끄기는 프로젝트 상세에서) -->
+      <template v-if="status.projects && status.projects.length">
+        <div class="d-flex justify-content-between align-items-center mt-4 mb-3">
+          <h2 class="h6 mb-0"><i class="bi bi-diagram-3 me-1"></i>자율 가동 중인 프로젝트</h2>
+          <span class="text-faint small">켜기·끄기는 프로젝트 상세에서</span>
+        </div>
+        <div class="row g-3">
+          <div class="col-12 col-md-6 col-xl-4" v-for="p in status.projects" :key="p.id">
+            <div class="pa-card card h-100" style="cursor:pointer" @click="$router.push('/projects/' + p.id)">
+              <div class="d-flex justify-content-between align-items-start mb-2">
+                <span class="fw-semibold text-truncate me-2">{{ p.name }}</span>
+                <span v-if="p.pending_approvals > 0" class="badge bg-warning text-dark flex-shrink-0">승인대기 {{ p.pending_approvals }}</span>
+              </div>
+              <div class="d-flex align-items-center gap-2 mb-3">
+                <span class="badge bg-secondary-subtle text-secondary-emphasis">{{ projectStatusLabel(p.status) }}</span>
+                <span v-if="p.last_cycle_status" :class="'badge bg-' + cycleColor(p.last_cycle_status)">{{ cycleLabel(p.last_cycle_status) }}</span>
+              </div>
+              <div class="pa-card-grid">
+                <div>
+                  <div class="text-faint" style="font-size:11px">오늘 비용</div>
+                  <div class="small">{{ p.cost_today_usd != null ? '$' + p.cost_today_usd.toFixed(2) : '—' }}</div>
+                </div>
+                <div>
+                  <div class="text-faint" style="font-size:11px">실패율(7일)</div>
+                  <div class="small" :class="failureRateDanger(p) ? 'text-danger fw-semibold' : ''">
+                    {{ p.cycles_total ? failureRateLabel(p) : '표본없음' }}
+                  </div>
+                </div>
+                <div>
+                  <div class="text-faint" style="font-size:11px">다음 실행</div>
+                  <div class="small">{{ p.next_run_at ? relativeTime(p.next_run_at) : '—' }}</div>
+                </div>
+                <div>
+                  <div class="text-faint" style="font-size:11px">마지막 실행</div>
+                  <div class="small">{{ p.last_run_at ? relativeTime(p.last_run_at) : '—' }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+      <div v-else-if="status.projects && !status.projects.length" class="card p-4 mt-4">
+        <p class="text-muted mb-0 small"><i class="bi bi-diagram-3 me-1"></i>자율 가동 중인 프로젝트가 없습니다. 프로젝트 상세에서 자율을 켜면 여기 표시됩니다.</p>
+      </div>
+
+      <!-- 엔진 설정(engine.* — app_settings DB화, 편집은 관리자만) -->
+      <div class="card p-4 mt-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h2 class="h6 mb-0"><i class="bi bi-sliders me-1"></i>엔진 설정</h2>
+          <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="settingsLoading" @click="loadEngineSettings">
+            <i class="bi bi-arrow-clockwise me-1"></i>새로고침
+          </button>
+        </div>
+        <p class="small text-muted mb-3">
+          <code>com.malgnai.engine</code> 튜닝값입니다. 코드 재배포 없이 여기서 바로 반영됩니다(<code>app_settings</code> 저장).
+          <span v-if="!admin">읽기 전용 — 수정은 관리자만 가능합니다.</span>
+        </p>
+        <div v-if="settingsError" class="alert alert-danger py-2 small">{{ settingsError }}</div>
+        <div v-if="settingsLoading && !engineSettings.length" class="text-muted small py-2">불러오는 중…</div>
+        <div v-else class="table-responsive">
+          <table class="table table-sm align-middle mb-0">
             <thead class="table-light">
               <tr>
-                <th class="text-nowrap">프로젝트명</th>
-                <th class="text-nowrap">상태</th>
-                <th class="text-nowrap">자율</th>
-                <th class="text-nowrap d-none d-md-table-cell">다음 실행</th>
-                <th class="text-nowrap d-none d-md-table-cell">마지막 실행</th>
-                <th class="text-nowrap d-none d-sm-table-cell">대기</th>
+                <th style="min-width:12rem">설정</th>
+                <th style="min-width:8rem">값</th>
+                <th class="d-none d-md-table-cell">설명</th>
+                <th v-if="admin" style="width:5rem"></th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="p in status.projects" :key="p.id"
-                  style="cursor:pointer" @click="$router.push('/projects/' + p.id)">
-                <td class="fw-medium">{{ p.name }}</td>
-                <td class="text-nowrap">
-                  <span class="badge bg-secondary-subtle text-secondary-emphasis">{{ projectStatusLabel(p.status) }}</span>
+              <tr v-for="s in engineSettings" :key="s.key">
+                <td>
+                  <div class="fw-medium">{{ s.label }}</div>
+                  <div class="small text-faint">{{ s.key }}</div>
                 </td>
-                <td class="text-nowrap">
-                  <span v-if="p.autonomy_enabled === '1' || p.autonomy_enabled === 'true' || p.autonomy_enabled === 'on'"
-                        class="text-success fw-semibold"><i class="bi bi-circle-fill" style="font-size:.5rem;vertical-align:middle"></i> ON</span>
-                  <span v-else class="text-muted"><i class="bi bi-circle" style="font-size:.5rem;vertical-align:middle"></i> OFF</span>
+                <td>
+                  <template v-if="s.type === 'bool'">
+                    <select class="form-select form-select-sm" v-model="draft[s.key]" :disabled="!admin || saving[s.key]">
+                      <option value="1">ON</option>
+                      <option value="0">OFF</option>
+                    </select>
+                  </template>
+                  <template v-else>
+                    <input type="number" class="form-control form-control-sm" v-model="draft[s.key]"
+                           :disabled="!admin || saving[s.key]">
+                  </template>
                 </td>
-                <td class="d-none d-md-table-cell text-nowrap">
-                  <span v-if="p.next_run_at" class="small text-muted">{{ relativeTime(p.next_run_at) }}</span>
-                  <span v-else class="text-faint small">—</span>
-                </td>
-                <td class="d-none d-md-table-cell text-nowrap">
-                  <span v-if="p.last_run_at" class="small text-muted">{{ relativeTime(p.last_run_at) }}</span>
-                  <span v-else class="text-faint small">—</span>
-                </td>
-                <td class="d-none d-sm-table-cell text-nowrap">
-                  <span v-if="p.pending_approvals > 0" class="badge bg-warning text-dark">{{ p.pending_approvals }}</span>
-                  <span v-else class="text-faint small">0</span>
+                <td class="d-none d-md-table-cell small text-muted">{{ s.description }}</td>
+                <td v-if="admin">
+                  <button type="button" class="btn btn-sm btn-primary"
+                          :disabled="saving[s.key] || draft[s.key] === s.value"
+                          @click="saveEngineSetting(s)">
+                    <span v-if="saving[s.key]" class="spinner-border spinner-border-sm"></span>
+                    <span v-else>저장</span>
+                  </button>
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
-      </div>
-      <div v-else-if="status.projects && !status.projects.length" class="card p-4 mt-4">
-        <p class="text-muted mb-0 small"><i class="bi bi-diagram-3 me-1"></i>등록된 활성 프로젝트가 없습니다.</p>
       </div>
     </template>
 
@@ -229,6 +283,12 @@ export default {
       toast: '',
       toastTimer: null,
       confirm: { open: false, target: false },
+      admin: isAdmin(),
+      engineSettings: [],
+      draft: {},
+      saving: {},
+      settingsLoading: false,
+      settingsError: '',
     }
   },
   computed: {
@@ -248,6 +308,7 @@ export default {
   },
   async mounted() {
     await this.load()
+    await this.loadEngineSettings()
   },
   beforeUnmount() {
     if (this.toastTimer) clearTimeout(this.toastTimer)
@@ -301,6 +362,16 @@ export default {
     cycleLabel(s) {
       return { done: '완료', failed: '실패', running: '실행 중', claimed: '실행 중', queued: '대기', approved: '승인됨', rejected: '반려', expired: '만료' }[s] || s || '—'
     },
+    failureRatePct(p) {
+      if (!p.cycles_total) return 0
+      return (p.cycles_failed / p.cycles_total) * 100
+    },
+    failureRateLabel(p) {
+      return this.failureRatePct(p).toFixed(1) + '%'
+    },
+    failureRateDanger(p) {
+      return this.failureRatePct(p) >= 20
+    },
     fmt(s) {
       return s ? new Date(s).toLocaleString('ko-KR') : ''
     },
@@ -318,6 +389,35 @@ export default {
       const hr = Math.floor(min / 60)
       if (hr < 24) return hr + '시간 ' + (future ? '후' : '전')
       return Math.floor(hr / 24) + '일 ' + (future ? '후' : '전')
+    },
+    async loadEngineSettings() {
+      this.settingsLoading = true
+      this.settingsError = ''
+      const { data, error } = await useApi('/api/lead/engine-settings')
+      this.settingsLoading = false
+      if (error) {
+        this.settingsError = `엔진 설정을 불러오지 못했습니다: ${error}`
+        return
+      }
+      this.engineSettings = data.settings || []
+      const draft = {}
+      this.engineSettings.forEach(s => { draft[s.key] = s.value })
+      this.draft = draft
+    },
+    async saveEngineSetting(s) {
+      this.saving = { ...this.saving, [s.key]: true }
+      const { data, error } = await useApi('/api/lead/engine-settings', {
+        method: 'PUT',
+        body: { key: s.key, value: this.draft[s.key] },
+      })
+      this.saving = { ...this.saving, [s.key]: false }
+      if (error) {
+        this.showToast(`${s.label} 저장 실패: ${error}`)
+        return
+      }
+      s.value = data.value
+      s.updated_at = data.updated_at
+      this.showToast(`${s.label}을(를) ${data.value}(으)로 저장했습니다.`)
     },
   },
 }
@@ -339,6 +439,10 @@ export default {
   display: flex; align-items: center; justify-content: center; padding: 1rem;
 }
 .auto-modal { width: 100%; max-width: 30rem; box-shadow: var(--shadow-soft, 0 8px 32px rgba(0,0,0,0.18)); }
+
+.pa-card { padding: 1rem; transition: box-shadow 0.15s, border-color 0.15s; }
+.pa-card:hover { border-color: var(--color-primary); box-shadow: var(--shadow-soft, 0 4px 16px rgba(0,0,0,0.08)); }
+.pa-card-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem 1rem; }
 
 @media (max-width: 575.98px) {
   .auto-switch-btn { width: 100%; }

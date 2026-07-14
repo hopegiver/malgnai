@@ -18,8 +18,7 @@ import { claimApprovedForProject } from './instant-dispatch.js'
 const uuid = () => crypto.randomUUID()
 const nowIso = () => new Date().toISOString()
 
-// 무한 체인 차단(resume-loop.js 의 MAX_RESUME_ROUNDS 와 동형 — 값싼 가드만 두는 기존 설계 철학을
-//   따른다). 단계는 승인 왕복이 아니라 실제 작업 단위라 라운드 상한을 resume(5)보다 넉넉하게 둔다.
+// 체인당 최대 단계 수 상한 (과도한 연쇄 실행 방지)
 export const MAX_PHASE_ROUNDS = 20
 
 const NEXT_PHASE_RE = /^NEXT_PHASE:\s*([\s\S]+)$/m
@@ -37,14 +36,16 @@ export function parsePhaseFollowup(resultText) {
  * maybeRequeuePhaseTx — 완료된 command 의 결과를 보고, 다음 단계가 필요하면 새 command 를
  *   'approved'(자가승인)로 생성하고 즉시 타겟클레임을 시도한다(동기 tx 내부).
  *
- * 적용 대상: task_type 이 'project_cycle'(자율 사이클 전용 next='auto' proposal 체계를 이미 가짐)도
- *   'resume'(§9, 별도 NEEDS_APPROVAL 체계를 이미 가짐)도 아닌 모든 command — 그 외는 호출부가
- *   따로 걸러내지 않아도 이 함수가 즉시 no-op 한다(호출부 조건 중복 방지).
+ * 적용 대상: task_type 이 'project_cycle'(자율 사이클 전용 next='auto' proposal 체계를 이미 가짐),
+ *   'resume'(§9, 별도 NEEDS_APPROVAL 체계를 이미 가짐), 'console'(Claude Code 웹콘솔, 2026-07-09 —
+ *   사람과 실시간 멀티턴 채팅 중이라 매 턴 끝에 다음 단계 command 가 자동 생성·실행되면 채팅 흐름과
+ *   충돌한다) 그 어느 것도 아닌 모든 command — 그 외는 호출부가 따로 걸러내지 않아도 이 함수가 즉시
+ *   no-op 한다(호출부 조건 중복 방지).
  *
  * @returns {{requeued:boolean, reason?:string, newId?:string, claimed?:boolean}}
  */
 export function maybeRequeuePhaseTx(tx, command, resultText) {
-  if (!command || command.task_type === 'project_cycle' || command.task_type === 'resume') {
+  if (!command || command.task_type === 'project_cycle' || command.task_type === 'resume' || command.task_type === 'console') {
     return { requeued: false }
   }
   const { needs, instruction } = parsePhaseFollowup(resultText)

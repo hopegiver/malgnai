@@ -177,7 +177,7 @@ export default {
       return true
     },
     cadenceLabel(c) {
-      return { daily: '매일', hourly: '매시', weekly: '매주', off: '주기 끔' }[c] || c
+      return { every15m: '15분마다', every30m: '30분마다', daily: '매일', hourly: '매시', every3h: '3시간마다', every6h: '6시간마다', every12h: '12시간마다', weekly: '매주', off: '주기 끔' }[c] || c
     },
     // 끄기는 즉시(확인). 켜기는 목표·LEAD 있으면 확인 후 즉시, 없으면 상세로 유도.
     quickToggle(w) {

@@ -13,6 +13,27 @@
  *   (createScheduled)는 scheduler 자체가 P4 로 제거되어 함께 삭제.
  *   예외(§3-1): create({direct:true}) "로컬 직접 명령"은 자가승인('approved')으로 태운다.
  */
+/**
+ * withOptions — DB row의 `options_json`(TEXT)을 `options` 필드(배열|null)로 파싱해 붙인다.
+ * (2026-07-14) 승인함 "선택형 질문" 계약: options_json은 JSON 배열 문자열 [{label, description?}, ...]
+ *   또는 NULL(자유텍스트 질문). 파싱 실패도 안전하게 null로 폴백 — API 응답이 절대 깨지지 않게 한다.
+ *   원본 options_json 컬럼은 응답에서 제거(중복 표현 방지, 소비자는 options만 보면 됨).
+ */
+function withOptions(row) {
+  if (!row) return row
+  const { options_json, ...rest } = row
+  let options = null
+  if (options_json) {
+    try {
+      const parsed = JSON.parse(options_json)
+      options = Array.isArray(parsed) ? parsed : null
+    } catch {
+      options = null
+    }
+  }
+  return { ...rest, options }
+}
+
 export default class CommandsDao {
   constructor(db) { this.db = db }
 
@@ -30,18 +51,26 @@ export default class CommandsDao {
     //   건너뛰고 곧바로 안전망 poll(claim은 'approved'만 집음, §3-3)/즉시디스패치가 실행한다.
     //   미지정/false 이면 기존대로 'queued'(승인 대기, fail-safe).
     direct,
+    // Claude Code 웹콘솔(2026-07-09): session_id — 이어받을 세션(없으면 새 세션=NULL, 콘솔 라우터가
+    //   기존 대화를 이어갈 때 지정). idempotency_key — 이미 있는 컬럼(UNIQUE WHERE NOT NULL, schema.sql
+    //   idx_commands_idem)을 이 범용 create()에도 노출해 중복 재전송을 DB 레벨에서 안전하게 막는다.
+    session_id, idempotency_key,
+    // (2026-07-14) 선택형 질문 옵션. [{label, description?}, ...] 배열이면 그대로 JSON 직렬화해 저장,
+    //   미지정/빈 배열이면 NULL(자유텍스트 질문).
+    options,
   }) {
     const now = new Date().toISOString()
     const status = direct ? 'approved' : 'queued'
     const review_status = direct ? 'approved' : null
     const reviewed_by = direct ? (created_by || 'web') : null
     const reviewed_at = direct ? now : null
+    const options_json = Array.isArray(options) && options.length ? JSON.stringify(options) : null
     await this.db.prepare(
       `INSERT INTO commands (id, project_id, host, instruction, status, permission_mode, created_by, created_at, updated_at,
                              task_type, business, customer, risk_level, ai_summary, evidence, recommended_action,
                              title, assignee_agent_name, parent_command_id, root_command_id, level,
-                             review_status, reviewed_by, reviewed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                             review_status, reviewed_by, reviewed_at, session_id, idempotency_key, options_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       id,
       project_id,
@@ -67,6 +96,9 @@ export default class CommandsDao {
       review_status,
       reviewed_by,
       reviewed_at,
+      session_id || null,
+      idempotency_key || null,
+      options_json,
     ).run()
     return await this.findById(id)
   }
@@ -84,11 +116,23 @@ export default class CommandsDao {
     const conds = []
     const vals = []
     if (project_id) { conds.push('c.project_id = ?'); vals.push(project_id) }
-    if (status) { conds.push('c.status = ?'); vals.push(status) }
+    // status: 배열이면 IN 조건(실행 모니터의 active='claimed,running'/recent='done,failed' 폴링용,
+    //   2026-07-14). 문자열이면 기존과 동일한 단일 일치.
+    if (Array.isArray(status) && status.length) {
+      conds.push(`c.status IN (${status.map(() => '?').join(',')})`)
+      vals.push(...status)
+    } else if (status) {
+      conds.push('c.status = ?'); vals.push(status)
+    }
+    // 리뷰 2026-07-09 Minor(구조적): 콘솔 채팅 턴(task_type='console')은 direct:true 로 자동
+    //   자가승인('approved')되어 매 메시지가 승인함 "검토완료" 목록에 그대로 쌓인다 — 승인함은
+    //   "대표가 실제 검토/승인한 위험·비가역 작업 이력"이 목적이라 일상 채팅으로 도배되면 감사로그
+    //   목적과 어긋난다. inbox 조회(승인함 UI 전용)에서만 콘솔 턴을 제외한다(기록 자체는 유지 —
+    //   /console 페이지의 세션 목록에서는 그대로 조회 가능).
     if (inbox === 'pending') {
-      conds.push("c.status = 'queued' AND c.review_status IS NULL")
+      conds.push("c.status = 'queued' AND c.review_status IS NULL AND (c.task_type IS NULL OR c.task_type != 'console')")
     } else if (inbox === 'done') {
-      conds.push('c.review_status IS NOT NULL')
+      conds.push("c.review_status IS NOT NULL AND (c.task_type IS NULL OR c.task_type != 'console')")
     }
     if (risk_level) { conds.push('c.risk_level = ?'); vals.push(risk_level) }
     const where = conds.length ? 'WHERE ' + conds.join(' AND ') : ''
@@ -98,15 +142,17 @@ export default class CommandsDao {
       ? `ORDER BY CASE c.risk_level WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END ASC, c.created_at DESC`
       : `ORDER BY c.created_at DESC`
     vals.push(limit, offset)
-    return (await this.db.prepare(
+    const rows = (await this.db.prepare(
       `SELECT c.*, p.name AS project_name
          FROM commands c LEFT JOIN projects p ON p.id = c.project_id
        ${where} ${order} LIMIT ? OFFSET ?`
     ).bind(...vals).all()).results
+    return rows.map(withOptions)
   }
 
   async findById(id) {
-    return await this.db.prepare('SELECT * FROM commands WHERE id = ?').bind(id).first()
+    const row = await this.db.prepare('SELECT * FROM commands WHERE id = ?').bind(id).first()
+    return withOptions(row)
   }
 
   /**
@@ -250,6 +296,45 @@ export default class CommandsDao {
       id,
     ).run()
     return await this.findById(id)
+  }
+
+  /**
+   * findConsoleSessions — Claude Code 웹콘솔(project_id 스코프)의 세션 목록(최신순 페이지네이션).
+   *   세션당 1행: 턴 수·최근 시각·누적 비용·제목(첫 턴 instruction 원문, 프론트가 truncate)·
+   *   마지막 턴 상태. task_type='console' AND session_id IS NOT NULL 인 것만 대상(첫 턴은
+   *   session_id 가 아직 없어 목록에 안 잡히는 게 정상 — 워커 응답으로 세션이 생긴 뒤부터 노출).
+   *
+   * 세션이 쌓일수록 목록 조회가 무거워지는 걸 막기 위해 limit+1개를 가져와 실제 limit개를
+   *   초과하면 has_more=true 로 알린다(별도 COUNT(*) 쿼리 없이 한 방에 다음 페이지 존재 여부 판단).
+   */
+  async findConsoleSessions(project_id, { limit = 10, offset = 0 } = {}) {
+    const rows = (await this.db.prepare(
+      `SELECT session_id,
+              COUNT(*) AS turn_count,
+              MAX(created_at) AS last_at,
+              COALESCE(SUM(cost_usd),0) AS total_cost_usd,
+              (SELECT instruction FROM commands c2 WHERE c2.session_id=c.session_id
+                 AND c2.task_type='console' ORDER BY c2.created_at ASC LIMIT 1) AS title,
+              (SELECT status FROM commands c3 WHERE c3.session_id=c.session_id
+                 AND c3.task_type='console' ORDER BY c3.created_at DESC LIMIT 1) AS last_status
+         FROM commands c
+        WHERE c.project_id = ? AND c.task_type = 'console' AND c.session_id IS NOT NULL
+        GROUP BY c.session_id
+        ORDER BY last_at DESC
+        LIMIT ? OFFSET ?`
+    ).bind(project_id, limit + 1, offset).all()).results
+    const has_more = rows.length > limit
+    return { sessions: has_more ? rows.slice(0, limit) : rows, has_more }
+  }
+
+  /** findConsoleTurns — 특정 콘솔 세션의 전체 턴(시간순). */
+  async findConsoleTurns(project_id, session_id) {
+    return (await this.db.prepare(
+      `SELECT id, instruction, result, status, exit_code, cost_usd, session_id, error, created_at, updated_at
+         FROM commands
+        WHERE project_id = ? AND task_type = 'console' AND session_id = ?
+        ORDER BY created_at ASC`
+    ).bind(project_id, session_id).all()).results
   }
 
 }

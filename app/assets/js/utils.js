@@ -21,7 +21,7 @@
  * 인증 토큰은 localStorage.token 이 있으면 자동으로 Authorization 헤더에 추가됩니다.
  */
 async function useApi(url, options = {}) {
-  const { method = 'GET', body } = options
+  const { method = 'GET', body, _retried = false } = options
 
   const headers = { 'Content-Type': 'application/json' }
   const token = localStorage.getItem('token')
@@ -35,8 +35,15 @@ async function useApi(url, options = {}) {
     })
     const data = await res.json().catch(() => null)
     if (!res.ok) {
-      // 401: 토큰 만료/무효 → 세션 정리 후 로그인으로(로그인 요청 자체는 제외).
-      if (res.status === 401 && !url.endsWith('/api/auth/login')) {
+      // 401: 토큰 만료/무효. 로그인/리프레시 요청 자체는 제외하고, refresh_token으로
+      // 한 번만 access token 갱신을 시도한 뒤 원래 요청을 재시도한다. 실패하면 로그아웃.
+      if (res.status === 401 && !url.endsWith('/api/auth/login') && !url.endsWith('/api/auth/refresh')) {
+        if (!_retried) {
+          const refreshed = await refreshAccessToken()
+          if (refreshed) {
+            return useApi(url, { ...options, _retried: true })
+          }
+        }
         logout()
       }
       return { data: null, error: data?.error ?? data?.message ?? `HTTP ${res.status}` }
@@ -44,6 +51,63 @@ async function useApi(url, options = {}) {
     return { data, error: null }
   } catch {
     return { data: null, error: '네트워크 오류가 발생했습니다.' }
+  }
+}
+
+/**
+ * refreshAccessToken — localStorage.refresh_token으로 새 access+refresh 쌍을 발급받는다.
+ * useApi()를 쓰면 401 처리 로직과 순환참조 위험이 있어 raw fetch를 직접 사용.
+ * refresh_token은 서버가 사용 즉시 폐기하는 회전(rotation) 방식이라, 응답으로 받은
+ * 새 refresh_token으로 반드시 교체 저장한다(이전 값 재사용 시 다음 갱신은 401).
+ * 성공: localStorage.token/refresh_token 갱신 후 true. 실패: 둘 다 지우고 false.
+ *
+ * [in-flight dedup] index.html 부트 시 사전갱신, default.vue 5분 주기 타이머, useApi()의
+ * 401 재시도가 거의 동시에 만료를 감지하면(예: PWA를 오래 후에 재오픈) 각자 refresh를
+ * 호출해 같은 refresh_token으로 경쟁하게 된다 — 회전형이라 먼저 도착한 요청만 성공하고
+ * 나머지는 401(invalid_refresh_token)로 불필요하게 로그아웃될 위험이 있다. 진행 중인
+ * refresh가 있으면 새 요청을 만들지 않고 그 Promise를 공유해 실제 네트워크 호출은
+ * 항상 최대 1개만 나가게 한다.
+ */
+let _refreshInFlight = null
+
+async function refreshAccessToken() {
+  if (_refreshInFlight) return _refreshInFlight
+
+  _refreshInFlight = (async () => {
+    const refreshToken = localStorage.getItem('refresh_token')
+    if (!refreshToken) return false
+
+    try {
+      const res = await fetch('/api/auth/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      })
+      if (!res.ok) {
+        localStorage.removeItem('token')
+        localStorage.removeItem('refresh_token')
+        return false
+      }
+      const data = await res.json().catch(() => null)
+      if (!data?.token) {
+        localStorage.removeItem('token')
+        localStorage.removeItem('refresh_token')
+        return false
+      }
+      localStorage.setItem('token', data.token)
+      if (data.refresh_token) localStorage.setItem('refresh_token', data.refresh_token)
+      return true
+    } catch {
+      localStorage.removeItem('token')
+      localStorage.removeItem('refresh_token')
+      return false
+    }
+  })()
+
+  try {
+    return await _refreshInFlight
+  } finally {
+    _refreshInFlight = null
   }
 }
 
@@ -209,9 +273,22 @@ function isAdmin() {
   return tokenPayload()?.role === 'admin'
 }
 
-/** 토큰 삭제 후 로그인 페이지로 이동(현재 경로를 redirect 로 보존). */
+/**
+ * 토큰 삭제 후 로그인 페이지로 이동(현재 경로를 redirect 로 보존).
+ * refresh_token이 있으면 서버에 revoke를 fire-and-forget으로 알린다(응답을 기다리지 않음 —
+ * 사용자를 로그아웃 흐름에서 지연시키지 않기 위함, 실패해도 무시).
+ */
 function logout() {
+  const refreshToken = localStorage.getItem('refresh_token')
+  if (refreshToken) {
+    fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    }).catch(() => {})
+  }
   localStorage.removeItem('token')
+  localStorage.removeItem('refresh_token')
   const path = window.location.pathname + window.location.search
   if (window.location.pathname !== '/login') {
     const q = path && path !== '/' ? `?redirect=${encodeURIComponent(path)}` : ''

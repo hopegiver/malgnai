@@ -157,6 +157,10 @@ export default {
     onCodeInput() {
       // 숫자만 허용, 최대 6자리.
       this.code = this.code.replace(/\D/g, '').slice(0, 6)
+      // 6자리 입력 완료 시 자동 서브밋
+      if (this.code.length === 6) {
+        this.$nextTick(() => this.submit())
+      }
     },
     resetToPassword() {
       this.totpRequired = false
@@ -179,6 +183,7 @@ export default {
 
       if (data?.token) {
         localStorage.setItem('token', data.token)
+        if (data.refresh_token) localStorage.setItem('refresh_token', data.refresh_token)
         this.$router.replace(this.redirectTarget())
         return
       }

@@ -17,26 +17,6 @@ import { createHash } from "crypto"
 const CLAUDE_DIR = process.env.CLAUDE_DIR || "C:/Users/user/.claude"
 const SERVER_URL = process.argv[2] || "http://localhost:9000"
 
-// --- History ---
-function readHistory() {
-  const filePath = join(CLAUDE_DIR, "history.jsonl")
-  if (!existsSync(filePath)) return []
-
-  const lines = readFileSync(filePath, "utf-8").trim().split("\n").filter(Boolean)
-  return lines.map((line, i) => {
-    try {
-      const obj = JSON.parse(line)
-      return {
-        id: createHash("md5").update(line).digest("hex"),
-        display: (obj.display || "").slice(0, 500),
-        project: obj.project || null,
-        timestamp: obj.timestamp || 0,
-        created_at: obj.timestamp ? new Date(obj.timestamp).toISOString() : new Date().toISOString(),
-      }
-    } catch { return null }
-  }).filter(Boolean)
-}
-
 // --- Transcripts (일별 통계 + 토큰) ---
 // 매일 갱신되는 진짜 소스는 projects/*/<session>.jsonl 트랜스크립트다.
 // (history.jsonl / stats-cache.json은 과거 특정 시점에서 멈춘 레거시 파일.)
@@ -535,9 +515,6 @@ async function main() {
   console.log(`[sync-claude] Reading from ${CLAUDE_DIR}`)
   console.log()
 
-  const history = readHistory()
-  console.log(`  History: ${history.length} entries`)
-
   const { stats, tokens, modelUsage } = readTranscripts()
   console.log(`  Stats: ${stats.length} days (from transcripts)`)
   console.log(`  Token stats: ${tokens.length} day-model rows, ${modelUsage.length} models`)
@@ -557,7 +534,6 @@ async function main() {
   console.log()
   console.log(`[sync-claude] Syncing to ${SERVER_URL}...`)
 
-  await syncData("history", history, "history")
   await syncData("stats", stats, "stats")
   await syncData("tokens", tokens, "tokens")
   await syncData("model-usage", modelUsage, "model-usage")

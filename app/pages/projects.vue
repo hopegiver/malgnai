@@ -57,7 +57,7 @@
     <!-- 프로젝트 카드 그리드 -->
     <div v-else-if="filteredProjects.length" class="row g-3">
       <div class="col-12 col-md-6 col-xl-4" v-for="p in filteredProjects" :key="p.id">
-        <div class="project-card card h-100" @click="$router.push('/projects/' + p.id)" style="cursor:pointer">
+        <div class="project-card card h-100" @click="$router.push('/projects/' + p.id)" style="cursor:pointer" :class="{ 'border-primary border-2': p.autonomy_active }">
           <!-- 카드 상단: 이름 + 자율 상태 -->
           <div class="d-flex justify-content-between align-items-start mb-1">
             <span class="fw-semibold text-truncate me-2" style="font-size:15px">{{ p.name }}</span>
@@ -147,11 +147,12 @@
             <div class="col-6">
               <label class="form-label fw-medium">실행 주기</label>
               <select class="form-select" v-model="form.cadence">
-                <option value="off">자동 실행 안 함</option>
-                <option value="15min">15분마다</option>
-                <option value="30min">30분마다</option>
+                <option value="every15m">15분마다</option>
+                <option value="every30m">30분마다</option>
                 <option value="hourly">1시간마다</option>
                 <option value="daily">매일</option>
+                <option value="weekly">매주</option>
+                <option value="off">자동 실행 안 함</option>
               </select>
             </div>
           </div>
@@ -216,6 +217,9 @@ export default {
       if (this.kindFilter) list = list.filter(p => p.kind === this.kindFilter)
       const q = this.search.trim().toLowerCase()
       if (q) list = list.filter(p => (p.name || '').toLowerCase().includes(q))
+
+      // 정렬: 최신 업데이트 순 (서버에서 이미 정렬되어 있지만, 필터 후에도 유지)
+      list.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
       return list
     },
     activeCount() {
@@ -276,7 +280,7 @@ export default {
         cadence: this.form.cadence,
         autonomy_enabled: this.form.autonomy_enabled && !!this.form.lead_agent_name,
       }
-      const { data, error } = await useApi('/api/projects', { method: 'POST', body: JSON.stringify(body) })
+      const { data, error } = await useApi('/api/projects', { method: 'POST', body })
       this.creating = false
       if (error) {
         this.createError = error.message || '프로젝트 생성에 실패했습니다'

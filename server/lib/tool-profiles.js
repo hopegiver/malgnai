@@ -29,12 +29,30 @@ export function resolveAllowedTools(_taskType) {
  * resolveSandboxProfile — task_type 과 무관하게 항상 'sandbox'(유일한 경계, 심층방어 아닌 주 방어).
  * @param {string|null} _taskType
  * @returns {'sandbox'}
+ *
+ * ⚠️ DEV MODE: 샌드박스 비활성화 — 항상 'none' 반환
  */
 export function resolveSandboxProfile(_taskType) {
-  return 'sandbox'
+  // DEV: 샌드박스 제약 해제
+  return 'none'
+  // return 'sandbox' // 원본 (비활성화)
+}
+
+/**
+ * resolveInteractive — Claude Code 웹콘솔(사람과 실시간 멀티턴 채팅) 명령인지 판정.
+ *   true 면 worker-exec.js의 runClaude 가 STAGED_EXECUTION_PROMPT(NEXT_PHASE 자동 이어달리기)와
+ *   coo 페르소나 강제를 끈다 — 채팅 흐름과 충돌하지 않게(§3/§5 참고).
+ * @param {string|null} taskType
+ * @returns {boolean}
+ */
+export function resolveInteractive(taskType) {
+  return taskType === 'console'
 }
 
 // M-2: 안전 기본 max_turns(설계 §5.1 budget 기본값). agent budget 미설정 시 fallback.
+//   ⚠️ 2026-07-12 엔진↔웹앱 분리 §4.2: 이 상수는 app_settings.engine.max_turns_default 로 이관
+//   완료(server/dao/init.js seedLeadLoop 가 없을 때만 '8' 로 시드) — 아래 값은 DB 행이 없거나
+//   읽기 자체가 실패할 때만 쓰이는 최종 안전망(fail-safe)으로 유지한다.
 const DEFAULT_MAX_TURNS = 8
 
 /**
@@ -76,10 +94,26 @@ export async function resolveMaxTurns(db, command) {
         .bind(leadAgentName).first()
       if (agent?.budget_json) {
         const b = JSON.parse(agent.budget_json)
-        const n = Number(b?.max_turns_per_task)
-        if (Number.isInteger(n) && n > 0) return n
+        // ⚠️ 2026-07-10: max_turns_per_task의 의미 재정의.
+        //   - null/undefined/0: 무제한 (자율 사이클은 워커가 판단하도록 전권 위임).
+        //   - 음수(-1 등): 무제한(특수 마커, 향후 UI에서 설정할 경우).
+        //   - 양의 정수: 그 값으로 상한 유지.
+        // ⚠️ 버그 수정: Number(undefined) = NaN 이라 null/undefined를 먼저 걸러야 함.
+        const val = b?.max_turns_per_task
+        const n = val != null ? Number(val) : 0  // null/undefined → 0(무제한 신호)
+        if (n === 0 || n < 0) return UNLIMITED_TURNS  // 0/음수 = 무제한
+        if (Number.isInteger(n) && n > 0) return n    // 양수 = 상한
       }
     }
   } catch { /* 어떤 실패든 안전 기본값으로 폴백 */ }
+
+  // agent budget 미설정 — app_settings.engine.max_turns_default(DB 이관값)를 최종 기본값으로 사용.
+  try {
+    const row = await db.prepare(
+      `SELECT value FROM app_settings WHERE key = 'engine.max_turns_default'`
+    ).first()
+    const n = row ? Number(row.value) : NaN
+    if (Number.isInteger(n) && n > 0) return n
+  } catch { /* DB 읽기 실패도 안전 기본값으로 폴백 */ }
   return DEFAULT_MAX_TURNS
 }

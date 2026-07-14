@@ -59,19 +59,23 @@ export function createApp(env) {
   // 클라이언트가 위조할 수 없다(엣지에서 덮어씀). origin 은 터널 밖에서 도달 불가하므로
   // 이 헤더 유무로 '외부(터널) vs 로컬(localhost 직결)'을 구분한다.
   //   - 로컬 직결(sync/MCP) → 통과(기존 동작 유지, 스크립트 무수정)
-  //   - 외부 → /api/auth/login 만 예외, 그 외 전부 JWT 검증
+  //   - 외부 → /api/auth/login·refresh·logout 만 예외, 그 외 전부 JWT 검증
+  // [refresh token] /refresh·/logout 은 access JWT 가 이미 만료된 상태에서 호출되는
+  // 경로이므로(그게 존재 이유) 여기서 authMiddleware 를 걸면 refresh 자체가 불가능해진다.
+  // 두 라우트 자체 핸들러(server/api/auth.js)가 refresh_token(DB 조회) 로 별도 인증한다.
+  const AUTH_PUBLIC_PATHS = new Set(['/api/auth/login', '/api/auth/refresh', '/api/auth/logout'])
   app.use('/api/*', async (c, next) => {
     const viaCloudflare = c.req.header('cf-ray') || c.req.header('cf-connecting-ip')
     if (!viaCloudflare) return next()
     const path = new URL(c.req.url).pathname
-    if (path === '/api/auth/login') return next()
+    if (AUTH_PUBLIC_PATHS.has(path)) return next()
     return authMiddleware(c, next)
   })
 
   register(app)
 
   // 정적 자산 + SPA 폴백.
-  app.get('*', async (c) => {
+  app.all('*', async (c) => {
     const assets = c.env.ASSETS
     const url = new URL(c.req.url)
     let res = await assets.fetch(new Request(url))

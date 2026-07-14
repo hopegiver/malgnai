@@ -49,7 +49,7 @@
 
       <div v-else-if="activeProjects.length" class="row g-2">
         <div class="col-12 col-md-6 col-xl-4" v-for="p in activeProjects" :key="p.id">
-          <div class="card home-proj-card" @click="$router.push('/projects/' + p.id)" style="cursor:pointer">
+          <div class="card home-proj-card" @click="$router.push('/projects/' + p.id)" style="cursor:pointer" :class="{ 'border-primary border-2': p.autonomy_active }">
             <div class="d-flex justify-content-between align-items-center mb-1">
               <span class="fw-semibold text-truncate me-2" style="font-size:14px">{{ p.name }}</span>
               <span class="d-flex align-items-center gap-1 flex-shrink-0" style="font-size:11px" :class="p.autonomy_active ? 'text-success' : 'text-muted'">

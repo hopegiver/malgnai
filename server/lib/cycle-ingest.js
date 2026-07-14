@@ -18,7 +18,7 @@
  * better-sqlite3 동기 트랜잭션 안에서 실행된다(await 금지, tx 파사드만 사용).
  */
 
-import { createBudgetGate } from './autonomy.js'
+import { createBudgetGate, riskAllowsAuto } from './autonomy.js'
 import { logActivity } from './activity-log.js'
 import { normalizeProjectStatus, PROJECT_STATUS_CHANGE_ACTION, projectStatusChangeDetail } from './project-status.js'
 
@@ -84,15 +84,21 @@ export function ingestCycleResultTx(tx, command, cycleJson) {
     proposal_invalid: false,
     idempotent_noop: false,
     project_status_changed: null,
+    kpi_all_achieved: false,
+    kpi_partial_achieved: false,
   }
 
   // 이 박동의 owner = 프로젝트의 지정 에이전트(lead_agent_name). 없으면 방어적 fallback.
   //   예산/비용/자율 게이트와 proposal command 의 비용 트리 귀속이 이 owner 기준.
+  //   risk_approval_threshold 도 같은 단건 조회로 함께 읽어(§1.3 (b)) 별도 쿼리를 추가하지 않는다.
   let leadAgent = FALLBACK_AGENT
+  let projectRow = null
   try {
-    const proj = tx.prepare('SELECT lead_agent_name FROM projects WHERE id = ?').bind(projectId).first()
-    if (proj?.lead_agent_name) leadAgent = proj.lead_agent_name
-  } catch { /* fallback = LEAD_AGENT */ }
+    projectRow = tx.prepare(
+      'SELECT lead_agent_name, risk_approval_threshold FROM projects WHERE id = ?'
+    ).bind(projectId).first()
+    if (projectRow?.lead_agent_name) leadAgent = projectRow.lead_agent_name
+  } catch { /* fallback = FALLBACK_AGENT, projectRow = null */ }
 
   // ── 멱등(§5.4): 이 cycle command 를 이미 적재했으면 no-op. ──
   //   활동로그 마커(action='cycle_ingest', detail 에 cmd=<id>)로 판정 → idle/proposal 양쪽 재시도 안전.
@@ -149,7 +155,8 @@ export function ingestCycleResultTx(tx, command, cycleJson) {
         //   구(舊) 주석의 "proposal 존재 자체=승인필요" 전제는 이 §5 로 폐기됐다(재정의).
         const gate = createBudgetGate(tx, projectId)
         const wantsAuto = next === 'auto'
-        const auto = wantsAuto && gate.canAutoDispatch
+        const riskOk = riskAllowsAuto(risk_level, projectRow?.risk_approval_threshold)
+        const auto = wantsAuto && gate.canAutoDispatch && riskOk
         const status = auto ? 'approved' : 'queued'
         const review_status = auto ? 'approved' : null
         const reviewed_by = auto ? 'system-autonomy' : null
@@ -172,7 +179,10 @@ export function ingestCycleResultTx(tx, command, cycleJson) {
           report.proposal_command_id = cmdId
           report.proposal_status = status
           // 강등 사유: next='auto' 였는데 게이트가 막은 경우만(next='ask' 는 강등이 아니라 원래 정책).
-          const demotedReason = (wantsAuto && !auto) ? gate.autoBlockReason() : null
+          //   예산/킬스위치 사유가 우선(§1.3 판정 순서 노트) — 둘 다 막힌 경우 더 근본적 차단을 보고.
+          const demotedReason = wantsAuto && !auto
+            ? (!gate.canAutoDispatch ? gate.autoBlockReason() : `risk_approval_required(${risk_level}>=${projectRow?.risk_approval_threshold})`)
+            : null
           audit(tx, {
             project_id: projectId, action: 'cycle_proposal_create',
             detail: `제안 command 생성: ${task_type} next=${next} → ${status}${demotedReason ? ' (자동원했으나 강등:' + demotedReason + ')' : (auto ? ' (자동집행)' : '')}`,
@@ -183,6 +193,47 @@ export function ingestCycleResultTx(tx, command, cycleJson) {
           report.proposal_locked = true
         }
       }
+    }
+  }
+
+  // ── 2.3) KPI 검증 및 자동 차단 (2026-07-10, 2026-07-14 kpi_complete_action 분기 추가) —
+  //   워커가 kpi_results 를 반환했으면 검증. 모든 KPI 를 달성했을 때의 동작은 프로젝트별
+  //   kpi_complete_action('continue'=기본, 자율운영 유지 | 'off'=자동 종료)으로 선택한다.
+  //   자가평가성 KPI 하나로 "계속 개선"이 목적인 루프가 조용히 꺼지는 사고를 막기 위한 기본값이다.
+  //   미달성이면(값 무관) 계속 자율 운영(다음 사이클에서 개선).
+  const kpiResults = cycleJson ? cycleJson.kpi_results : null
+  if (kpiResults && typeof kpiResults === 'object' && Object.keys(kpiResults).length > 0) {
+    const allPassed = Object.values(kpiResults).every(item =>
+      item && typeof item === 'object' && item.passed === true
+    )
+    if (allPassed) {
+      const completeAction = projectRow?.kpi_complete_action || 'continue'
+      const kpiSummary = Object.entries(kpiResults).map(([k, v]) => `${k}=${v.achieved}/${v.target}${v.unit ? v.unit : ''}`).join(', ')
+      if (completeAction === 'off') {
+        // 모든 KPI 달성 + kpi_complete_action='off' → 자율 운영 종료
+        tx.prepare('UPDATE projects SET autonomy_enabled=\'0\' WHERE id=?').bind(projectId).run()
+        audit(tx, {
+          project_id: projectId, action: 'kpi_all_achieved',
+          detail: `모든 KPI 목표 달성(kpi_complete_action=off) → autonomy_enabled='0' 자동 설정. KPI: ${kpiSummary}`
+        })
+      } else {
+        // 모든 KPI 달성 + kpi_complete_action='continue'(기본) → 자율 운영 유지
+        audit(tx, {
+          project_id: projectId, action: 'kpi_all_achieved_continue',
+          detail: `모든 KPI 목표 달성, kpi_complete_action=continue 라 자율운영 유지. KPI: ${kpiSummary}`
+        })
+      }
+      report.kpi_all_achieved = true
+    } else {
+      // 일부 미달성 → 자율 운영 계속
+      const failedKpis = Object.entries(kpiResults)
+        .filter(([_, v]) => v && typeof v === 'object' && v.passed !== true)
+        .map(([k, v]) => `${k}=${v.achieved}/${v.target}${v.unit ? v.unit : ''}`)
+      audit(tx, {
+        project_id: projectId, action: 'kpi_partial_achieved',
+        detail: `일부 KPI 미달성, 계속 자율 운영. 미달성: ${failedKpis.join(', ')}`
+      })
+      report.kpi_partial_achieved = true
     }
   }
 

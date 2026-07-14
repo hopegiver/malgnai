@@ -18,7 +18,7 @@ export function validateProjectName(name) {
   return null
 }
 
-export function scaffoldProject(root, name, description) {
+export function scaffoldProject(root, name, description, id, kind) {
   if (existsSync(root)) {
     const err = new Error(`이미 존재하는 폴더입니다: ${root}`)
     err.code = 'PROJECT_DIR_EXISTS'
@@ -26,6 +26,9 @@ export function scaffoldProject(root, name, description) {
   }
   const desc = description || '<한 줄 설명>'
   const today = new Date().toISOString().slice(0, 10)
+  // 웹 생성 경로는 DB row id 를 이미 알고 있으므로(호출측이 미리 발급) 플레이스홀더 없이 바로 채운다.
+  // sync-projects.js 가 .claude/project.json 을 id 조회 1순위로 신뢰하므로 이것도 같이 남긴다.
+  const idComment = id || '(project_create 후 채우기)'
 
   mkdirSync(join(root, 'docs'), { recursive: true })
   mkdirSync(join(root, '.claude'), { recursive: true })
@@ -33,7 +36,7 @@ export function scaffoldProject(root, name, description) {
   const files = {
     'STATUS.md': `# STATUS — ${name}
 _최종 갱신: ${today} (초기 생성)_
-<!-- malgnai-mcp project_id: (project_create 후 채우기) -->
+<!-- malgnai-mcp project_id: ${idComment} -->
 
 > **${name}** = ${desc}
 > **새 세션은 이 파일(라이브 상태) + \`CLAUDE.md\`(구조·규칙)면 오리엔테이션 충분.** 구조 상세는 malgnai-mcp \`get_current_context\`, 깊은 문서는 \`docs/README.md\`. 상황 파악하려고 코드/docs 통독 금지.
@@ -111,6 +114,10 @@ pnpm run check-docs    # 구조 서술 ↔ 코드 실측 드리프트 대조
       type: 'module',
       scripts: { 'check-docs': 'node "$HOME/.claude/hooks/doc-drift.mjs"' },
     }, null, 2) + '\n',
+  }
+
+  if (id) {
+    files['.claude/project.json'] = JSON.stringify({ id, description: desc, kind: kind || null }, null, 2) + '\n'
   }
 
   for (const [rel, content] of Object.entries(files)) writeFileSync(join(root, rel), content)

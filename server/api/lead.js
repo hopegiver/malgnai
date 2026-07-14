@@ -1,15 +1,24 @@
 /**
  * lead.js — 분산(distributed) 자율 루프 적재 라우트.
  *
- *  POST /api/lead/spawn-due     [X-API-Key]  due 프로젝트 워커 단일 스폰(원자 tx).
- *  POST /api/lead/cycle-result  [X-API-Key]  프로젝트 워커 결과 얇은 적재(summary+proposal).
- *  GET/PUT /api/lead/autonomy   [JWT]        마스터 자율 스위치(kill-switch).
- *  GET  /api/lead/status        [JWT]        자율 제어판 현황(읽기 전용).
+ *  GET/PUT /api/lead/autonomy   [JWT]        마스터 자율 스위치(kill-switch). 현행 유지.
+ *  GET  /api/lead/status        [JWT]        자율 제어판 현황(읽기 전용). 현행 유지.
+ *  GET  /api/lead/engine-settings [JWT]       engine.* 설정(§4.2 이관 5키+tick_enabled) 조회. 2026-07-12 신설.
+ *  PUT  /api/lead/engine-settings [JWT,admin] engine.* 설정 1건 수정(화이트리스트 밖 키는 400). 2026-07-12 신설.
+ *  GET  /api/lead/app-settings    [JWT]       app_settings 범용 조회(autonomy_enabled/engine.* 제외). 2026-07-13 신설.
+ *  PUT  /api/lead/app-settings    [JWT,admin] app_settings 임의 키 upsert(예약 키는 400). 2026-07-13 신설.
+ *  DELETE /api/lead/app-settings/:key [JWT,admin] app_settings 키 삭제(예약 키는 400). 2026-07-13 신설.
  *
- * ⚠️ central(malgnai-lead) 경로는 제거됐다(단순 코어 전환, docs/design/simple-core.md).
+ * ⚠️ central 경로는 제거됐다(단순 코어 전환, docs/design/simple-core.md).
  *   중앙 LEAD 오케스트레이터(/ingest, autonomous-projects, autonomy_mode 스위치)는 삭제.
- *   유일 경로 = distributed: 프로젝트별 지정 에이전트(projects.lead_agent_name)가 자기 STATUS/goal 을
- *   읽고 스스로 판단한다. 파싱은 poll(로컬), **DB 쓰기·게이트는 서버 한 곳에서만**.
+ *
+ * ⚠️ 엔진↔웹앱 분리 Phase 3 완결(2026-07-12 컷오버 → 2026-07-13 물리삭제, docs/design/
+ *   engine-webapp-separation.md §5): 자율 루프의 실 실행 경로는 `com.malgnai.engine`
+ *   (engine/run.js, HTTP 미사용·DB 직접 호출)으로 완전히 옮겨갔다. 예전 `POST /spawn-due`·
+ *   `/cycle-result`·`/command-failed` 3개 라우트(`bin/loop.js`+`bin/lib/poll-commands.js`가
+ *   HTTP 로 호출하던 것, 그 LaunchAgent는 이미 bootout+plist 아카이브됨)는 410 Gone 으로
+ *   낮춰 소킹한 결과 유일한 호출자가 `test/routes/lead.test.js`(자체 검증용) 뿐임을 로그로
+ *   확인 후 핸들러·주석·테스트를 전부 물리 삭제했다.
  *
  * ⚠️ 실행 인프라 재설계(execution-infra-redesign.md §1.4, v3 최종): POST /api/lead/worker-result 는
  *   폐지됐다(리라이트 아님). commands.task_id 를 채우던 코드(상시 lead task 앵커·proposal INSERT)가
@@ -17,272 +26,49 @@
  *   lessons[]/next_task_suggestions[]→memories 추출은 현재 사실상 미가동이었다(설계 §1.4 트레이드오프).
  */
 import { Hono } from 'hono'
-import { apiKeyMiddleware, authMiddleware } from '../middleware/auth.js'
-// activity_logs 단일 쓰기관문 — 정규화 포함(system→telemetry, autonomy_toggle→audit). reviewer §6.
+import { authMiddleware } from '../middleware/auth.js'
+import { badRequest, forbidden } from '../utils/response.js'
+import { DEFAULT_BUDGET } from '../lib/autonomy.js'
 import { logActivity } from '../lib/activity-log.js'
-import { badRequest, notFound } from '../utils/response.js'
-import { ingestCommandFailureTx, extractEmbeddedJson } from '../lib/worker-ingest.js'
-import { ingestCycleResultTx } from '../lib/cycle-ingest.js'
-import { DEFAULT_BUDGET, createBudgetGate, isTruthyFlag } from '../lib/autonomy.js'
-import { periodKeyForCadence, nextRunAtIso } from '../lib/cadence.js'
-import { buildProjectCyclePrompt } from '../lib/project-cycle-prompt.js'
-import { AUTONOMOUS_KINDS } from '../dao/init.js'
-import { dispatchApprovedCommand } from '../lib/dispatch-worker.js'
 
 const router = new Hono()
 
-// ── 분산 전환(설계 §2.2·§2.9): 프로젝트 워커 단일 스폰 ──────────────────────
-
-const REAP_CUTOFF = '-20 minutes'  // SPAWN_TIMEOUT(10분)의 2배. 이보다 오래 claimed/running 이면 stale.
-
-/**
- * spawnOneCycle — 프로젝트 1개의 자율 사이클 스폰을 **단일 트랜잭션**으로 원자 처리(설계 §2.2-3).
- *   락 체크 + 예산(cost) 게이트 + project_cycle command INSERT + next_run_at 원자 갱신을
- *   한 tx 로 묶어 TOCTOU/이중스폰/주기드리프트를 원천 차단(B3 해소).
- *
- * 실행 인프라 재설계(§1.4, v3 최종): 구 (c)단계 "상시 lead task 확보"(leadtask-cycle-<pid> 행 생성)는
- *   완전 제거됐다 — 오직 todayCostUsd 의 commands.task_id→tasks.owner_agent_name 조인 때문에
- *   존재했는데, 그 함수가 project_id 직접집계로 바뀌어 앵커 자체가 불필요해졌다.
- *
- * §2.7(v3 신규): 반환값을 `{outcome, commandId}`로 확장했다(구 문자열 단독 반환에서). 호출부(§2.7
- *   for 루프)가 스폰된 command 의 id 를 알아야 dispatchApprovedCommand 로 즉시 디스패치할 수 있다
- *   — outcome==='spawned' 일 때만 commandId 를 채운다(이미 있던 지역변수 cmdId 를 반환에 얹기만 함).
- * @returns {{outcome: 'spawned'|'locked'|'budget', commandId?: string}}
- */
-function spawnOneCycle(tx, p, now) {
-  const iso = now.toISOString()
-
-  // a) 프로젝트당 active-1 불변식(설계 vscode-web-unified-execution.md §7-3): 구 project_cycle 전용
-  //    락을 **모든 task_type 공통**으로 일반화한다. 프로젝트에 살아있는(비terminal) command 가 하나라도
-  //    있으면 — 정기 사이클이든, 승인 대기 proposal 이든, 실행 중 phase 든 — 새 사이클을 스폰하지 않는다.
-  //    이로써 phase 는 자연히 순차가 되고(직전 phase 가 done 된 뒤에만 다음이 돎), 동시 실행 충돌
-  //    표면이 사라진다. 승인 대기 중인 proposal 이 있으면 사이클도 멈춰 "사람 대기" 상태가 유지된다.
-  const live = tx.prepare(
-    `SELECT id FROM commands
-       WHERE project_id=? AND status IN ('queued','approved','claimed','running') LIMIT 1`
-  ).bind(p.id).first()
-  if (live) return { outcome: 'locked' }
-
-  // b) 예산-at-스폰(§2.7): cost 한도 초과면 스폰 skip(command 미생성=비용0). next_run_at 은 다음 주기로 미룸.
-  const gate = createBudgetGate(tx, p.id)
-  if (gate.costExceeded) {
-    tx.prepare('UPDATE projects SET next_run_at=?, last_run_at=? WHERE id=?')
-      .bind(nextRunAtIso(p.cadence, now), iso, p.id).run()
-    logActivity(tx, {
-      project_id: p.id, agent_name: 'system', action: 'cycle_budget_skip',
-      detail: `cost cap ${gate.costLimit} 도달(오늘 누적 ${gate.costToday.toFixed(4)}) → 스폰 skip`, created_at: iso,
-    })
-    return { outcome: 'budget' }
-  }
-
-  // c) 멱등 스폰: idem = cycle-<pid>-<periodKey>. 부분 UNIQUE 인덱스(idx_commands_idem, WHERE
-  //    idempotency_key IS NOT NULL)는 ON CONFLICT 타깃과 안 맞으므로, 이 코드베이스 관례대로
-  //    **평문 INSERT + UNIQUE catch**(createScheduled 동형)로 동일 주기 중복을 차단한다.
-  //
-  //    reviewer 지적(High, §2.7 즉시디스패치 검증): 'queued'로 INSERT하면 이 함수 리턴 이후
-  //    dispatchApprovedCommand(§2.3)가 'running'으로 전이하기 전까지 poll의 claim()(status IN
-  //    ('queued','approved') 대상)이 그 틈을 노려 같은 row를 먼저 가져갈 수 있어 이중실행 위험이
-  //    있었다. 그래서 이 INSERT 자체를 'claimed'(claimed_by='server-spawn-due')로 만들어 poll의
-  //    claim() 대상에서 애초에 제외한다 — §2.4(사람 즉시스폰)가 reviewCommandTx의 타겟claim으로
-  //    이미 'claimed' 상태를 만든 뒤 dispatchApprovedCommand를 부르는 것과 동일한 패턴.
-  const periodKey = periodKeyForCadence(p.cadence, now)
-  const idem = `cycle-${p.id}-${periodKey}`
-  const cmdId = crypto.randomUUID()
-  // (reviewer MAJOR-1, §6-3) 대표 수정요청(FEEDBACK memory)을 워커 프롬프트에 주입한다.
-  //   request_changes 시 instant-dispatch.js 가 적재한 note 를 워커가 실제로 읽는 유일 채널(프롬프트)로
-  //   흘려야 "다음 사이클이 수정 반영" 약속이 성립(write-only 고아 결함 해소). 최근 3일·최대 3건 한정으로
-  //   오래된 피드백의 무한 재주입을 막는다.
-  let feedbacks = []
-  try {
-    feedbacks = tx.prepare(
-      `SELECT title, content FROM memories
-        WHERE project_id=? AND memory_type='FEEDBACK' AND datetime(created_at) >= datetime('now','-3 days')
-        ORDER BY created_at DESC LIMIT 3`
-    ).bind(p.id).all()?.results || []
-  } catch { /* 조회 실패는 치명 아님 — 피드백 없이 진행 */ }
-  let spawned = false
-  try {
-    tx.prepare(
-      `INSERT INTO commands (id, project_id, host, instruction, status, permission_mode, created_by,
-                             created_at, updated_at, idempotency_key, task_type, business, risk_level,
-                             ai_summary, claimed_by, claimed_at)
-       VALUES (?, ?, NULL, ?, 'claimed', 'allowlist', 'autoloop', ?, ?, ?, 'project_cycle', '업무', 'low', ?, 'server-spawn-due', ?)`
-    ).bind(cmdId, p.id, buildProjectCyclePrompt(p, feedbacks), iso, iso, idem,
-      `[자동] ${p.name} 프로젝트 자율 박동`, iso).run()
-    spawned = true
-  } catch (e) {
-    // 멱등키 충돌 = 이 주기 command 가 이미 존재 → 재스폰 안 함(lock 취급). 그 외 에러는 전파.
-    const exists = tx.prepare('SELECT 1 FROM commands WHERE idempotency_key = ?').bind(idem).first()
-    if (!exists) throw e
-  }
-
-  // d) next_run_at 원자 갱신(같은 tx) — due 게이트 전진(주기 드리프트 차단).
-  tx.prepare('UPDATE projects SET next_run_at=?, last_run_at=? WHERE id=?')
-    .bind(nextRunAtIso(p.cadence, now), iso, p.id).run()
-
-  if (spawned) {
-    logActivity(tx, {
-      project_id: p.id, agent_name: 'system', action: 'cycle_spawn',
-      detail: `project_cycle 스폰: ${idem}`, created_at: iso,
-    })
-    return { outcome: 'spawned', commandId: cmdId }
-  }
-  return { outcome: 'locked' }  // 멱등 충돌(이미 이 주기 command 존재) = 재스폰 안 함.
+async function requireAdmin(c, next) {
+  const me = c.get('user')
+  if (!me || me.role !== 'admin') return forbidden(c, '관리자 권한이 필요합니다.')
+  await next()
 }
 
-/**
- * POST /api/lead/spawn-due  [X-API-Key] — 분산 전환의 원자 스폰 결정점(설계 §2.2).
- *
- * 경량 러너(run-autonomous-cycles.js)가 60s 로 호출한다. 스폰 결정 전부를 서버가 처리:
- *   1) reapStaleCycles → 2) master 게이트 → 3) due 열거 → 4) 각 프로젝트 단일 tx 스폰.
- * 응답: { master_enabled, scanned, spawned, locked_skip, budget_skip, reaped }.
- */
-router.post('/spawn-due', apiKeyMiddleware, async (c) => {
-  const db = c.env.DB
-  const now = new Date()
-  const nowIsoStr = now.toISOString()
-  const out = { master_enabled: false, scanned: 0, spawned: 0, locked_skip: 0, budget_skip: 0, reaped: 0 }
+// ── 엔진 설정 화이트리스트(engine-webapp-separation.md §4.2 이관 대상 5개 키 + tick_enabled) ──
+// 이 목록에 있는 키만 GET/PUT /engine-settings 로 조회·수정 가능(임의 app_settings 키 조작 방지).
+// 값은 전부 문자열로 저장(app_settings 스키마 원칙), type 은 UI 렌더링/검증용 힌트일 뿐이다.
+const ENGINE_SETTINGS = [
+  { key: 'engine.tick_enabled', label: '엔진 틱 활성화', type: 'bool', default: '1',
+    description: 'com.malgnai.engine 프로세스가 매 틱 실제로 동작할지 여부(0이면 즉시 종료만 함).' },
+  { key: 'engine.daily_cost_limit_usd', label: '일일 비용 상한(USD)', type: 'number', default: '100',
+    description: '자율 배정 전체의 하루 누적 비용 상한. 초과 시 auto→approve 강등(최소안전 3종 중 1개).' },
+  { key: 'engine.reap_cutoff_minutes', label: 'Reap 컷오프(분)', type: 'number', default: '30',
+    description: 'claimed/running 상태로 이 시간 이상 멈춰 있으면 stale 로 간주해 회수.' },
+  { key: 'engine.consecutive_failure_threshold', label: '연속 실패 임계값', type: 'number', default: '10',
+    description: '최근 사이클 중 연속 실패 건수가 이 값 이상이면 자율 배정을 중단.' },
+  { key: 'engine.recent_cycles_count', label: '최근 사이클 관찰 개수', type: 'number', default: '15',
+    description: '연속 실패 판정에 사용할 최근 사이클 표본 개수.' },
+  { key: 'engine.max_turns_default', label: 'project_cycle 기본 max_turns', type: 'number', default: '8',
+    description: '에이전트별 budget 미설정 시 project_cycle 워커의 기본 최대 턴 수.' },
+]
+const ENGINE_SETTINGS_MAP = new Map(ENGINE_SETTINGS.map(s => [s.key, s]))
 
-  // 1) reapStaleCycles: 오래 claimed/running 인 command 전체 → failed(락 해제·장애복구).
-  //    실행 인프라 재설계(§2.5, v3 최종): task_type='project_cycle' 필터를 제거해 claimed/running
-  //    전체로 reap 대상을 넓혔다 — 즉시스폰된 사람 커맨드(claimed_by='server-immediate')는 이
-  //    필터에 안 걸려 영원히 claimed 로 남을 수 있었다(decision d01d3834 전제 정정). 넓히기는 순수
-  //    이득이고 부작용 없음(기존에도 있었던 "poll claim 후 poll 프로세스 죽음" 갭도 부수적으로 해소).
-  try {
-    const r = await db.prepare(
-      // [reviewer MAJOR-1] updated_at 은 ISO-T('...T..Z'), datetime('now',?)는 공백형식이라
-      //   원시 TEXT 비교가 'T'(0x54)>' '(0x20)로 항상 false → stale 미회수(영구 락).
-      //   양쪽을 datetime()으로 정규화해 비교한다.
-      `UPDATE commands SET status='failed', error='stale cycle reaped', updated_at=?
-         WHERE status IN ('claimed','running')
-           AND datetime(updated_at) < datetime('now', ?)`
-    ).bind(nowIsoStr, REAP_CUTOFF).run()
-    out.reaped = r?.meta?.changes || 0
-  } catch { /* best-effort */ }
-
-  // 2) 마스터 자율 스위치(kill-switch). OFF 면 즉시 종료(비용0).
-  const autoRow = await db.prepare("SELECT value FROM app_settings WHERE key = 'autonomy_enabled'").first()
-  out.master_enabled = autoRow ? isTruthyFlag(autoRow.value) : false
-  if (!out.master_enabled) return c.json(out)
-
-  // 3) due 프로젝트 열거(kind 화이트리스트 + 프로젝트 자율 ON + lead_agent_name 존재 + next_run_at due).
-  let rows = []
-  try {
-    const kindPlaceholders = AUTONOMOUS_KINDS.map(() => '?').join(',')
-    rows = (await db.prepare(
-      `SELECT id, name, goal, kpi_json, lead_agent_name, cadence, next_run_at
-         FROM projects
-        WHERE kind IN (${kindPlaceholders})
-          AND (autonomy_enabled='1' OR autonomy_enabled='true' OR autonomy_enabled='on')
-          AND lead_agent_name IS NOT NULL AND lead_agent_name != ''
-          AND (cadence IS NULL OR LOWER(cadence) != 'off')
-          AND (next_run_at IS NULL OR next_run_at <= ?)
-        ORDER BY name ASC`
-    ).bind(...AUTONOMOUS_KINDS, nowIsoStr).all()).results
-  } catch { rows = [] }
-  out.scanned = rows.length
-
-  // 4) 각 프로젝트 원자 tx 스폰(하나가 실패해도 나머지는 진행).
-  //    §2.7(v3 신규): outcome==='spawned' 이면 tx 종료 직후(DB 잠금을 오래 잡지 않도록 tx 바깥에서)
-  //    dispatchApprovedCommand(§2.3, 사람 즉시스폰과 완전히 동일한 함수)를 fire-and-forget 으로
-  //    호출한다. 신규 동시상한 메커니즘(세마포어 등)은 만들지 않는다(대표가 명시 기각, memory
-  //    adc726c6→151b5c89) — 기존 프로젝트별 락(spawnOneCycle의 a단계)과 project_id 스코프
-  //    예산게이트(§1.4)만으로 프로젝트간 동시 디스패치 안전성이 충분하다는 게 최종 결론.
-  for (const p of rows) {
-    try {
-      const { outcome, commandId } = db.transaction((tx) => spawnOneCycle(tx, p, now))
-      if (outcome === 'spawned') {
-        out.spawned++
-        dispatchApprovedCommand(db, commandId).catch((e) =>
-          logActivity(db, {
-            project_id: p.id, agent_name: 'system',
-            action: 'instant_dispatch_error', detail: e.message, created_at: nowIsoStr,
-          }))
-      }
-      else if (outcome === 'budget') out.budget_skip++
-      else out.locked_skip++
-    } catch (e) {
-      out.locked_skip++  // 개별 tx 실패는 다음 틱에 재시도(멱등키·due 로 안전).
-      try { logActivity(db, { project_id: p.id, agent_name: 'system', action: 'cycle_spawn_error', detail: e.message, created_at: nowIsoStr }) } catch { /* 무시 */ }
-    }
-  }
-  return c.json(out)
-})
-
-// project_cycle 파싱 실패 기록(§2.9-3) — ISSUE memory + 감사. command 상태는 poll 이 이미 처리.
-async function recordCycleParseFailure(c, command, errorCode, rawStdout) {
-  const db = c.env.DB
-  try {
-    db.transaction((tx) => {
-      const now = new Date().toISOString()
-      tx.prepare(
-        `INSERT INTO memories (id, project_id, memory_type, title, content, importance, agent_name, created_at)
-         VALUES (?, ?, 'ISSUE', ?, ?, 4, 'system', ?)`
-      ).bind(crypto.randomUUID(), command.project_id,
-        '프로젝트 사이클 출력 파싱 실패', `errorCode=${errorCode}${rawStdout ? '\n' + String(rawStdout).slice(0, 2000) : ''}`, now).run()
-      logActivity(tx, { project_id: command.project_id, agent_name: 'system', action: 'cycle_parse_fail', detail: `errorCode=${errorCode}`, created_at: now })
-    })
-  } catch { /* 실패 기록 자체 실패는 치명 아님 */ }
+// ── 프로젝트 자율 상태 판별(projects.js isProjectAutonomyOn과 동일 기준) ──
+// autonomy_enabled='1' && cadence!='off' && lead_agent_name 존재 → effective ON
+function isProjectAutonomyOn(p) {
+  if (!p) return false
+  const flag = p.autonomy_enabled
+  const on = flag === '1' || flag === 'true' || flag === 'on' || flag === 1 || flag === true
+  if (!on) return false
+  if (p.cadence && String(p.cadence).toLowerCase() === 'off') return false
+  if (!p.lead_agent_name) return false
+  return true
 }
-
-/**
- * POST /api/lead/cycle-result  [X-API-Key] — 프로젝트 워커 결과 얇은 적재(설계 §2.9).
- * body: { command_id, cycle_json?, stdout? }
- * 응답: 200 { report } | 400/404/422/500
- */
-router.post('/cycle-result', apiKeyMiddleware, async (c) => {
-  const body = await c.req.json().catch(() => ({}))
-  const commandId = body.command_id
-  if (!commandId || typeof commandId !== 'string') return badRequest(c, 'command_id is required')
-
-  const db = c.env.DB
-  const command = await db.prepare('SELECT * FROM commands WHERE id = ?').bind(commandId).first()
-  if (!command) return notFound(c, 'command not found')
-  if (command.task_type !== 'project_cycle') return badRequest(c, 'command is not a project_cycle')
-
-  const source = body.cycle_json !== undefined ? body.cycle_json : body.stdout
-  const extracted = extractEmbeddedJson(source)
-  if (!extracted.ok) {
-    await recordCycleParseFailure(c, command, extracted.error, body.stdout)
-    return c.json({ error: 'CYCLE_JSON_PARSE_FAILED', reason: extracted.error }, 422)
-  }
-
-  let report
-  try {
-    report = db.transaction((tx) => ingestCycleResultTx(tx, command, extracted.value))
-  } catch (e) {
-    return c.json({ error: 'INGEST_FAILED', reason: e.message }, 500)
-  }
-  return c.json({ report })
-})
-
-/**
- * POST /api/lead/command-failed  [X-API-Key]
- * body: { command_id, error? }
- *
- * claude 프로세스가 비정상 종료(exit_code≠0)했을 때 poll-commands.js 가 호출하는 실패 전용 적재.
- * cycle-result(project_cycle 전용, §1.4 v3 최종으로 worker-result 는 폐지)는 exit 0(=CYCLE JSON 이
- * 나올 여지가 있을 때)만 호출되므로,
- * 실행 자체가 실패한 경우는 이 경로로만 activity_log 기록 + (있다면) task 종료 처리가 이뤄진다.
- * command 행 자체의 status='failed' PATCH 는 poll 이 /api/commands 로 이미 반영한 뒤 호출한다.
- */
-router.post('/command-failed', apiKeyMiddleware, async (c) => {
-  const body = await c.req.json().catch(() => ({}))
-  const commandId = body.command_id
-  if (!commandId || typeof commandId !== 'string') return badRequest(c, 'command_id is required')
-
-  const db = c.env.DB
-  const command = await db.prepare('SELECT * FROM commands WHERE id = ?').bind(commandId).first()
-  if (!command) return notFound(c, 'command not found')
-
-  let report
-  try {
-    report = db.transaction((tx) => ingestCommandFailureTx(tx, command, body.error || null))
-  } catch (e) {
-    return c.json({ error: 'INGEST_FAILED', reason: e.message }, 500)
-  }
-  return c.json({ report })
-})
 
 /**
  * R-2 마스터 자율 스위치 / kill-switch (1급화) — 전면 즉시정지·재개를 단일 스위치로.
@@ -336,6 +122,13 @@ router.put('/autonomy', authMiddleware, async (c) => {
  *  - workers:  { running }                              실행 중 워커(claimed/running command 수)
  *  - last_cycle: { status, created_at, cost_usd, error, ... } | null   최근 자율 사이클 요약
  *  - approvals: { pending }                             승인 대기 중인 LEAD 생성 태스크(승인대기함) 수
+ *  - projects: [ { ...기존 필드, cost_today_usd, cycles_total, cycles_failed, last_cycle_status } ]
+ *      2026-07-13 신설(하위호환 유지, 필드 추가만) — 프로젝트별 실측:
+ *        cost_today_usd    오늘(localtime) 해당 프로젝트 commands.cost_usd 합계
+ *        cycles_total      최근 7일 task_type='project_cycle' 커맨드 표본수
+ *        cycles_failed     그중 status IN ('failed','rejected','expired') 건수(실패율은 failed/total로 프론트 계산)
+ *        last_cycle_status 그 프로젝트의 가장 최근 project_cycle 커맨드 status
+ *      autonomy_enabled != '1' 인 프로젝트는 자율로 돌지 않으므로 네 필드 모두 null(불필요한 서브쿼리 스킵).
  *
  * 원칙: 자율 엔진 로직(게이트/규칙/큐)은 건드리지 않고, 기존 집계만 읽는다.
  *
@@ -356,8 +149,15 @@ router.get('/status', authMiddleware, async (c) => {
     ? (autoRow.value === '1' || autoRow.value === 'true' || autoRow.value === 'on')
     : false
 
-  // 2) 일일 비용 한도(단순 코어 최소안전 3종 중 1개). 전역 기본값(DEFAULT_BUDGET) 사용.
-  const dailyLimit = Number(DEFAULT_BUDGET.daily_cost_limit_usd)
+  // 2) 일일 비용 한도(단순 코어 최소안전 3종 중 1개).
+  //   엔진↔웹앱 분리(engine-webapp-separation.md §4.2)로 이 값의 정본은 이미
+  //   app_settings.engine.daily_cost_limit_usd 로 이관되어 있다(Phase 0, 기본값 100).
+  //   구현은 DEFAULT_BUDGET.daily_cost_limit_usd(autonomy.js, DEV MODE 로 Infinity 하드코드)만
+  //   읽고 있어 대시보드가 실제 설정값(100)이 아닌 fallback(1000)을 보여주는 표시 버그였다.
+  //   DB 값을 우선하고, 행이 없을 때만 DEFAULT_BUDGET 으로 안전 폴백한다.
+  const engineLimitRow = await db.prepare('SELECT value FROM app_settings WHERE key = ?')
+    .bind('engine.daily_cost_limit_usd').first()
+  const dailyLimit = engineLimitRow ? Number(engineLimitRow.value) : Number(DEFAULT_BUDGET.daily_cost_limit_usd)
 
   // 3) 오늘 자율 비용 = 자율대상 프로젝트(autonomy_enabled='1') 전체 command 의 오늘 SUM(cost_usd).
   const costRow = await one(
@@ -392,32 +192,207 @@ router.get('/status', authMiddleware, async (c) => {
         AND status = 'queued' AND review_status IS NULL AND task_type != 'project_cycle'`
   )
 
-  // 7) 프로젝트별 자율 상태 목록
+  // 7) 프로젝트별 자율 상태 목록 — 자율 ON(= isProjectAutonomyOn 기준)인 프로젝트만.
+  //   2026-07-14: 자율 켜기/끄기는 프로젝트 상세에서 이미 충분히 가능하므로(대표 결정),
+  //   이 관찰 대시보드는 OFF 프로젝트를 아예 노출하지 않는다 — 목록 = 항상 ON이라 비용/실패율
+  //   서브쿼리를 CASE WHEN 으로 감쌀 필요도 없어짐.
   let projectRows = []
   try {
     projectRows = (await db.prepare(`
-      SELECT p.id, p.name, p.status, p.autonomy_enabled, p.cadence,
+      SELECT p.id, p.name, p.status, p.autonomy_enabled, p.cadence, p.lead_agent_name,
              p.next_run_at, p.last_run_at,
              (SELECT COUNT(*) FROM commands c
               WHERE c.project_id = p.id
               AND c.status = 'queued'
               AND c.review_status IS NULL
-              AND c.task_type != 'project_cycle') as pending_approvals
+              AND c.task_type != 'project_cycle') as pending_approvals,
+             (SELECT COALESCE(SUM(c.cost_usd), 0) FROM commands c
+              WHERE c.project_id = p.id
+              AND date(c.created_at,'localtime') = date('now','localtime')) as cost_today_usd,
+             (SELECT COUNT(*) FROM commands c
+              WHERE c.project_id = p.id
+              AND c.task_type = 'project_cycle'
+              AND c.created_at >= datetime('now', '-7 days')) as cycles_total,
+             (SELECT COUNT(*) FROM commands c
+              WHERE c.project_id = p.id
+              AND c.task_type = 'project_cycle'
+              AND c.created_at >= datetime('now', '-7 days')
+              AND c.status IN ('failed', 'rejected', 'expired')) as cycles_failed,
+             (SELECT c.status FROM commands c
+              WHERE c.project_id = p.id
+              AND c.task_type = 'project_cycle'
+              ORDER BY c.created_at DESC LIMIT 1) as last_cycle_status
       FROM projects p
       WHERE p.status != 'archived'
-      ORDER BY p.autonomy_enabled DESC, p.name ASC
+        AND p.autonomy_enabled = '1'
+        AND (p.cadence IS NULL OR p.cadence != 'off')
+        AND p.lead_agent_name IS NOT NULL AND p.lead_agent_name != ''
+      ORDER BY p.name ASC
       LIMIT 20
     `).all()).results || []
   } catch { projectRows = [] }
 
   return c.json({
     autonomy: { enabled: autonomyEnabled, updated_at: autoRow?.updated_at ?? null },
-    cost: { today_usd: todayCost, daily_limit_usd: dailyLimit, pct: costPct },
+    cost: { today_usd: todayCost, daily_limit_usd: isFinite(dailyLimit) ? dailyLimit : 1000, pct: costPct },
     workers: { running: workerRow.running || 0 },
     last_cycle: lastCycle || null,
     approvals: { pending: apprRow.pending || 0 },
-    projects: projectRows,
+    projects: projectRows.map(p => ({ ...p, autonomy_active: isProjectAutonomyOn(p) })),
   })
+})
+
+/**
+ * GET /api/lead/engine-settings  [JWT]  — engine.* 설정 화이트리스트 현재값 조회(읽기 전용).
+ *
+ * 엔진↔웹앱 분리(engine-webapp-separation.md §4.2/§7-5): "설정은 디비에 세팅"이 목표이고,
+ * §4.2 이관 대상 키는 전부 app_settings 로 옮겨져 있지만 지금까지 편집 수단은 sqlite CLI
+ * 뿐이었다(문서가 "당장은 CLI 로 충분"이라 명시한 Phase 4 후보). 이 라우트는 그 갭을 메워
+ * 대표가 웹 UI(/autonomy)에서 직접 값을 보고 바꿀 수 있게 한다.
+ *
+ * 행이 아직 없는 키는(부팅 시드 전이거나 옛 라이브 DB) 정의된 default 로 채워 반환한다
+ * (get 시점에 INSERT 하지 않음 — 순수 조회, PUT 시에만 upsert).
+ */
+router.get('/engine-settings', authMiddleware, async (c) => {
+  const db = c.env.DB
+  const rows = (await db.prepare(
+    `SELECT key, value, updated_at FROM app_settings WHERE key LIKE 'engine.%'`
+  ).all()).results || []
+  const byKey = new Map(rows.map(r => [r.key, r]))
+  const settings = ENGINE_SETTINGS.map(def => {
+    const row = byKey.get(def.key)
+    return {
+      key: def.key,
+      label: def.label,
+      description: def.description,
+      type: def.type,
+      default: def.default,
+      value: row ? row.value : def.default,
+      updated_at: row?.updated_at ?? null,
+    }
+  })
+  return c.json({ settings })
+})
+
+/**
+ * PUT /api/lead/engine-settings  [JWT, admin]  — engine.* 설정 화이트리스트 1건 수정.
+ * body: { key: string, value: string|number }
+ *
+ * 관리자 전용(system.js requireAdmin 과 동일 패턴) — 엔진 튜닝값은 자율 실행에 직접 영향을 주므로
+ * 일반 user 롤에게는 열어주지 않는다. 화이트리스트 밖 키는 400(임의 app_settings 오염 방지).
+ */
+router.put('/engine-settings', authMiddleware, requireAdmin, async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const { key, value } = body
+  const def = ENGINE_SETTINGS_MAP.get(key)
+  if (!def) return badRequest(c, `알 수 없는 설정 키입니다: ${key}`)
+  if (value === undefined || value === null || value === '') return badRequest(c, 'value가 필요합니다')
+  const strValue = String(value)
+  if (def.type === 'number' && !Number.isFinite(Number(strValue))) {
+    return badRequest(c, `${key}는 숫자여야 합니다`)
+  }
+  if (def.type === 'bool' && !['0', '1'].includes(strValue)) {
+    return badRequest(c, `${key}는 '0' 또는 '1'이어야 합니다`)
+  }
+  const db = c.env.DB
+  const now = new Date().toISOString()
+  // upsert(비파괴): 행이 없으면 생성, 있으면 값만 갱신.
+  await db.prepare(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`
+  ).bind(key, strValue, now).run()
+  // 감사로그 — 엔진 튜닝값은 자율 실행에 영향을 주므로 누가 언제 바꿨는지 남긴다.
+  try {
+    logActivity(db, {
+      agent_name: c.get('user')?.sub || 'web', action: 'engine_setting_update',
+      detail: `${key} = ${strValue}`,
+      created_at: now,
+    })
+  } catch { /* 감사 실패는 본 동작을 막지 않음 */ }
+  return c.json({ key, value: strValue, updated_at: now })
+})
+
+// ── app_settings 범용 CRUD 예약 키 판별 ──
+// autonomy_enabled 는 /autonomy(kill-switch), engine.* 는 /engine-settings(타입검증 포함)로
+// 각각 전용 라우트가 이미 관리한다. 여기서 같은 키를 무검증으로 덮어쓰게 허용하면 두 화면이
+// 서로 다른 검증 규칙으로 같은 값을 경합 수정하는 이중 수정 경로가 생기므로 명시적으로 막는다.
+function isReservedSettingKey(key) {
+  return key === AUTONOMY_KEY || key.startsWith('engine.')
+}
+
+/**
+ * GET /api/lead/app-settings  [JWT]  — app_settings 범용 조회(읽기 전용).
+ *
+ * autonomy_enabled(/autonomy)·engine.*(/engine-settings)는 이미 전용 화면/라우트가 있으므로
+ * 이 범용 라우트에서는 그 둘을 제외한 나머지 키(예: autonomy_mode, internal_ops_autonomy_pinned
+ * 같은 죽은/잔존 키나 앞으로 생길 임의의 새 키)만 반환한다.
+ */
+router.get('/app-settings', authMiddleware, async (c) => {
+  const db = c.env.DB
+  const rows = (await db.prepare(
+    `SELECT key, value, updated_at FROM app_settings
+      WHERE key != ? AND key NOT LIKE 'engine.%'
+      ORDER BY key ASC`
+  ).bind(AUTONOMY_KEY).all()).results || []
+  return c.json({ settings: rows })
+})
+
+/**
+ * PUT /api/lead/app-settings  [JWT, admin]  — app_settings 임의 키 upsert.
+ * body: { key: string, value: string }
+ *
+ * autonomy_enabled/engine.* 는 예약 키라 거부(각자 전용 라우트로 유도). 그 외 키는 자유 텍스트라
+ * engine-settings 와 달리 타입 검증 없이 그대로 저장한다(value='' 도 허용).
+ */
+router.put('/app-settings', authMiddleware, requireAdmin, async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const { key, value } = body
+  if (typeof key !== 'string' || key.trim() === '') return badRequest(c, 'key가 필요합니다')
+  if (isReservedSettingKey(key)) {
+    return badRequest(c, '이 키는 자율 제어판(/autonomy)에서 관리합니다')
+  }
+  if (value === undefined || value === null) return badRequest(c, 'value가 필요합니다')
+  const strValue = String(value)
+  const db = c.env.DB
+  const now = new Date().toISOString()
+  // upsert(비파괴): 행이 없으면 생성, 있으면 값만 갱신.
+  await db.prepare(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`
+  ).bind(key, strValue, now).run()
+  try {
+    logActivity(db, {
+      agent_name: c.get('user')?.sub || 'web', action: 'app_setting_update',
+      detail: `${key} = ${strValue}`,
+      created_at: now,
+    })
+  } catch { /* 감사 실패는 본 동작을 막지 않음 */ }
+  return c.json({ key, value: strValue, updated_at: now })
+})
+
+/**
+ * DELETE /api/lead/app-settings/:key  [JWT, admin]  — app_settings 키 삭제.
+ *
+ * autonomy_enabled/engine.* 는 예약 키라 거부. 존재하지 않는 키는 404.
+ */
+router.delete('/app-settings/:key', authMiddleware, requireAdmin, async (c) => {
+  const key = c.req.param('key')
+  if (isReservedSettingKey(key)) {
+    return badRequest(c, '이 키는 자율 제어판(/autonomy)에서 관리합니다')
+  }
+  const db = c.env.DB
+  const existing = await db.prepare('SELECT key FROM app_settings WHERE key = ?').bind(key).first()
+  if (!existing) return c.json({ error: `설정 키를 찾을 수 없습니다: ${key}` }, 404)
+  await db.prepare('DELETE FROM app_settings WHERE key = ?').bind(key).run()
+  const now = new Date().toISOString()
+  try {
+    logActivity(db, {
+      agent_name: c.get('user')?.sub || 'web', action: 'app_setting_delete',
+      detail: key,
+      created_at: now,
+    })
+  } catch { /* 감사 실패는 본 동작을 막지 않음 */ }
+  return c.json({ deleted: true, key })
 })
 
 export default router

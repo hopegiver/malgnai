@@ -23,12 +23,10 @@ const REPO_ROOT = join(__dirname, '..', '..')
 
 export const RESULT_MAX_CHARS = 8000
 // 벽시계 타임아웃(턴 상한과 별개의 안전장치 — 워커가 응답 없이 매달리는 걸 막는다).
-//   자율 project_cycle: 10분 상한 유지(무인 루프라 멈춘 워커를 사람이 알아챌 수 없으므로 안전망 필수).
-//   사람 직접 명령(무제한 턴): **상한 없음**(대표 지시 2026-07-07 — "우선 작업이 되는 걸 보고 이후
-//     적절히 제한"). 07-07 "턴 무제한화" 이후에도 이 벽시계가 10분이면 큰 작업이 매번 SIGTERM(143)으로
-//     죽어 산출물이 통째로 버려졌다(issue: 웹앱 직접 명령 반복 실패). 지금은 벽시계를 걷어 실제 소요를
-//     관측하고, 관측 후 적절한 상한을 재도입한다(그때까지 runaway 억제는 STAGED_EXECUTION_PROMPT 로만).
-export const SPAWN_TIMEOUT_MS = 600000 // 10분 (자율 project_cycle 전용)
+//   자율 project_cycle: 15분(실제 최대 19분 작업에 안전마진).
+//   사람 직접 명령: 1시간(큰 작업 지원, 2026-07-10 hanging 명령 16시간 락 사건 이후 도입 — 무한 대기 차단).
+export const SPAWN_TIMEOUT_MS = 900000 // 15분 (자율 project_cycle)
+export const SPAWN_TIMEOUT_DIRECT_MS = 3600000 // 1시간 (사람 직접 명령)
 
 // ── Write Sandbox v2: 커널 파일격리(sandbox-exec) ──
 // SANDBOX_ENABLED='1' 이면 워커 spawn 을 sandbox-exec 로 래핑(비파괴 롤아웃 스위치, 기본 OFF).
@@ -41,9 +39,17 @@ export const WORKER_TMP_ROOT = join(os.tmpdir(), 'malgnai-worker')
 
 // (v2.2, issue ba85ad36 by-design) 워커는 전역 ~/.claude/CLAUDE.md·전역 에이전트를 **상속·활용**한다
 //   (=플랫폼 핵심 기능). 페르소나/설정 격리는 하지 않는다. 여기 append 프롬프트는 전역을 교체·차단하지
-//   않는 **가벼운 task 포커스 보강**만 담는다(순수 이번-task 범위 안내). 쓰기 경계는 sandbox-exec 하나로.
+//   않는 **가벼운 task 포커스 보강**만 담는다(순수 이번-task 범위 안내).
+//   ⚠️ 2026-07-09(대표 지적 — 직접 명령이 프로젝트 폴더 밖 ~/workspace 에 새 폴더/산출물을 만든 사고):
+//   물리적 경계는 여전히 sandbox-exec(Write Sandbox v2, SANDBOX_ENABLED)가 유일한 진짜 경계다(이
+//   프롬프트는 그걸 대체하지 않는다 — 모델이 지시를 오독/무시하면 뚫릴 수 있는 소프트 가드일 뿐).
+//   하지만 사고 당시 즉시디스패치 경로(server 프로세스)는 sandbox 가 꺼져 있었고(SANDBOX_ENABLED
+//   미설정), 그 상태에서도 최소한의 억제력을 갖도록 쓰기 범위를 명시적으로 못박는다.
 export const WORKER_SYSTEM_PROMPT = [
   '이번에 배정된 단일 task 범위에 집중해 수행하고, 완료되면 지정된 JSON 결과만 출력한다.',
+  '파일/폴더 생성·수정·삭제는 반드시 지금 작업 중인 이 프로젝트 디렉터리(현재 작업 디렉터리) 내부에서만 수행한다.',
+  '그 범위를 벗어난 경로(워크스페이스의 다른 프로젝트 폴더, 홈 디렉터리, 시스템 경로 등)는 필요 시 참고용으로 읽는 것만 허용되며, 새 파일·폴더 생성, 수정, 삭제는 절대 금지한다.',
+  '산출물을 프로젝트 디렉터리 밖에 두어야 할 필요가 있다고 판단되면, 임의로 만들지 말고 그 사실과 이유를 결과 보고에 명시해 사람 판단을 받는다.',
 ].join(' ')
 
 // 사람이 웹앱에서 직접 낸 명령(무제한 턴, task_type!=='project_cycle')에만 덧붙이는 단계화 지침.
@@ -54,6 +60,7 @@ export const WORKER_SYSTEM_PROMPT = [
 export const STAGED_EXECUTION_PROMPT = [
   '작업 범위가 크면 한 세션에서 전부 끝내려 하지 말고, 의미 있는 단계로 나눠서 진행한다.',
   '이번 세션에서는 한 단계를 완결한다.',
+  '이번 단계로 프로젝트 진행 상태(코드/문서/설계 등)가 실제로 바뀌었다면, 다음 단계로 이어지든 여기서 전부 끝나든 상관없이 이번 세션을 마치기 전에 STATUS.md를 갱신한다 — "전체 작업이 다 끝난 뒤"가 아니라 "이번 단계가 끝날 때마다" 적용되는 규율이다.',
   '아직 남은 작업이 있으면, 응답의 맨 마지막에 정확히 다음 형식 한 줄만 남겨라(그 줄에 다른 말은 섞지 마라):',
   'NEXT_PHASE: <다음 세션이 이어받을 구체적 지시 — 지금까지 한 일과 남은 일을 판단할 수 있게 충분히 구체적으로>',
   '이 지시는 사람 확인 없이 그대로 다음 세션에 전달되어 자동 실행된다.',
@@ -62,7 +69,8 @@ export const STAGED_EXECUTION_PROMPT = [
 
 // M-2: 워커 1태스크당 최대 턴 안전 기본값(설계 §5.1). claim 응답/서버 직접 디스패치 둘 다 이 값으로
 //   폴백(호출부가 max_turns 를 못 구했거나 유효하지 않을 때 — 무제한 턴 루프 = 토큰/비용 런어웨이 차단).
-export const DEFAULT_MAX_TURNS = 8
+//   2026-07-09: 자율운행 max turn 제한 제거(무제한 실행 허용).
+export const DEFAULT_MAX_TURNS = 0
 
 // 사람이 직접 낸 명령용 센티널: --max-turns 를 아예 붙이지 않는다(턴 무제한).
 //   resolveMaxTurns(tool-profiles.js)가 비-자율(project_cycle 아님) 명령에 이 값을 돌려주고,
@@ -157,8 +165,12 @@ export function summarizeStreamEvent(evt) {
  *   이어받아 실행한다(instruction 은 그 세션에 이어붙일 -p 프롬프트=대표 답변). 미지정이면 신규 세션.
  * @param {function} onChunk stderr 원문 텍스트 청크 콜백(진단용, 기존 동작 유지).
  * @param {function} onEvent stdout stream-json 각 줄을 summarizeStreamEvent()로 요약한 진행 항목 콜백(신규).
+ * @param {boolean} interactive Claude Code 웹콘솔(사람과 실시간 멀티턴 채팅) 전용 플래그(신규,
+ *   2026-07-09). true 면 STAGED_EXECUTION_PROMPT(NEXT_PHASE 자동 이어달리기 유도)와 coo 페르소나
+ *   강제(--agent coo)를 모두 끈다 — 사람이 실시간 채팅 중인데 매 턴 끝에 자동으로 다음 단계
+ *   command 가 생성·실행되면 채팅 흐름과 충돌하고, coo 페르소나 강제도 자유 대화 UX에 안 맞는다.
  */
-export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfile, resumeSessionId = null, onChunk = null, onEvent = null) {
+export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfile, resumeSessionId = null, onChunk = null, onEvent = null, interactive = false) {
   return new Promise((res) => {
     // env 스크럽: 인입 인증 키 등 불필요한 비밀을 자식 프로세스에 노출하지 않는다.
     const scrubbedEnv = { ...process.env }
@@ -174,10 +186,12 @@ export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfi
     //   - 그 외(누락·음수·비정수) → 안전 기본값(DEFAULT_MAX_TURNS)으로 폴백(런어웨이 차단).
     const unlimitedTurns = maxTurns === UNLIMITED_TURNS
     const turns = Number.isInteger(maxTurns) && maxTurns > 0 ? maxTurns : DEFAULT_MAX_TURNS
-    // 무제한(=사람 직접 명령)일 때만 단계화 지침을 덧붙여, 상한 없는 세션이 토큰을 통째로 태우지 않게 유도.
-    const appendSystemPrompt = unlimitedTurns
-      ? `${WORKER_SYSTEM_PROMPT} ${STAGED_EXECUTION_PROMPT}`
-      : WORKER_SYSTEM_PROMPT
+    // 무제한(=사람 직접 명령)일 때만 단계화 지침을 덧붙여, 상한 없는 세션이 토큰을 통째로 태우지 않게
+    //   유도한다. 단, interactive(웹콘솔 채팅)면 그 지침을 붙이지 않는다 — NEXT_PHASE 자동 체이닝이
+    //   실시간 채팅 흐름과 충돌하기 때문(위 JSDoc 참조).
+    const appendSystemPrompt = interactive
+      ? WORKER_SYSTEM_PROMPT
+      : (unlimitedTurns ? `${WORKER_SYSTEM_PROMPT} ${STAGED_EXECUTION_PROMPT}` : WORKER_SYSTEM_PROMPT)
 
     // v3: allowedTools 가 배열로 오면(하위호환·특수케이스) 그 목록으로 제한 실행, null/미제공이면
     //   전권(bypassPermissions) 실행 — 도구 제한 대신 커널 sandbox 가 유일 경계(tool-profiles.js 참조).
@@ -201,9 +215,12 @@ export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfi
       // C.3(v2.2): 전역 CLAUDE.md·전역 에이전트 **상속 보존**(핵심 기능) — `--setting-sources` 미부여.
       //   (선택) 가벼운 task 포커스 보강만 append(전역을 교체/차단하지 않음).
       '--append-system-prompt', appendSystemPrompt,
-      '--model', 'sonnet',
+      '--model', 'claude-sonnet-5',
       // 무제한 명령이면 --max-turns 자체를 생략(사람 직접 명령), 아니면 상한 전달.
       ...(unlimitedTurns ? [] : ['--max-turns', String(turns)]),
+      // 사람이 직접 낸 명령(무제한 턴)은 coo 에이전트로 실행(전역 CLAUDE.md 기본 페르소나 강제).
+      //   단, interactive(웹콘솔 채팅)는 페르소나 강제를 끈다 — 자유 대화 UX에 coo 강제가 안 맞는다.
+      ...(unlimitedTurns && !interactive ? ['--agent', 'coo'] : []),
     ]
 
     // v2: 커널 sandbox 래핑(가능하면). buildSpawn 이 sandbox-exec 여부를 캡슐화.
@@ -217,11 +234,11 @@ export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfi
       scrubbedEnv.TEMP = workerTmp
     }
 
-    // 벽시계 상한: 무제한 턴(사람 직접 명령)은 0=상한 없음, 자율 project_cycle 만 10분 안전망.
+    // 벽시계 상한: 자율 project_cycle 10분, 사람 직접 명령 30분(hanging 명령 차단).
     //   node spawn 의 내장 timeout 대신 명시 타이머를 쓴다 — sandbox-exec/claude 래퍼가 SIGTERM 을 받아
     //   143 으로 정상종료(code=143, signal=null)하면 내장 timeout 은 원인을 못 남겨 stderr 의 잡음
     //   (stdin 경고)이 그대로 에러로 저장돼 진짜 원인(타임아웃)을 가렸다. timedOut 플래그로 정확히 남긴다.
-    const timeoutMs = unlimitedTurns ? 0 : SPAWN_TIMEOUT_MS
+    const timeoutMs = unlimitedTurns ? SPAWN_TIMEOUT_DIRECT_MS : SPAWN_TIMEOUT_MS
 
     let child
     try {
@@ -308,14 +325,15 @@ export function runClaude(instruction, cwd, maxTurns, allowedTools, sandboxProfi
 // claude 가 max-turns 초과 등으로 is_error=true 를 반환할 때도 exit code 는 0이 아니게 오지만
 // stdout 에는 진단 가능한 JSON(subtype/errors)이 실려 있다 — cliError 로 같이 뽑아 error 필드에 반영한다.
 export function parseClaudeJson(stdout) {
-  const out = { result: null, cost_usd: null, session_id: null, cliError: null }
+  const out = { result: null, cost_usd: null, session_id: null, cliError: null, parseError: null }
   if (!stdout) return out
 
   const applyResultJson = (json) => {
     out.result = json.result != null ? String(json.result) : null
     out.cost_usd = typeof json.total_cost_usd === 'number' ? json.total_cost_usd : null
     out.session_id = json.session_id || null
-    if (json.is_error) {
+    // is_error=true인데 subtype==="success"는 실제 에러 아님(성공 완료) — 무시.
+    if (json.is_error && json.subtype !== 'success') {
       const reason = Array.isArray(json.errors) && json.errors.length ? json.errors.join('; ') : (json.subtype || 'unknown error')
       out.cliError = `claude ${json.subtype || 'error'}: ${reason} (num_turns=${json.num_turns ?? '?'})`
     }
@@ -323,22 +341,35 @@ export function parseClaudeJson(stdout) {
 
   // stream-json: 뒤에서부터 훑어 type='result' 줄을 찾는다(정상 종료 시 항상 마지막 줄).
   const lines = stdout.trim().split('\n').filter((l) => l.trim())
+  let foundResult = false
   for (let i = lines.length - 1; i >= 0; i--) {
     try {
       const json = JSON.parse(lines[i])
-      if (json && json.type === 'result') { applyResultJson(json); return out }
+      if (json && json.type === 'result') { applyResultJson(json); foundResult = true; return out }
     } catch { /* 다음 줄 계속 탐색 */ }
   }
   // result 타입 줄을 못 찾음 — 구 --output-format json(단일 JSON 전체) 형식 폴백 시도.
   if (lines.length === 1) {
-    try { applyResultJson(JSON.parse(lines[0])); return out } catch { /* 아래 최종 폴백 */ }
+    try { applyResultJson(JSON.parse(lines[0])); foundResult = true; return out } catch { /* 아래 최종 폴백 */ }
   }
-  // 완전 실패: 원문을 result 로 보존.
+  // 완전 실패: 원문을 result 로 보존 + 파싱 실패 신호.
   out.result = stdout
+  out.parseError = `PARSE_FAILED: No 'type:result' JSON found in ${lines.length} lines. First line: ${lines[0]?.slice(0, 100) || '(empty)'}`
   return out
 }
 
 export function truncate(str, max) {
   if (str == null) return null
   return str.length > max ? str.slice(0, max) : str
+}
+
+// 리뷰 2026-07-09 Minor-1: 배치형 "직접 명령"의 result 는 요약일 뿐이라 8000자 트렁케이션이
+//   무해했지만, 콘솔 채팅(task_type==='console')은 result 자체가 사용자에게 보여줄 유일한 산출물이다
+//   — 문장 중간에서 무통보로 잘리면 사용자가 "여기서 끝났다"고 오인한다. 잘렸을 때만 명시적 마커를
+//   덧붙인다(task_type!=='console'인 기존 동작은 완전히 그대로 유지).
+export function truncateForTask(str, taskType, max = RESULT_MAX_CHARS) {
+  if (str == null) return null
+  if (str.length <= max) return str
+  const cut = str.slice(0, max)
+  return taskType === 'console' ? `${cut}\n\n[...응답이 ${max}자에서 잘렸습니다]` : cut
 }

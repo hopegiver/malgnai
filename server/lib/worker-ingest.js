@@ -14,7 +14,7 @@ import { logActivity } from './activity-log.js'
 import { taskTypeToCategory } from './activity-normalize.js'
 
 // ── 공유 결과 파싱 유틸(구 lead-json.js 에서 이관) ──────────────────────────────
-//   distributed 결과 적재 라우트(worker-result, cycle-result)가 공유한다. central(malgnai-lead)
+//   distributed 결과 적재 라우트(worker-result, cycle-result)가 공유한다. central
 //   전용 검증기(validateLeadJson/validateLeadChildItem)는 central 제거와 함께 삭제됐다.
 
 function tryParse(s) {

@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import ClaudeDao from '../dao/claude.js'
+import ProjectsDao from '../dao/projects.js'
 import { estimateCost } from '../lib/pricing.js'
 
 const router = new Hono()
@@ -11,17 +12,6 @@ router.get('/summary', async (c) => {
   const cost = estimateCost(modelUsage)
   summary.total_cost_usd = cost.total_usd // 누적 추정 비용($)
   return c.json({ summary })
-})
-
-// 활동 히스토리
-router.get('/history', async (c) => {
-  const dao = new ClaudeDao(c.env.DB)
-  const history = await dao.findHistory({
-    project: c.req.query('project'),
-    limit: Number(c.req.query('limit')) || 50,
-    offset: Number(c.req.query('offset')) || 0,
-  })
-  return c.json({ history })
 })
 
 // 일별 통계 (history 기반 집계)
@@ -71,15 +61,25 @@ router.get('/sessions', async (c) => {
   return c.json({ sessions })
 })
 
-// 프로젝트별 작업 세션 (트랜스크립트 기반). project_key 없으면 전역 최신순.
+// 프로젝트별 작업 세션 (트랜스크립트 기반). project_key 또는 project_id 지정 시 필터, 없으면 전역 최신순.
 router.get('/project-sessions', async (c) => {
   const dao = new ClaudeDao(c.env.DB)
-  const projectKey = c.req.query('project_key')
+  const projectsDao = new ProjectsDao(c.env.DB)
+  let projectKey = c.req.query('project_key')
+  const projectId = c.req.query('project_id')
+  const search = c.req.query('search')
   const limit = Number(c.req.query('limit')) || 100
   const offset = Number(c.req.query('offset')) || 0
+
+  // project_id가 오면 project_key로 변환
+  if (projectId && !projectKey) {
+    const proj = await projectsDao.findById(projectId)
+    if (proj) projectKey = proj.key
+  }
+
   const sessions = projectKey
-    ? await dao.findProjectSessionsByKey(projectKey, { limit, offset })
-    : await dao.findProjectSessionsAll({ limit, offset })
+    ? await dao.findProjectSessionsByKey(projectKey, { search, limit, offset })
+    : await dao.findProjectSessionsAll({ search, limit, offset })
   return c.json({ sessions })
 })
 
@@ -91,14 +91,6 @@ router.get('/project-sessions/aggregates', async (c) => {
 })
 
 // --- Sync 엔드포인트 ---
-router.post('/sync/history', async (c) => {
-  const { items } = await c.req.json()
-  if (!items?.length) return c.json({ synced: 0 })
-  const dao = new ClaudeDao(c.env.DB)
-  const synced = await dao.syncHistory(items)
-  return c.json({ synced })
-})
-
 router.post('/sync/stats', async (c) => {
   const { items } = await c.req.json()
   if (!items?.length) return c.json({ synced: 0 })
@@ -163,6 +155,15 @@ router.post('/sync/agent-usage', async (c) => {
   return c.json({ synced })
 })
 
+// --- 증분 동기화 (실시간 감시 데몬) ---
+router.post('/sync/incremental', async (c) => {
+  const { items } = await c.req.json()
+  if (!items?.length) return c.json({ synced: 0 })
+  const dao = new ClaudeDao(c.env.DB)
+  const synced = await dao.syncSessionUsageIncremental(items)
+  return c.json({ synced })
+})
+
 // --- 토큰 도둑 색출 (읽기) ---
 // since 파라미터: 'today' | 'week' | ISO문자열 (없으면 전체)
 function resolveSince(v) {
@@ -210,6 +211,18 @@ router.get('/usage/summary', async (c) => {
   const dao = new ClaudeDao(c.env.DB)
   const summary = await dao.getUsageSummary({ since: resolveSince(c.req.query('since')) })
   return c.json({ summary })
+})
+
+// 세션 .jsonl 파일 조회
+router.get('/project-sessions/:id/file', async (c) => {
+  const sessionId = c.req.param('id')
+  const dao = new ClaudeDao(c.env.DB)
+  try {
+    const file = await dao.getProjectSessionFile(sessionId)
+    return c.json(file)
+  } catch (err) {
+    return c.json({ error: err.message }, 404)
+  }
 })
 
 export default router

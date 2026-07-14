@@ -37,8 +37,6 @@ CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT, updat
 
 CREATE TABLE IF NOT EXISTS claude_agent_usage (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, project_key TEXT, agent_type TEXT, invocations INTEGER DEFAULT 0, turns INTEGER DEFAULT 0, tokens INTEGER DEFAULT 0, cost_usd REAL DEFAULT 0, updated_at TEXT, max_turns INTEGER DEFAULT 0);
 
-CREATE TABLE IF NOT EXISTS claude_history (id TEXT PRIMARY KEY, display TEXT, project TEXT, timestamp INTEGER NOT NULL, created_at TEXT NOT NULL);
-
 CREATE TABLE IF NOT EXISTS claude_memories (id TEXT PRIMARY KEY, project_key TEXT NOT NULL, file_name TEXT NOT NULL, name TEXT, description TEXT, type TEXT, content TEXT, updated_at TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS claude_model_usage (model TEXT PRIMARY KEY, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, cache_read_tokens INTEGER DEFAULT 0, cache_creation_tokens INTEGER DEFAULT 0, updated_at TEXT);
@@ -53,7 +51,7 @@ CREATE TABLE IF NOT EXISTS claude_stats (id TEXT PRIMARY KEY, date TEXT NOT NULL
 
 CREATE TABLE IF NOT EXISTS claude_token_stats (id TEXT PRIMARY KEY, date TEXT NOT NULL, model TEXT NOT NULL, tokens INTEGER DEFAULT 0);
 
-CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, host TEXT, instruction TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','approved','claimed','running','done','failed','rejected','expired')), permission_mode TEXT NOT NULL DEFAULT 'allowlist' CHECK(permission_mode IN ('allowlist','acceptEdits','bypass')), created_by TEXT, claimed_by TEXT, claimed_at TEXT, exit_code INTEGER, result TEXT, cost_usd REAL, session_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, task_type TEXT, business TEXT, customer TEXT, risk_level TEXT DEFAULT 'low', ai_summary TEXT, evidence TEXT, recommended_action TEXT, review_status TEXT, review_note TEXT, reviewed_by TEXT, reviewed_at TEXT, idempotency_key TEXT, applied_rule_id TEXT, title TEXT, assignee_agent_name TEXT, parent_command_id TEXT, root_command_id TEXT, level INTEGER DEFAULT 0, result_json TEXT);
+CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, host TEXT, instruction TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','approved','claimed','running','done','failed','rejected','expired')), permission_mode TEXT NOT NULL DEFAULT 'allowlist' CHECK(permission_mode IN ('allowlist','acceptEdits','bypass')), created_by TEXT, claimed_by TEXT, claimed_at TEXT, exit_code INTEGER, result TEXT, cost_usd REAL, session_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, task_type TEXT, business TEXT, customer TEXT, risk_level TEXT DEFAULT 'low', ai_summary TEXT, evidence TEXT, recommended_action TEXT, review_status TEXT, review_note TEXT, reviewed_by TEXT, reviewed_at TEXT, idempotency_key TEXT, applied_rule_id TEXT, title TEXT, assignee_agent_name TEXT, parent_command_id TEXT, root_command_id TEXT, level INTEGER DEFAULT 0, result_json TEXT, options_json TEXT);
 
 CREATE TABLE IF NOT EXISTS decisions (
   id TEXT PRIMARY KEY,
@@ -101,9 +99,33 @@ CREATE TABLE IF NOT EXISTS projects (
   path TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
-, kind TEXT DEFAULT 'dev', lead_agent_name TEXT, goal TEXT, kpi_json TEXT, autonomy_level TEXT DEFAULT 'L1', cadence TEXT, autonomy_enabled TEXT DEFAULT '0', owner_user_id TEXT, next_run_at TEXT, last_run_at TEXT);
+, kind TEXT DEFAULT 'dev', lead_agent_name TEXT, goal TEXT, kpi_json TEXT, autonomy_level TEXT DEFAULT 'L1', cadence TEXT, autonomy_enabled TEXT DEFAULT '0', owner_user_id TEXT, next_run_at TEXT, last_run_at TEXT, custom_instruction TEXT, risk_approval_threshold TEXT DEFAULT 'high', kpi_complete_action TEXT DEFAULT 'continue');
 
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, totp_secret TEXT, totp_enabled INTEGER NOT NULL DEFAULT 0, created_at TEXT, updated_at TEXT, role TEXT NOT NULL DEFAULT 'admin');
+
+-- refresh token(장기, 30일, 회전형) — access JWT(4h) 만료 전 재발급용. 원문은 저장하지 않고
+-- SHA-256 해시만 저장한다(server/lib/refresh-token.js). revoked_at 은 회전/로그아웃/탈취탐지 시 마킹.
+-- revoke_reason 은 grace window 판정에 쓰인다('rotated'만 grace 대상, 'logout'/'reuse_detected'는
+-- 재사용 시 항상 즉시 거부 — migrations/009-*.sql 참고).
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  revoke_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  endpoint TEXT NOT NULL UNIQUE,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 
 CREATE INDEX IF NOT EXISTS idx_activity_agent ON activity_logs(agent_name);
 
@@ -157,4 +179,8 @@ CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id);
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
 
 CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects (owner_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions (user_id);
+
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
 

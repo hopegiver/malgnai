@@ -42,7 +42,8 @@
       </div>
 
       <!-- 탭 네비게이션 -->
-      <ul class="nav pd-tabs nav-tabs-scroll mb-4" role="tablist" ref="tabbar">
+      <div class="pd-tabs-wrap mb-4">
+      <ul class="nav pd-tabs nav-tabs-scroll" role="tablist" ref="tabbar">
         <li class="nav-item" role="presentation">
           <button class="nav-link" type="button" :class="{ active: tab === 'now' }" @click="selectTab('now')">
             <i class="bi bi-broadcast pd-tab-icon"></i>지금
@@ -77,6 +78,7 @@
           </button>
         </li>
       </ul>
+      </div>
 
       <!-- ============ 지금 탭 ============ -->
       <div v-show="tab === 'now'">
@@ -297,7 +299,7 @@
         <div class="card mb-3">
           <div class="card-header d-flex align-items-center justify-content-between py-2">
             <span class="fw-semibold"><i class="bi bi-lightning-charge me-1 text-warning"></i>실행 중</span>
-            <small class="text-muted">{{ monitorSse ? '연결됨' : '연결 끊김' }}</small>
+            <small class="text-muted">{{ monitorTimer ? '폴링 중' : '정지' }}</small>
           </div>
           <div v-if="!monitorActive.length" class="text-center text-muted py-4 small">
             <i class="bi bi-pause-circle me-1"></i>현재 이 프로젝트에서 실행 중인 AI 작업이 없습니다.
@@ -354,10 +356,15 @@
 
       <!-- ============ 기록 탭 ============ -->
       <div v-show="tab === 'journal'">
-        <div class="btn-group pd-subseg flex-wrap mb-3" role="group">
-          <button v-for="seg in progressSegs" :key="seg.key" type="button" class="btn btn-sm"
-            :class="progressSeg === seg.key ? 'btn-primary' : 'btn-outline-secondary'"
-            @click="onProgressSegClick(seg.key)">{{ seg.label }}</button>
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <div class="btn-group pd-subseg flex-wrap" role="group">
+            <button v-for="seg in progressSegs" :key="seg.key" type="button" class="btn btn-sm"
+              :class="progressSeg === seg.key ? 'btn-primary' : 'btn-outline-secondary'"
+              @click="onProgressSegClick(seg.key)">{{ seg.label }}</button>
+          </div>
+          <button type="button" class="btn btn-sm btn-outline-secondary flex-shrink-0" @click="refreshJournal" :disabled="journalRefreshing" title="새로고침">
+            <i class="bi" :class="journalRefreshing ? 'bi-arrow-repeat spin' : 'bi-arrow-clockwise'"></i>
+          </button>
         </div>
 
         <!-- 통합 타임라인 (4원천 UNION) -->
@@ -430,6 +437,14 @@
                 <span class="fw-medium" style="white-space: pre-wrap; word-break: break-word;">{{ cmd.instruction }}</span>
                 <div class="d-flex align-items-center gap-2 flex-shrink-0">
                   <span :class="'badge bg-' + commandStatusColor(cmd.status)">{{ commandStatusLabel(cmd.status) }}</span>
+                  <button v-if="['running', 'claimed', 'approved'].includes(cmd.status)"
+                    class="btn btn-sm btn-outline-danger py-0 px-2"
+                    @click="terminateCommand(cmd.id)"
+                    :disabled="terminatingId === cmd.id"
+                    title="명령 강제 종료">
+                    <span v-if="terminatingId === cmd.id" class="spinner-border spinner-border-sm"></span>
+                    <i v-else class="bi bi-stop-fill"></i>
+                  </button>
                   <small class="text-faint text-nowrap">{{ formatDate(cmd.created_at) }}</small>
                 </div>
               </div>
@@ -602,28 +617,42 @@
             <!-- 목표 -->
             <div class="mb-3">
               <label class="form-label small fw-medium">목표 (goal) <span class="text-danger">*</span></label>
-              <textarea v-model="autonomyForm.goal" class="form-control" rows="2" maxlength="2000"
+              <textarea v-model="autonomyForm.goal" class="form-control" rows="4" maxlength="2000"
                 placeholder="예: 내부 운영 이슈를 매일 점검하고 위험도 높은 항목을 먼저 처리한다"></textarea>
               <div class="form-text small">LEAD 가 판단의 기준으로 삼는 북극성입니다. 자율을 켜려면 측정 가능한 목표가 필요합니다.</div>
+            </div>
+
+            <!-- 이 프로젝트만의 추가 지시 -->
+            <div class="mb-3">
+              <label class="form-label small fw-medium">이 프로젝트만의 추가 지시 <span class="text-faint fw-normal">(선택)</span></label>
+              <textarea v-model="autonomyForm.custom_instruction" class="form-control" rows="3" maxlength="4000"
+                placeholder="예: 이 프로젝트는 배포 전 항상 대표 승인을 받는다"></textarea>
+              <div class="form-text small">공통 자율 운영 지침 뒤에 보충되는 이 프로젝트만의 예외 지시입니다. 없으면 비워두세요.</div>
             </div>
 
             <!-- KPI (지표명 + 목표값 행 편집) -->
             <div class="mb-3">
               <label class="form-label small fw-medium">핵심 지표 (KPI)</label>
               <div v-for="(row, idx) in autonomyForm.kpiRows" :key="idx" class="d-flex gap-2 mb-2">
-                <input v-model="row.code" class="form-control form-control-sm" style="flex: 2;"
-                  placeholder="지표명 (예: 미해결이슈)">
+                <input v-model="row.code" class="form-control form-control-sm" style="flex: 2;" list="kpiCodeOptions"
+                  placeholder="지표명 (예: 미해결이슈, 목록에서 선택 또는 직접입력)">
                 <input v-model="row.target" class="form-control form-control-sm" style="flex: 1;"
                   placeholder="목표값 (예: 0)">
-                <input v-model="row.unit" class="form-control form-control-sm" style="flex: 1;"
+                <input v-model="row.unit" class="form-control form-control-sm" style="flex: 1;" list="kpiUnitOptions"
                   placeholder="단위 (선택)">
                 <button type="button" class="btn btn-sm btn-outline-secondary flex-shrink-0"
                   @click="removeKpiRow(idx)" aria-label="지표 삭제"><i class="bi bi-x-lg"></i></button>
               </div>
+              <datalist id="kpiCodeOptions">
+                <option v-for="opt in kpiCodeSuggestions" :key="opt" :value="opt"></option>
+              </datalist>
+              <datalist id="kpiUnitOptions">
+                <option v-for="opt in kpiUnitSuggestions" :key="opt" :value="opt"></option>
+              </datalist>
               <button type="button" class="btn btn-sm btn-outline-primary" @click="addKpiRow">
                 <i class="bi bi-plus-lg me-1"></i>지표 추가
               </button>
-              <div class="form-text small">지표명과 목표값을 입력하세요. 비워두면 저장되지 않습니다.</div>
+              <div class="form-text small">지표명과 목표값을 입력하세요(목록에서 골라도, 직접 타이핑해도 됩니다). 비워두면 저장되지 않습니다.</div>
             </div>
 
             <!-- 관찰 에이전트 (LEAD) -->
@@ -640,12 +669,40 @@
             <div class="mb-3">
               <label class="form-label small fw-medium">박동 주기 (cadence)</label>
               <select v-model="autonomyForm.cadence" class="form-select">
-                <option value="daily">매일</option>
+                <option value="every15m">15분마다</option>
+                <option value="every30m">30분마다</option>
                 <option value="hourly">매시</option>
+                <option value="every3h">3시간마다</option>
+                <option value="every6h">6시간마다</option>
+                <option value="every12h">12시간마다</option>
+                <option value="daily">매일</option>
                 <option value="weekly">매주</option>
                 <option value="off">끄기 (사이클 생성 안 함)</option>
               </select>
               <div class="form-text small">얼마나 자주 LEAD 가 이 업무를 점검할지 정합니다. '끄기'는 자율 정지와 동일하게 취급됩니다.</div>
+            </div>
+
+            <!-- 위험도 승인 임계값 -->
+            <div class="mb-3">
+              <label class="form-label small fw-medium">위험도 승인 임계값 (risk_approval_threshold)</label>
+              <select v-model="autonomyForm.risk_approval_threshold" class="form-select">
+                <option value="off">위험도 무관 자동집행 (게이트 끔)</option>
+                <option value="low">모든 제안 승인 필요</option>
+                <option value="medium">medium 이상 승인 필요</option>
+                <option value="high">high 이상 승인 필요 (권장, 기본값)</option>
+                <option value="critical">critical만 승인 필요</option>
+              </select>
+              <div class="form-text small">risk_level은 자율 워커가 스스로 제안에 매기는 위험도 자체평가값이며, 여기서 설정한 등급 이상은 최소안전 게이트를 통과해도 항상 사람 승인함으로 갑니다.</div>
+            </div>
+
+            <!-- KPI 전부 달성 시 동작 -->
+            <div class="mb-3">
+              <label class="form-label small fw-medium">모든 KPI 달성 시 동작 (kpi_complete_action)</label>
+              <select v-model="autonomyForm.kpi_complete_action" class="form-select">
+                <option value="continue">계속 자율 운영 (권장, 기본값)</option>
+                <option value="off">자율 운영 자동 종료</option>
+              </select>
+              <div class="form-text small">'계속 자율 운영'을 고르면 모든 KPI를 달성해도 자율이 꺼지지 않고 다음 개선을 계속 찾습니다. '자동 종료'는 목표 달성으로 보고 자율을 끕니다(1회성 프로젝트에 적합).</div>
             </div>
 
             <div class="d-flex justify-content-end gap-2">
@@ -821,7 +878,8 @@
 
 /* ===== 프로젝트 상세 탭 (underline 강조형) ===== */
 /* 회색 페이지 위에 균일한 흰 띠로. (배경이 투명하면 양끝 흰색 스크롤 커버와 색이 어긋나 흰 박스처럼 보임) */
-.pd-tabs { border-bottom: 1px solid var(--color-hairline); gap: 0.125rem; background-color: var(--color-surface); border-radius: var(--rounded-md) var(--rounded-md) 0 0; }
+.pd-tabs-wrap { display: flex; align-items: flex-end; border-bottom: 1px solid var(--color-hairline); background-color: var(--color-surface); border-radius: var(--rounded-md) var(--rounded-md) 0 0; margin-bottom: 1.5rem; }
+.pd-tabs { border-bottom: none; gap: 0.125rem; background-color: transparent; border-radius: 0; flex: 1; min-width: 0; }
 .pd-tabs .nav-link {
   position: relative; display: inline-flex; align-items: center; gap: 0.4rem;
   color: var(--color-ink-muted); font-size: 0.9375rem; font-weight: 500;
@@ -981,6 +1039,7 @@ export default {
       submittingCommand: false,
       commandError: '',
       // 진행상황
+      journalRefreshing: false,
       progressSeg: 'timeline',
       progressSegs: [
         { key: 'timeline', label: '통합' },
@@ -995,7 +1054,9 @@ export default {
       issueOpenOnly: true,
       // 자율 설정
       autonomy: null,
-      autonomyForm: { goal: '', kpiRows: [], lead_agent_name: null, cadence: 'daily' },
+      autonomyForm: { goal: '', custom_instruction: '', kpiRows: [], lead_agent_name: null, cadence: 'daily', risk_approval_threshold: 'high', kpi_complete_action: 'continue' },
+      kpiCodeSuggestions: ['응답시간', '가동률', '오류율', '처리건수', '완료율', '미해결이슈', '재작업률', '방문자수', '전환율', '매출', '고객만족도', '리드타임'],
+      kpiUnitSuggestions: ['%', 'ms', '건', '원', '명', '회', '점', '일'],
       globalAutonomyEnabled: false,
       autonomyLoading: false,
       autonomySaving: false,
@@ -1008,13 +1069,15 @@ export default {
       statusExpanded: false,
       deleteConfirmOpen: false,
       deleteConfirmText: '',
-      // 모니터링 탭 (이 프로젝트로 스코핑된 실시간 실행 모니터, /api/monitor/stream?project_id=)
+      // 모니터링 탭 (이 프로젝트로 스코핑된 실시간 실행 모니터, 폴링 방식)
       monitorActive: [],
       monitorRecent: [],
       monitorLog: [],
       monitorSse: null,
       monitorTick: 0,
-      monitorTimer: null
+      monitorTimer: null,
+      monitorCursors: {},
+      terminatingId: null,
     }
   },
   computed: {
@@ -1129,6 +1192,24 @@ export default {
       if (['decisions', 'issues', 'memories'].includes(key) && !this.loaded.context) {
         this.loaded.context = true
         this.loadContext()
+      }
+    },
+    // 기록 탭 새로고침 — 현재 서브탭에 맞는 데이터만 다시 로드.
+    async refreshJournal() {
+      this.journalRefreshing = true
+      try {
+        const seg = this.progressSeg
+        if (seg === 'timeline') await this.loadTimeline()
+        else if (seg === 'commands') await this.loadCommands()
+        else if (seg === 'activities') {
+          const id = this.$route.params.id
+          const { data } = await useApi('/api/activities?project_id=' + id)
+          if (data) this.activities = data.activities || []
+        }
+        else if (seg === 'sessions') await this.loadSessions()
+        else if (['decisions', 'issues', 'memories'].includes(seg)) await this.loadContext()
+      } finally {
+        this.journalRefreshing = false
       }
     },
     // STATUS.md 읽기. 프로젝트 루트의 진행 상태 단일 소스. 파일 미리보기 엔드포인트 재사용.
@@ -1289,9 +1370,15 @@ export default {
       if (!this.autonomy) return
       this.autonomyForm = {
         goal: this.autonomy.goal || '',
+        custom_instruction: this.autonomy.custom_instruction || '',
         kpiRows: this.kpiJsonToRows(this.autonomy.kpi_json),
         lead_agent_name: this.autonomy.lead_agent_name || null,
-        cadence: this.autonomy.cadence || 'daily'
+        cadence: this.autonomy.cadence || 'daily',
+        // 백엔드 의미론(autonomy.js riskAllowsAuto): null/undefined 는 'off'(risk-blind)와 동치.
+        //   'high'로 폴백하면 실제=무방비인데 화면엔 "high 이상 승인 필요"로 보이는 표시-실제
+        //   불일치가 생긴다(reviewer M1) — 백엔드와 동일한 폴백 방향(off)으로 맞춘다.
+        risk_approval_threshold: this.autonomy.risk_approval_threshold ?? 'off',
+        kpi_complete_action: this.autonomy.kpi_complete_action || 'continue'
       }
       this.autonomyError = ''
     },
@@ -1348,9 +1435,12 @@ export default {
       this.autonomyNotice = ''
       const body = {
         goal: this.autonomyForm.goal.trim() || null,
+        custom_instruction: this.autonomyForm.custom_instruction.trim() || null,
         kpi_json: this.rowsToKpiJson(this.autonomyForm.kpiRows),
         lead_agent_name: this.autonomyForm.lead_agent_name || null,
-        cadence: this.autonomyForm.cadence
+        cadence: this.autonomyForm.cadence,
+        risk_approval_threshold: this.autonomyForm.risk_approval_threshold,
+        kpi_complete_action: this.autonomyForm.kpi_complete_action
       }
       if (wantEnable === true) body.autonomy_enabled = true
       else if (wantEnable === false) body.autonomy_enabled = false
@@ -1377,6 +1467,7 @@ export default {
       if (e.includes('is not a registered agent')) return '선택한 LEAD 가 등록된 에이전트가 아닙니다.'
       if (e.includes('kpi_json')) return 'KPI 형식이 올바르지 않습니다. 지표명과 목표값을 확인하세요.'
       if (e.includes('cadence')) return '박동 주기 값이 올바르지 않습니다.'
+      if (e.includes('risk_approval_threshold')) return '위험도 승인 임계값이 올바르지 않습니다.'
       if (e.includes('401')) return '설정을 저장하려면 로그인이 필요합니다.'
       return '자율 설정 저장 실패: ' + e
     },
@@ -1537,42 +1628,62 @@ export default {
       if (!iso) return ''
       return new Date(iso).toLocaleString('ko-KR', { year: '2-digit', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
     },
-    // 모니터링 탭 — /api/monitor/stream?project_id= 로 이 프로젝트만 스코핑해 구독.
+    // 모니터링 탭 — 초단위 폴링으로 이 프로젝트만 스코핑해 조회.
     connectMonitor() {
-      if (this.monitorSse) return
-      const token = localStorage.getItem('token')
-      const qs = new URLSearchParams({ project_id: this.$route.params.id })
-      if (token) qs.set('token', token)
-      const es = new EventSource(`/api/monitor/stream?${qs.toString()}`)
-      es.onmessage = (e) => {
-        let data
-        try { data = JSON.parse(e.data) } catch { return }
-        if (data.type === 'init') {
-          this.monitorActive = data.active || []
-          this.monitorRecent = data.recent || []
-          // 탭을 늦게 열었을 때 이미 쌓인 진행 로그를 재주입(backlog replay).
-          for (const run of (data.active || [])) {
-            for (const item of (run.events || [])) {
-              this.pushMonitorLog({ ...item }, false)
-            }
-          }
-        } else if (data.type === 'start') {
-          this.monitorActive = [...this.monitorActive.filter(r => r.id !== data.run.id), data.run]
-        } else if (data.type === 'end') {
-          this.monitorActive = this.monitorActive.filter(r => r.id !== data.run.id)
-          this.monitorRecent = [data.run, ...this.monitorRecent].slice(0, 20)
-        } else if (data.type === 'progress') {
-          this.pushMonitorLog({ ...data.item }, data.replace)
-        } else if (data.type === 'chunk') {
-          this.pushMonitorLog({ kind: 'stderr', text: data.text, ts: Date.now() }, false)
-        }
-      }
-      this.monitorSse = es
-      if (!this.monitorTimer) this.monitorTimer = setInterval(() => { this.monitorTick++ }, 1000)
+      if (this.monitorTimer) return
+      this.monitorTimer = setInterval(() => this.monitorPoll(), 1000)
+      this.monitorPoll()
     },
     disconnectMonitor() {
       if (this.monitorSse) { this.monitorSse.close(); this.monitorSse = null }
       if (this.monitorTimer) { clearInterval(this.monitorTimer); this.monitorTimer = null }
+      this.monitorCursors = {}
+    },
+    // 2026-07-14: 목록/상태의 권위 소스를 인메모리 execMonitor에서 commands 테이블(DB) 폴링으로 교체
+    //   (activities.vue 전역 모니터 탭과 동일 패턴). 로그 테일만 기존 execMonitor 경유(/api/monitor/log)
+    //   보조 유지 — 비어도 상태 표시는 DB 값으로 계속 정상 동작.
+    mapCommandToRun(cmd) {
+      const startedAt = Date.parse(cmd.claimed_at || cmd.created_at) || Date.now()
+      const endedAt = Date.parse(cmd.updated_at) || Date.now()
+      const terminal = cmd.status === 'done' || cmd.status === 'failed'
+      return {
+        id: cmd.id,
+        projectName: cmd.project_name || '?',
+        instruction: cmd.instruction || '',
+        taskType: cmd.task_type || 'direct',
+        status: cmd.status,
+        startedAt,
+        endedAt,
+        durationMs: terminal ? Math.max(0, endedAt - startedAt) : null,
+        costUsd: cmd.cost_usd ?? null,
+      }
+    },
+    async monitorPoll() {
+      const token = localStorage.getItem('token')
+      const pid = this.$route.params.id
+      const [activeRes, recentRes] = await Promise.all([
+        useApi(`/api/commands?project_id=${pid}&status=claimed,running&limit=20`),
+        useApi(`/api/commands?project_id=${pid}&status=done,failed&limit=20`),
+      ])
+      if (activeRes.data) this.monitorActive = (activeRes.data.commands || []).map(this.mapCommandToRun)
+      if (recentRes.data) this.monitorRecent = (recentRes.data.commands || []).map(this.mapCommandToRun)
+      for (const run of (this.monitorActive || [])) {
+        const since = this.monitorCursors[run.id] ?? 0
+        const logQs = new URLSearchParams({ since: String(since) })
+        if (token) logQs.set('token', token)
+        const r = await useApi(`/api/monitor/log/${run.id}?${logQs.toString()}`)
+        if (!r.data) continue
+        const { entries, total } = r.data
+        this.monitorCursors[run.id] = total
+        for (const entry of (entries || [])) {
+          if (entry.kind === 'stderr') {
+            this.pushMonitorLog({ kind: 'stderr', text: entry.text, ts: entry.ts }, false)
+          } else {
+            const replace = !!(entry.streaming && entry.blockId != null)
+            this.pushMonitorLog({ ...entry }, replace)
+          }
+        }
+      }
     },
     pushMonitorLog(entry, replace) {
       if (replace && this.monitorLog.length) {
@@ -1605,6 +1716,25 @@ export default {
       if (s < 60) return `${s}s`
       const m = Math.floor(s / 60)
       return `${m}m ${s % 60}s`
+    },
+    async terminateCommand(commandId) {
+      this.terminatingId = commandId
+      try {
+        const { data, error } = await useApi(`/api/commands/${commandId}/terminate`, {
+          method: 'PATCH',
+        })
+        if (error) {
+          alert('강제 종료 실패: ' + (typeof error === 'string' ? error : '알 수 없는 오류'))
+          return
+        }
+        const idx = this.commands.findIndex(c => c.id === commandId)
+        if (idx >= 0) {
+          this.commands[idx] = data.command
+        }
+        await this.loadCommands()
+      } finally {
+        this.terminatingId = null
+      }
     }
   }
 }

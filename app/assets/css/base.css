@@ -480,6 +480,14 @@ code, .text-code {
   flex-shrink: 0;
 }
 
+/* 하단 탭바: 아이콘 우상단에 겹쳐 표시되는 배지 */
+.nav-badge--tab {
+  position: absolute;
+  top: -6px; right: -10px;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  font-size: 9px;
+}
+
 /* 자율 제어판 상태 도트 */
 .nav-status-dot {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
@@ -526,6 +534,53 @@ code, .text-code {
   display: flex; align-items: center;
   padding: 0 var(--space-4);
   gap: var(--space-2);
+}
+
+/* ─ 모바일 하단 탭바 ──────────────────────────────────
+   d-lg-none(부트스트랩)이 lg(992px) 이상에서 display:none !important 를
+   덮어씌우므로, 여기서는 lg 미만 기본값만 flex 로 잡아준다.
+   (사이드바 반응형 breakpoint 991.98px 와 동일 기준 유지) ─────── */
+.admin-tabbar {
+  display: flex;
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  z-index: 95;
+  background-color: var(--color-canvas-warm);
+  border-top: 1px solid var(--color-border);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  box-shadow: 0 -2px 10px rgba(17, 19, 24, 0.06);
+}
+
+.admin-tab-item {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 7px 2px 6px;
+  min-width: 0;
+  color: var(--color-ink-muted);
+  font-size: 10px;
+  font-weight: 500;
+  text-decoration: none;
+  text-align: center;
+  transition: color var(--transition-fast);
+}
+.admin-tab-item i { font-size: 1.15rem; line-height: 1; }
+.admin-tab-item span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.admin-tab-item.is-active { color: var(--color-brand); }
+
+/* 하단 탭바에 가려지지 않도록 본문 여백 확보 (모바일 전용) */
+@media (max-width: 991.98px) {
+  .admin-main {
+    padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px)) !important;
+  }
 }
 
 /* 헤더 AI 상태 칩 */

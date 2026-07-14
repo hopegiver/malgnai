@@ -58,6 +58,10 @@ const ENVIRONMENT = process.env.ENVIRONMENT || 'development'
 
 // ── DB: better-sqlite3 → D1 호환 어댑터 ──────────────────────────
 const sqlite = new Database(DB_PATH)
+// engine↔webapp 분리 Phase 0(docs/design/engine-webapp-separation.md §5): 두 프로세스가
+// 같은 sqlite 파일을 동시에 열게 될 것을 대비해 짧은 쓰기 경합은 자동 재시도로 흡수한다.
+// WAL은 DB 파일 헤더에 영구 기록되는 속성이라 이미 걸려 있으면 별도 설정 불필요.
+sqlite.pragma('busy_timeout = 5000')
 const DB = wrapD1(sqlite)
 
 // ── ASSETS: 정적 자산 서빙(fetch(Request) → Response) ─────────────
@@ -67,6 +71,7 @@ const MIME = {
   '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.vue': 'text/plain; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',

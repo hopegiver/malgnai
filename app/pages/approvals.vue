@@ -76,6 +76,16 @@
         <i class="bi bi-lightbulb me-1"></i>추천: {{ c.recommended_action }}
       </div>
 
+      <!-- 선택형 질문 답변: 워커가 options 를 실어 보낸 경우, 텍스트로 다시 타이핑하지 않고
+           버튼 클릭 한 번으로 확인 모달까지 이어지게(review_note = 선택한 label). -->
+      <div v-if="!c._reviewed && c.options && c.options.length" class="d-flex flex-wrap gap-1 mb-2">
+        <button v-for="(opt, idx) in c.options" :key="idx" type="button"
+                class="btn btn-sm btn-outline-primary" :disabled="c._busy"
+                :title="opt.description || ''" @click="selectOption(c, opt)">
+          {{ opt.label }}
+        </button>
+      </div>
+
       <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
         <div class="d-flex align-items-center flex-wrap gap-2">
           <span class="text-faint small">${{ (c.cost_usd || 0).toFixed(2) }} · {{ fmt(c.created_at) }}</span>
@@ -85,10 +95,18 @@
         </div>
 
         <!-- 미처리: 액션 버튼 / 처리됨: 상태 뱃지 -->
-        <div v-if="!c._reviewed" class="btn-group btn-group-sm">
-          <button type="button" class="btn btn-success" :disabled="c._busy" @click="review(c, 'approve')">승인</button>
-          <button type="button" class="btn btn-warning" :disabled="c._busy" @click="review(c, 'request_changes')">수정 요청</button>
-          <button type="button" class="btn btn-outline-danger" :disabled="c._busy" @click="review(c, 'reject')">반려</button>
+        <div v-if="!c._reviewed" class="d-flex align-items-center gap-1">
+          <div class="btn-group btn-group-sm">
+            <button type="button" class="btn btn-success" :disabled="c._busy" @click="review(c, 'approve')">승인</button>
+            <button type="button" class="btn btn-warning" :disabled="c._busy" @click="review(c, 'request_changes')">수정 요청</button>
+            <button type="button" class="btn btn-outline-danger" :disabled="c._busy" @click="review(c, 'reject')">반려</button>
+          </div>
+          <!-- 승인 + 코멘트: 원클릭 즉시승인 UX는 그대로 두고, 코멘트를 남기고 싶을 때만 선택적으로 모달 -->
+          <button v-if="!(c.task_type === 'resume' && c.session_id)" type="button"
+                  class="btn btn-sm btn-link text-muted p-0 ms-1" :disabled="c._busy"
+                  title="코멘트와 함께 승인" @click="approveWithComment(c)">
+            <i class="bi bi-chat-left-text"></i>
+          </button>
         </div>
         <div v-else class="d-flex align-items-center gap-2">
           <span :class="'badge bg-' + decisionColor(c._reviewStatus)">
@@ -274,6 +292,25 @@ export default {
       }
       this.doReview(c, decision, '')
     },
+    // 일반 승인용 선택적 코멘트 입력(승인 버튼 자체는 원클릭 즉시승인 유지, 이건 별도 진입점).
+    //   빈 값 제출도 허용 — 결국 review(c,'approve')와 동일하게 doReview(c,'approve','') 로 귀결된다.
+    approveWithComment(c) {
+      this.openReviewModal(c, 'approve', {
+        title: '코멘트와 함께 승인',
+        placeholder: '전달할 코멘트가 있으면 입력하세요 (비워도 승인됩니다)',
+        confirmLabel: '승인하기',
+      })
+    },
+    // 선택형 질문(command.options) 답변: 옵션 label 을 note 에 미리 채운 승인 모달을 띄운다.
+    //   최종 제출은 기존 submitReviewModal → doReview(c,'approve', label) 흐름을 그대로 탄다.
+    selectOption(c, option) {
+      this.openReviewModal(c, 'approve', {
+        title: '선택 답변 확인',
+        placeholder: '전달할 코멘트가 있으면 추가하세요',
+        confirmLabel: '이 답변으로 승인',
+      })
+      this.reviewModal.note = option.label
+    },
     openReviewModal(c, decision, { title, placeholder, confirmLabel }) {
       this.reviewModal = { open: true, command: c, decision, note: '', title, placeholder, confirmLabel }
     },
@@ -320,6 +357,8 @@ export default {
       c._reviewNote = note
       this.showToast(this.decisionLabel(this.toReviewStatus(decision)) + '으로 처리했습니다.')
       await this.loadCounts()
+      // 사이드바 뱃지 갱신 신호
+      window.dispatchEvent(new CustomEvent('approvals-updated'))
     },
     // 인라인 토스트(배너). alert/confirm 지양 — 기존 디자인 톤 유지. 4초 후 자동 소거.
     showToast(msg) {

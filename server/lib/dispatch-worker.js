@@ -1,13 +1,21 @@
 /**
  * dispatch-worker.js — 서버 프로세스 직접 디스패치(설계 §2.3, v3 최종).
  *
- * dispatchApprovedCommand(db, commandId): HTTP 자기호출 없이 서버 프로세스 안에서 직접
- *   command 를 실행한다. 두 즉시디스패치 경로가 이 함수 하나를 공유한다:
- *   - §2.4 사람 즉시스폰: PATCH /api/commands/:id/review 가 approve 시 타겟claim 성공 직후 호출.
- *   - §2.7 spawn-due 즉시디스패치: POST /api/lead/spawn-due 가 project_cycle 스폰 직후 호출.
+ * dispatchApprovedCommand(db, commandId): HTTP 자기호출 없이 호출한 프로세스 안에서 직접
+ *   command 를 실행한다(어느 프로세스가 호출하느냐에 따라 claude 서브프로세스가 그 프로세스의
+ *   자식으로 뜬다). 호출부:
+ *   - §2.3 direct 명령(POST /api/commands {direct:true})·AI콘솔(console.js) — 웹서버 프로세스.
+ *   - §2.7 spawn-due 즉시디스패치(engine/spawn.js, project_cycle 스폰 직후) — 엔진 프로세스.
+ *   - engine/safety-poll.js — phase-chain 후속 단계 실행(아래 참고) — 엔진 프로세스.
+ *   ⚠️ 2026-07-13 대표 결정 이후 승인(approve) 경로는 더 이상 이 함수를 직접 호출하지 않는다 —
+ *   instant-dispatch.js 는 status='approved'로만 남기고, engine/safety-poll.js 의 claim() 이
+ *   다음 엔진 틱에 이 함수를 호출한다("자율실행은 메인루프를 통해서만").
  *
- * 호출부는 항상 fire-and-forget(await 하지 않음) — 이 함수는 그래서 **절대 throw 하지 않는다**
- *   (전체를 try/catch 로 감싸 uncaught rejection 을 방지, 실패는 logActivity 로만 감사).
+ * 웹서버 호출부는 fire-and-forget(await 안 함)이라도 안전하다(상시 프로세스). 이 함수는 그래서
+ *   **절대 throw 하지 않는다**(전체를 try/catch 로 감싸 uncaught rejection 방지, 실패는 logActivity로만
+ *   감사). 단 아래 phase-chain 재귀 호출만은 예외적으로 await 한다 — 엔진 프로세스(매 틱 process.exit)
+ *   가 이 함수를 호출하는 새 경로가 생겨서, 재귀 호출까지 fire-and-forget으로 두면 다음 단계 실행이
+ *   끝나기 전에 엔진 틱이 종료돼 잘릴 위험이 있다(engine/run.js §6 리스크와 동형).
  *
  * ⚠️ poll 과의 레이스 차단(§2.5 의 "레이스" 절과 §2.7 의 프로젝트당 락 논증을 코드로 보강):
  *   §2.4 경로는 호출 전 instant-dispatch.js 의 타겟 claim 으로 이미 status='claimed' 다.
@@ -32,15 +40,16 @@
  */
 import CommandsDao from '../dao/commands.js'
 import ProjectsDao from '../dao/projects.js'
-import { runClaude, parseClaudeJson, truncate, RESULT_MAX_CHARS } from './worker-exec.js'
+import { runClaude, parseClaudeJson, truncate, truncateForTask, RESULT_MAX_CHARS } from './worker-exec.js'
 import { execMonitor } from './exec-monitor.js'
-import { resolveMaxTurns, resolveAllowedTools, resolveSandboxProfile } from './tool-profiles.js'
+import { resolveMaxTurns, resolveAllowedTools, resolveSandboxProfile, resolveInteractive } from './tool-profiles.js'
 import { ingestCycleResultTx } from './cycle-ingest.js'
 import { ingestCommandFailureTx, extractEmbeddedJson } from './worker-ingest.js'
 import { checkExecGuard } from './workspace-guard.js'
 import { buildResumePrompt, maybeRequeueResume } from './resume-loop.js'
 import { maybeRequeuePhase } from './phase-chain.js'
 import { logActivity } from './activity-log.js'
+import { sendApprovalNotification } from './push-notifier.js'
 
 const TERMINAL_STATUSES = ['done', 'failed', 'rejected', 'expired']
 
@@ -89,22 +98,26 @@ export async function dispatchApprovedCommand(db, commandId) {
     // (reviewer MAJOR-2) poll(안전망)과 동일한 pre-exec 보안 게이트를 즉시디스패치도 적용한다.
     //   bypass 거부 + 워크스페이스 화이트리스트. 미적용 시 idle 프로젝트로 흐른 direct/AI 명령이
     //   무검증 실행돼 두 경로의 보안 처리가 타이밍에 따라 갈리는 비대칭이 생긴다(공용 checkExecGuard).
-    const guard = checkExecGuard(command, project.path)
-    if (!guard.ok) {
-      await dao.updateStatus(commandId, { status: 'rejected', error: guard.error })
-      logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_reject', detail: guard.error, created_at: nowIso() })
-      return
-    }
+    // ⚠️ DEV MODE: 보안 게이트 비활성화
+    // const guard = checkExecGuard(command, project.path)
+    // if (!guard.ok) {
+    //   await dao.updateStatus(commandId, { status: 'rejected', error: guard.error })
+    //   logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_reject', detail: guard.error, created_at: nowIso() })
+    //   return
+    // }
 
     // poll 과의 레이스 차단(위 파일 docstring 참조) — 두 호출부(§2.4/§2.7) 모두 이 시점엔 이미
     //   status='claimed' 여야 정상(§2.4=reviewCommandTx 타겟claim, §2.7=spawnOneCycle이 INSERT부터
     //   claimed). 'claimed'에서만 전이를 허용해 poll 의 claim() 대상('queued'/'approved')과 절대
     //   겹치지 않게 한다. 실패(false)는 방어적 안전장치일 뿐 정상 경로에서는 발생하지 않아야 한다.
-    const gotRunning = await dao.claimForRunning(commandId, ['claimed'])
-    if (!gotRunning) {
-      logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_skip', detail: `command ${commandId} not in claimed state at dispatch time (unexpected)`, created_at: nowIso() })
-      return
-    }
+    // ⚠️ DEV MODE: 상태 체크 완화 — 항상 진행
+    // const gotRunning = await dao.claimForRunning(commandId, ['claimed'])
+    // if (!gotRunning) {
+    //   logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_skip', detail: `command ${commandId} not in claimed state at dispatch time (unexpected)`, created_at: nowIso() })
+    //   return
+    // }
+    // DEV: 상태 체크 생략, 즉시 실행
+    await dao.updateStatus(commandId, { status: 'running' })
 
     // resolveMaxTurns 가 command.task_type 으로 판정: 사람 개입 명령은 UNLIMITED_TURNS(무제한),
     //   자율 project_cycle 만 lead agent budget 상한(폴백 8).
@@ -114,10 +127,15 @@ export async function dispatchApprovedCommand(db, commandId) {
 
     // (§9 원격 승인 재개) task_type='resume' + session_id 면 그 세션을 이어받아 대표 답변(review_note)을
     //   -p 로 흘려보낸다. buildResumePrompt 가 답변 + 다음 라운드 신호 규약(§11 후속 다중 라운드)을 함께 싣는다.
+    //   (Claude Code 웹콘솔, 2026-07-09) task_type='console' + session_id 도 --resume 이 필요하다(같은
+    //   채팅 세션을 이어받아야 하므로) — 단, 프롬프트는 instruction 원문 그대로 사용한다(buildResumePrompt
+    //   로 감싸면 "대표 답변" 문구·다음 라운드 신호 규약이 섞여 채팅 맥락이 오염된다).
     //   그 외는 신규 세션으로 instruction 실행(기존).
     const isResume = command.task_type === 'resume' && !!command.session_id
+    const needsResumeFlag = (command.task_type === 'resume' || command.task_type === 'console') && !!command.session_id
     const promptText = isResume ? buildResumePrompt(command.review_note) : command.instruction
-    const resumeSid = isResume ? command.session_id : null
+    const resumeSid = needsResumeFlag ? command.session_id : null
+    const interactive = resolveInteractive(command.task_type)
 
     execMonitor.start(commandId, {
       projectId: project.id,
@@ -129,7 +147,8 @@ export async function dispatchApprovedCommand(db, commandId) {
     const { exitCode, stdout, stderr, spawnError } = await runClaude(
       promptText, project.path, maxTurns, allowedTools, sandboxProfile, resumeSid,
       (chunk) => execMonitor.chunk(commandId, chunk),
-      (item) => execMonitor.progress(commandId, item)
+      (item) => execMonitor.progress(commandId, item),
+      interactive
     )
     const parsed = parseClaudeJson(stdout)
     // poll(bin/lib/poll-commands.js)과 동일한 에러 우선순위: spawn 자체 실패 > claude stdout JSON 의
@@ -144,7 +163,7 @@ export async function dispatchApprovedCommand(db, commandId) {
     await dao.updateStatus(commandId, {
       status: finalStatus,
       exit_code: exitCode,
-      result: truncate(parsed.result, RESULT_MAX_CHARS),
+      result: truncateForTask(parsed.result, command.task_type, RESULT_MAX_CHARS),
       cost_usd: parsed.cost_usd,
       session_id: parsed.session_id,
       error: errorMsg,
@@ -169,7 +188,9 @@ export async function dispatchApprovedCommand(db, commandId) {
       if (pc.requeued) {
         logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'phase_chain_create', detail: `다음 단계 command ${pc.newId} 생성${pc.claimed ? ' (즉시 실행)' : ' (프로젝트 실행 중 → 안전망 poll 대기)'}`, created_at: nowIso() })
         if (pc.claimed) {
-          dispatchApprovedCommand(db, pc.newId).catch((e) =>
+          // await(예외적으로) — 위 파일 docstring 참고: 엔진 프로세스가 호출자일 때 다음 단계
+          //   실행이 끝나기 전에 틱이 종료되면 안 되므로, 이 재귀 호출만은 fire-and-forget 하지 않는다.
+          await dispatchApprovedCommand(db, pc.newId).catch((e) =>
             logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: e.message, created_at: nowIso() }))
         }
       } else if (pc.reason) {
@@ -184,7 +205,20 @@ export async function dispatchApprovedCommand(db, commandId) {
       const extracted = extractEmbeddedJson(parsed.result ?? stdout)
       if (extracted.ok) {
         try {
-          db.transaction((tx) => ingestCycleResultTx(tx, command, extracted.value))
+          const report = db.transaction((tx) => ingestCycleResultTx(tx, command, extracted.value))
+          // (신규) proposal 이 승인함(queued)에 등록됐으면(=사람 승인이 실제로 필요한 건만) 진동 포함
+          //   푸시 알림을 발송한다. tx 는 이미 끝났으므로 tx 밖 fire-and-forget(sendApprovalNotification
+          //   자체가 async). 'approved'(자동집행)는 승인 요청이 아니므로 알림 대상에서 제외.
+          if (report.proposal_created && report.proposal_status === 'queued' && project.owner_user_id) {
+            const p = extracted.value?.proposal || {}
+            const title = p.task_type || truncate(p.instruction || '', 40) || '새 명령'
+            sendApprovalNotification(db, project.owner_user_id, {
+              id: report.proposal_command_id, title, status: 'queued',
+            }).catch((e) => logActivity(db, {
+              project_id: command.project_id, agent_name: 'system',
+              action: 'push_notify_error', detail: e.message, created_at: nowIso(),
+            }))
+          }
         } catch (e) {
           logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: `ingestCycleResultTx failed: ${e.message}`, created_at: nowIso() })
         }

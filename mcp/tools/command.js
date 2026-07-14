@@ -15,7 +15,11 @@ import { getDb } from "../db/connection.js";
  * status 는 항상 'queued'(held) — §3-3 로 승인 전에는 절대 실행되지 않는다. 대표 approve 시에만
  *   'approved' 로 전이해 실행 경로에 오른다.
  *
- * @returns {{id, project_id, status, task_type, session_id}} 생성된 command 요약.
+ * (2026-07-14) `options`: 선택지가 있는 질문(A/B 중 택1 등)일 때만 채운다. `{label, description?}`
+ *   배열(AskUserQuestion 옵션 shape와 동일)을 JSON 직렬화해 `options_json`에 저장 — 웹 승인함이
+ *   버튼으로 렌더링할 수 있게 하기 위함. 자유형 질문은 생략(NULL).
+ *
+ * @returns {{id, project_id, status, task_type, session_id, options}} 생성된 command 요약.
  */
 export function commandAdd(params) {
   const db = getDb();
@@ -42,15 +46,17 @@ export function commandAdd(params) {
     // 승인 필요 건은 기본 medium(대표가 먼저 보게). 명시값 우선.
     risk_level: params.risk_level ?? "medium",
     title: params.title ?? null,
+    // 선택형 질문의 옵션 배열. 미지정이면 NULL(자유텍스트 질문).
+    options_json: Array.isArray(params.options) ? JSON.stringify(params.options) : null,
     created_at: now,
     updated_at: now,
   };
   db.prepare(
     `INSERT INTO commands (id, project_id, instruction, status, permission_mode, created_by,
-                           session_id, task_type, risk_level, title, created_at, updated_at)
+                           session_id, task_type, risk_level, title, options_json, created_at, updated_at)
      VALUES (@id, @project_id, @instruction, @status, @permission_mode, @created_by,
-             @session_id, @task_type, @risk_level, @title, @created_at, @updated_at)`
+             @session_id, @task_type, @risk_level, @title, @options_json, @created_at, @updated_at)`
   ).run(row);
 
-  return { id: row.id, project_id: row.project_id, status: row.status, task_type: row.task_type, session_id: row.session_id };
+  return { id: row.id, project_id: row.project_id, status: row.status, task_type: row.task_type, session_id: row.session_id, options: params.options ?? null };
 }

@@ -14,6 +14,8 @@ import { getDb } from "../db/connection.js";
  *   - key_memories      : 중요 메모리(lesson 등)
  *   - recent_activities : 최근 활동 로그(짧게)
  *
+ * (참고: 승인 여부는 instruction에 자동 추가되는 [✅ 승인됨] 메모로 워커가 직접 인지 가능 — get_current_context 별도 노출 불필요)
+ *
  * project_id를 주면 해당 프로젝트로 범위를 좁힌다.
  */
 export function getCurrentContext(params = {}) {
@@ -42,6 +44,7 @@ export function getCurrentContext(params = {}) {
         ORDER BY updated_at DESC LIMIT 15`
     )
     .all(bind);
+
 
   const open_issues = db
     .prepare(

@@ -14,6 +14,14 @@ async function requireAdmin(c, next) {
   await next()
 }
 
+router.get('/vapid-public-key', (c) => {
+  const publicKey = process.env.VAPID_PUBLIC_KEY
+  if (!publicKey) {
+    return c.json({ error: 'VAPID public key not configured' }, 500)
+  }
+  return c.json({ publicKey })
+})
+
 router.post('/restart', authMiddleware, requireAdmin, async (c) => {
   const me = c.get('user')
   logActivity(c.env.DB, {

@@ -19,7 +19,7 @@ import os from "os"
 
 const CLAUDE_DIR = process.env.CLAUDE_DIR || join(os.homedir(), ".claude")
 const MARKER = join(process.cwd(), "logs", "last-retro.txt")
-const MIN_INTERVAL_MS = parseInt(process.env.RETRO_MIN_INTERVAL_MS || "", 10) || 60 * 60 * 1000
+const MIN_INTERVAL_MS = parseInt(process.env.RETRO_MIN_INTERVAL_MS || "", 10) || 480 * 60 * 1000
 
 // 마지막 회고 시각 (없으면 0 = 항상 회고거리 있음으로 간주)
 function lastRetroAt() {

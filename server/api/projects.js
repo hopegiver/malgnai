@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { readdirSync, statSync, existsSync, createReadStream, readFileSync } from 'node:fs'
+import { readdirSync, statSync, existsSync, createReadStream, readFileSync, rmSync } from 'node:fs'
 import { join, normalize, basename, extname, sep } from 'node:path'
 import { homedir } from 'node:os'
 import ProjectsDao from '../dao/projects.js'
@@ -10,7 +10,8 @@ import { apiKeyMiddleware, authMiddleware } from '../middleware/auth.js'
 import { derivedProjectKey } from '../utils/project-key.js'
 import { taskTypeToCategory, commandStatusToResult } from '../lib/activity-normalize.js'
 import { logActivity } from '../lib/activity-log.js'
-import { cadenceInterval } from '../lib/cadence.js'
+import { cadenceInterval, CADENCE_VALUES } from '../lib/cadence.js'
+import { RISK_APPROVAL_THRESHOLD_VALUES, KPI_COMPLETE_ACTION_VALUES } from '../lib/autonomy.js'
 import { PROJECT_STATUS_VALUES, normalizeProjectStatus, PROJECT_STATUS_CHANGE_ACTION, projectStatusChangeDetail } from '../lib/project-status.js'
 import { scaffoldProject, validateProjectName } from '../lib/scaffold-project.js'
 
@@ -32,6 +33,7 @@ const DOWNLOAD_MIME = {
   '.gz': 'application/gzip',
   '.7z': 'application/x-7z-compressed',
   '.rar': 'application/vnd.rar',
+  '.apk': 'application/vnd.android.package-archive',
   // 문서
   '.pdf': 'application/pdf',
   '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -535,7 +537,7 @@ router.post('/', async (c) => {
   const id = crypto.randomUUID()
   const root = join(WORKSPACE_DIR, body.name)
   try {
-    scaffoldProject(root, body.name, body.description)
+    scaffoldProject(root, body.name, body.description, id, body.kind)
   } catch (e) {
     return badRequest(c, e.message)
   }
@@ -544,7 +546,17 @@ router.post('/', async (c) => {
   const ownerFromJwt = c.get('user')?.sub || null
   const owner_user_id = body.owner_user_id ?? ownerFromJwt ?? undefined
   const { path: _clientPath, ...rest } = body
-  const project = await dao.create({ id, ...rest, path: root, ...(owner_user_id !== undefined ? { owner_user_id } : {}) })
+  // autonomy_enabled 는 PROJECT_EXT_COLS 를 거쳐 그대로 바인딩되므로, PUT /:id/autonomy 와 동일하게
+  // boolean 을 '1'/'0' 로 변환해야 한다(better-sqlite3 는 boolean 바인딩 불가 → TypeError).
+  if (rest.autonomy_enabled !== undefined) rest.autonomy_enabled = rest.autonomy_enabled ? '1' : '0'
+  let project
+  try {
+    project = await dao.create({ id, ...rest, path: root, ...(owner_user_id !== undefined ? { owner_user_id } : {}) })
+  } catch (e) {
+    // DB 삽입 실패 시 방금 만든 폴더를 롤백해 고아 폴더가 남지 않게 한다.
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* 무시 */ }
+    throw e  // Hono 글로벌 에러 핸들러로 전파 (500)
+  }
   return c.json({ project }, 201)
 })
 
@@ -563,8 +575,6 @@ router.put('/:id', async (c) => {
 // JWT 필수(운영자 액션). authMiddleware 를 라우트에 직접 붙여 origin(로컬/CF) 무관하게 인증 강제
 //   → 무JWT 는 항상 401(task 요구사항). 자율 on/off 표현 = projects.autonomy_enabled('1'|'0').
 //   cadence='off' 도 정지로 취급(게이트/스케줄러가 동일하게 skip).
-const CADENCE_VALUES = ['daily', 'hourly', 'weekly', 'off']
-
 router.get('/:id/autonomy', authMiddleware, async (c) => {
   const dao = new ProjectsDao(c.env.DB)
   const p = await dao.findById(c.req.param('id'))
@@ -576,12 +586,15 @@ router.get('/:id/autonomy', authMiddleware, async (c) => {
       kind: p.kind,
       goal: p.goal ?? null,
       kpi_json: p.kpi_json ?? null,
+      custom_instruction: p.custom_instruction ?? null,
       lead_agent_name: p.lead_agent_name ?? null,
       cadence: p.cadence ?? null,
       autonomy_level: p.autonomy_level ?? null,
       // 프로젝트별 자율 on/off — cadence='off' 도 OFF 로 반영(effective).
       autonomy_enabled: isProjectAutonomyOn(p),
       autonomy_enabled_raw: p.autonomy_enabled ?? null,
+      risk_approval_threshold: p.risk_approval_threshold ?? null,
+      kpi_complete_action: p.kpi_complete_action ?? 'continue',
     },
   })
 })
@@ -615,6 +628,15 @@ router.put('/:id/autonomy', authMiddleware, async (c) => {
     }
   }
 
+  // custom_instruction — 프로젝트별 자유 텍스트 추가 지시(문자열|null). 화이트리스트 없음(자유 텍스트).
+  //   project-cycle-prompt.js 가 (2) 진화가능 본문 뒤에 보충으로 주입한다.
+  if (body.custom_instruction !== undefined) {
+    if (body.custom_instruction !== null && typeof body.custom_instruction !== 'string') {
+      return badRequest(c, 'custom_instruction must be a string or null')
+    }
+    fields.custom_instruction = body.custom_instruction
+  }
+
   // lead_agent_name — 반드시 실재 agent(agents.name). null 은 LEAD 해제(→ 자율 자동 OFF 취급).
   if (body.lead_agent_name !== undefined) {
     if (body.lead_agent_name === null || body.lead_agent_name === '') {
@@ -628,7 +650,7 @@ router.put('/:id/autonomy', authMiddleware, async (c) => {
     }
   }
 
-  // cadence — enum(daily/hourly/weekly/off). 'off' = 정지.
+  // cadence — enum(every15m/every30m/hourly/daily/weekly/off). 'off' = 정지.
   if (body.cadence !== undefined) {
     if (body.cadence === null) {
       fields.cadence = null
@@ -645,6 +667,29 @@ router.put('/:id/autonomy', authMiddleware, async (c) => {
       return badRequest(c, 'autonomy_level must be a string or null')
     }
     fields.autonomy_level = body.autonomy_level
+  }
+
+  // risk_approval_threshold — 'off'(risk-blind)|'low'|'medium'|'high'|'critical'. null = 컬럼 초기화(=off 와 동일 효과).
+  if (body.risk_approval_threshold !== undefined) {
+    if (body.risk_approval_threshold === null) {
+      fields.risk_approval_threshold = null
+    } else if (typeof body.risk_approval_threshold !== 'string' || !RISK_APPROVAL_THRESHOLD_VALUES.includes(body.risk_approval_threshold)) {
+      return badRequest(c, `risk_approval_threshold must be one of: ${RISK_APPROVAL_THRESHOLD_VALUES.join(', ')}`)
+    } else {
+      fields.risk_approval_threshold = body.risk_approval_threshold
+    }
+  }
+
+  // kpi_complete_action — 'continue'(기본, 모든 KPI 달성해도 자율운영 유지)|'off'(기존 동작, 자동 종료).
+  //   null = 컬럼 초기화(=continue 와 동일 효과, DEFAULT 'continue').
+  if (body.kpi_complete_action !== undefined) {
+    if (body.kpi_complete_action === null) {
+      fields.kpi_complete_action = null
+    } else if (typeof body.kpi_complete_action !== 'string' || !KPI_COMPLETE_ACTION_VALUES.includes(body.kpi_complete_action)) {
+      return badRequest(c, `kpi_complete_action must be one of: ${KPI_COMPLETE_ACTION_VALUES.join(', ')}`)
+    } else {
+      fields.kpi_complete_action = body.kpi_complete_action
+    }
   }
 
   // 자율 on/off — boolean 을 '1'/'0' 으로 저장. (게이트 2단화의 프로젝트 스위치 단일 소스.)
@@ -681,11 +726,14 @@ router.put('/:id/autonomy', authMiddleware, async (c) => {
       kind: project.kind,
       goal: project.goal ?? null,
       kpi_json: project.kpi_json ?? null,
+      custom_instruction: project.custom_instruction ?? null,
       lead_agent_name: project.lead_agent_name ?? null,
       cadence: project.cadence ?? null,
       autonomy_level: project.autonomy_level ?? null,
       autonomy_enabled: isProjectAutonomyOn(project),
       autonomy_enabled_raw: project.autonomy_enabled ?? null,
+      risk_approval_threshold: project.risk_approval_threshold ?? null,
+      kpi_complete_action: project.kpi_complete_action ?? 'continue',
     },
   })
 })

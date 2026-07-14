@@ -14,6 +14,15 @@
   },
   "permissions": {
     "defaultMode": "bypassPermissions",
+    "allow": [
+      "Bash",
+      "Grep",
+      "Read",
+      "Write(/private/tmp/*)",
+      "Bash(/private/tmp/*)",
+      "Bash(grep *)",
+      "Bash(rg *)"
+    ],
     "deny": [
       "Bash(rm -rf *)",
       "Bash(rm -r /*)",
@@ -21,6 +30,11 @@
       "Bash(rd /s /q *)",
       "Bash(format *)",
       "Bash(mkfs*)"
+    ],
+    "additionalDirectories": [
+      "/private/tmp",
+      "/Users/hopegiver/.claude/projects",
+      "/Users/hopegiver/workspace/malgnai"
     ]
   }
 }

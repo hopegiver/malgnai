@@ -1,30 +1,28 @@
 /**
- * instant-dispatch.js — 승인 훅포인트(설계 §2.4, v3 최종).
+ * instant-dispatch.js — 승인 훅포인트(설계 §2.4).
  *
- * decision d01d3834 가 제시한 훅포인트 문구("review() 직후 claim() 을 마저 호출")를 문자 그대로
- *   구현하면 버그가 된다 — 기존 CommandsDao.claim({host}) 는 큐에서 가장 오래된 1건을 가져오는
- *   범용 메서드라, 방금 승인한 바로 그 command 를 가져간다는 보장이 없다(다른 승인된-미실행 커맨드가
- *   더 오래됐다면 그걸 대신 가져가 버린다). **타겟 지정 claim** 이 필요하다.
+ * ⚠️ 2026-07-13 대표 결정: "자율실행의 프로세스는 메인루프(엔진)를 통해서만 처리한다" — approve 시
+ *   웹서버 프로세스에서 즉시 claim+dispatchApprovedCommand 하던 것을 제거했다. 이제 approve는 상태를
+ *   'approved'로 남기기만 하고, 실제 실행은 항상 engine/safety-poll.js 의 claim(status='approved'
+ *   대상)이 다음 엔진 틱(최대 60초)에 집어가서 엔진 프로세스 안에서 수행한다. 웹서버는 더 이상 claude
+ *   서브프로세스를 직접 스폰하지 않는다(§3-1 direct 명령·console 은 별도 — 이 결정의 범위 밖).
  *
- * reviewCommandTx 는 기존 CommandsDao.review() 의 SQL 을 동기 tx 버전으로 재구현하고,
- *   decision==='approve' && 방금 갱신 성공했을 때만 타겟 claim(범용 claim() 재사용 안 함)을
- *   같은 트랜잭션에서 이어 실행한다 — TOCTOU 차단(spawnOneCycle 과 동형 원자성 패턴).
+ * reviewCommandTx 는 기존 CommandsDao.review() 의 SQL 을 동기 tx 버전으로 재구현한다. approve 시
+ *   instruction append(즉시·100% 전달 채널)까지는 여기서 하지만, 그 뒤 실행 자체는 트리거하지 않는다.
  */
 
 /**
- * reviewCommandTx — 검토(approve/reject/request_changes) + (approve 시) 타겟 claim 을
- *   하나의 트랜잭션으로 원자화한다.
+ * reviewCommandTx — 검토(approve/reject/request_changes)를 트랜잭션으로 처리한다.
  * @param {object} tx  동기 DB 파사드(db.transaction((tx) => ...) 콜백 안에서만 호출).
  * @param {{id:string, decision:string, review_note:string|null, reviewed_by:string|null}} args
- * @returns {{command: object|null, claimedForSpawn: boolean}}
+ * @returns {{command: object|null}}
  *   command===null → review 대상 없음(이미 검토됨/대기상태 아님, 호출부는 409).
- *   claimedForSpawn===true → 이 요청이 방금 실행 권한을 땄다(호출부가 dispatchApprovedCommand 트리거).
- *   claimedForSpawn===false(command 는 있음) → 극히 드문 경합으로 poll 이 그 찰나에 이미 채감,
- *     또는 approve 가 아닌 결정 — 정상 poll 경로로 폴백(에러 아님).
+ *   command 있음 → 검토 반영됨. approve 여도 실행은 트리거하지 않는다(엔진 safety-poll 이 집어감).
  */
 /**
  * claimApprovedForProject — 'approved' command 1건을 **프로젝트당 active-1 불변식(§7)** 을 지키며
- *   타겟 claim('approved'→'claimed')한다. 즉시디스패치 경로(사람 approve·direct 명령·향후 AI)가 공유.
+ *   타겟 claim('approved'→'claimed')한다. 웹서버 즉시디스패치 경로(§3-1 direct 명령·phase-chain)가
+ *   공유 — approve 리뷰 경로는 2026-07-13부로 더 이상 이 함수를 호출하지 않는다(위 파일 docstring 참고).
  *
  *   대상 프로젝트에 이미 claimed/running 인 command 가 있으면 UPDATE 는 NOT EXISTS 로 changes()=0 →
  *   false 반환. 호출부는 이 경우 즉시 dispatch 하지 않고 'approved' 상태로 남겨, 프로젝트가 비는 대로
@@ -59,7 +57,7 @@ export function reviewCommandTx(tx, { id, decision, review_note, reviewed_by }) 
     request_changes: { status: 'rejected', review_status: 'changes_requested' },
   }
   const m = MAP[decision]
-  if (!m) return { command: null, claimedForSpawn: false } // 잘못된 decision은 API 라우트가 먼저 막지만 방어적으로 처리.
+  if (!m) return { command: null } // 잘못된 decision은 API 라우트가 먼저 막지만 방어적으로 처리.
 
   const now = new Date().toISOString()
 
@@ -79,34 +77,55 @@ export function reviewCommandTx(tx, { id, decision, review_note, reviewed_by }) 
   ).run()
 
   if (!reviewRes.meta || reviewRes.meta.changes === 0) {
-    return { command: null, claimedForSpawn: false }
+    return { command: null }
   }
 
-  // 2) decision==='approve' && 방금 갱신 성공했을 때만 — 프로젝트당 active-1(§7 가드②) 을 지키며
-  //    타겟 claim. 프로젝트가 이미 실행 중이면 claimedForSpawn=false → 'approved' 로 남아 프로젝트가
-  //    비는 대로 안전망 poll 이 집어간다(즉시 dispatch 안 함). 경합(poll 선점) 역시 false 로 폴백.
-  let claimedForSpawn = false
+  // 2) 원본 스냅샷(instruction append 전) — approve 의 즉시 append 로 오염되기 전에 한 번만 읽어
+  //    step 3 의 memory 요약(대상 명령 원문 300자)이 항상 "대표 결정 이전의 순수 제안"을 가리키게 한다.
+  const target = tx.prepare('SELECT project_id, task_type, instruction FROM commands WHERE id=?').bind(id).first()
+
   if (decision === 'approve') {
-    claimedForSpawn = claimApprovedForProject(tx, id, 'server-immediate')
+    // 승인 메모(+ 대표 코멘트가 있으면 함께)를 instruction 끝에 추가 — 같은 트랜잭션·같은 command 라
+    //   지연 없이 100% 전달되는 채널(처음 승인할 때만 — 중복 방지). 실행 자체는 트리거하지 않는다 —
+    //   status='approved'로 남고, engine/safety-poll.js 가 다음 틱(최대 60초)에 claim 해 실행한다.
+    if (target && !target.instruction.includes('승인됨')) {
+      const noteLine = typeof review_note === 'string' && review_note.trim()
+        ? `\n대표 코멘트: ${review_note.trim()}`
+        : ''
+      const approvalMsg = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n✅ 승인됨\n승인자: ${reviewed_by || 'admin'}\n시각: ${now}${noteLine}\n진행하세요.\n━━━━━━━━━━━━━━━━━━━━━━━━`
+
+      tx.prepare('UPDATE commands SET instruction=?, updated_at=? WHERE id=?')
+        .bind(target.instruction + approvalMsg, now, id)
+        .run()
+    }
   }
 
-  // 3) (설계 §6-2) 수정요청의 review_note 를 프로젝트 컨텍스트(memories)에 적재한다. 다음 사이클
-  //    워커가 STATUS.md+MCP 컨텍스트로 이 note 를 읽어 "수정 반영한 새 proposal"을 낸다(별도 배선 0).
-  if (decision === 'request_changes' && typeof review_note === 'string' && review_note.trim()) {
-    const target = tx.prepare('SELECT project_id, task_type, instruction FROM commands WHERE id=?').bind(id).first()
-    if (target?.project_id) {
+  // 3) (설계 §6-2, 2026-07-13 3종 통일) 대표의 결정 코멘트를 프로젝트 컨텍스트(memories/FEEDBACK)에
+  //    적재한다. engine/spawn.js 가 project_cycle 스폰마다 무조건 조회해 워커 프롬프트 최상단에
+  //    강제 주입하는 기존 경로를 그대로 재사용(별도 배선 0). 300자 요약(순수 원본, 위 approve append
+  //    전 스냅샷) + 원본 command_id 참조를 남겨 다음 워커가 필요시 원본 전체를 조회할 수 있게 한다.
+  //    - approve: 코멘트가 있을 때만 적재(코멘트 없으면 위 instruction append 로 이미 100% 전달됨 — 중복 소음 방지).
+  //    - request_changes: 항상 적재(코멘트 없으면 사실상 없음 — API 계약상 필수 아니라 방어적으로 유지).
+  //    - reject: 코멘트가 없어도 최소 "반려됨(사유 미기재)" 한 줄은 남겨, 다음 사이클 워커가 같은
+  //      제안을 재차 올리지 않도록 한다.
+  {
+    const noted = typeof review_note === 'string' && review_note.trim() ? review_note.trim() : null
+    const LABEL = { approve: '승인 코멘트', reject: '반려', request_changes: '수정 요청(승인 반려)' }[decision]
+    const bodyText = noted || (decision === 'reject' ? '반려됨(사유 미기재)' : null)
+
+    if (bodyText && target?.project_id) {
       tx.prepare(
         `INSERT INTO memories (id, project_id, memory_type, title, content, importance, agent_name, created_at)
          VALUES (?, ?, 'FEEDBACK', ?, ?, 4, 'system', ?)`
       ).bind(
         crypto.randomUUID(), target.project_id,
-        `수정 요청(승인 반려): ${target.task_type || '작업'}`,
-        `대표 수정요청 내용: ${review_note.trim()}\n\n(대상 명령: ${String(target.instruction || '').slice(0, 300)})`,
+        `${LABEL}: ${target.task_type || '작업'}`,
+        `${LABEL} 내용: ${bodyText}\n\n(대상 명령 #${id}: ${String(target.instruction || '').slice(0, 300)})`,
         now,
       ).run()
     }
   }
 
   const command = tx.prepare('SELECT * FROM commands WHERE id=?').bind(id).first()
-  return { command, claimedForSpawn }
+  return { command }
 }

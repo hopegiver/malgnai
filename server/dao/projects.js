@@ -2,7 +2,7 @@
 // 호출부(웹/MCP/sync)가 안 넘기면 건드리지 않으므로 기존 시그니처 100% 하위호환.
 // P0(재설계): 소유권(owner_user_id=username, 블로커 B1 교정) + 1분 틱 due 컬럼(next_run_at/last_run_at)을
 //   확장 컬럼 화이트리스트에 추가 → create/update 가 명시로 넘겨야만 SET/INSERT(미지정 시 기존값·기본값 보존).
-const PROJECT_EXT_COLS = ['kind', 'lead_agent_name', 'goal', 'kpi_json', 'autonomy_level', 'cadence', 'autonomy_enabled', 'owner_user_id', 'next_run_at', 'last_run_at']
+const PROJECT_EXT_COLS = ['kind', 'lead_agent_name', 'goal', 'kpi_json', 'custom_instruction', 'autonomy_level', 'cadence', 'autonomy_enabled', 'owner_user_id', 'next_run_at', 'last_run_at', 'risk_approval_threshold', 'kpi_complete_action']
 
 export default class ProjectsDao {
   constructor(db) { this.db = db }
@@ -113,7 +113,16 @@ export default class ProjectsDao {
     // 신규 생성: STATUS.md 헤더에서 넘어온 안정적 id 가 있으면 그것을(재생성해도 결정적),
     // 없으면 무작위 UUID. (sync-projects 가 각 폴더 STATUS.md 의 project_id 를 실어 보낸다.)
     const newId = (typeof id === 'string' && /^[0-9a-fA-F-]{8,}$/.test(id)) ? id : crypto.randomUUID()
-    return await this.create({ id: newId, name, description, status, path: norm, updated_at, ...extFields })
+    try {
+      return await this.create({ id: newId, name, description, status, path: norm, updated_at, ...extFields })
+    } catch (e) {
+      // STATUS.md 의 project_id 가 다른 프로젝트(예: malgnai-public 이 malgnai ID 를 공유)와 충돌하면
+      // UNIQUE constraint 가 터진다. 이 경우 새 UUID 로 재시도해 sync 가 무한 실패하지 않게 한다.
+      if (e?.code === 'SQLITE_CONSTRAINT_PRIMARYKEY' || e?.message?.includes('UNIQUE constraint')) {
+        return await this.create({ id: crypto.randomUUID(), name, description, status, path: norm, updated_at, ...extFields })
+      }
+      throw e
+    }
   }
 
   async countByStatus() {

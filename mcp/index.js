@@ -12,7 +12,10 @@ import { memoryAdd, memorySearch } from "./tools/memory.js";
 import { getCurrentContext } from "./tools/context.js";
 import { commandAdd } from "./tools/command.js";
 import { projectStatusSet } from "./tools/project.js";
+import { projectAutonomyGet, projectAutonomyUpdate } from "./tools/autonomy.js";
 import { closeDb } from "./db/connection.js";
+import { CADENCE_VALUES } from "../server/lib/cadence.js";
+import { RISK_APPROVAL_THRESHOLD_VALUES, KPI_COMPLETE_ACTION_VALUES } from "../server/lib/autonomy.js";
 
 const server = new McpServer({
   name: "malgnai-mcp",
@@ -152,6 +155,10 @@ server.tool(
     task_type: z.string().optional().describe("작업 유형(분류용). session_id 를 주면 자동으로 'resume'."),
     risk_level: z.string().optional().describe("low|medium|high (기본 medium)"),
     title: z.string().optional().describe("승인함에 표시할 짧은 제목"),
+    options: z.array(z.object({
+      label: z.string(),
+      description: z.string().optional(),
+    })).optional().describe("선택형 질문일 때만 사용, 자유형 질문은 생략. 예: [{label:'A안', description:'...'}, {label:'B안'}]. 승인함이 버튼으로 보여준다."),
     agent_name: z.string().optional().describe("등록 주체 에이전트(기본 mcp)"),
   },
   async (params) => ({
@@ -172,6 +179,38 @@ server.tool(
   },
   async (params) => ({
     content: [{ type: "text", text: JSON.stringify(projectStatusSet(params), null, 2) }],
+  })
+);
+
+server.tool(
+  "project_autonomy_get",
+  "프로젝트의 자율 설정(목표/KPI/관찰 LEAD/박동주기/자율on-off/위험승인임계값/KPI달성시동작)을 조회한다. 웹 /api/projects/:id/autonomy(GET)와 동일 값을 반환한다.",
+  {
+    project_id: z.string().describe("대상 프로젝트 ID(STATUS.md 헤더 또는 get_current_context 로 확인)"),
+  },
+  async (params) => ({
+    content: [{ type: "text", text: JSON.stringify(projectAutonomyGet(params), null, 2) }],
+  })
+);
+
+server.tool(
+  "project_autonomy_update",
+  "프로젝트의 자율 설정을 변경한다(부분 갱신 — 넘긴 필드만 반영). AI 콘솔에서 대화하며 목표/KPI/관찰 LEAD/박동주기/자율on-off/위험승인임계값/KPI달성시동작을 조정할 때 쓴다. 웹 /api/projects/:id/autonomy(PUT)와 동일 검증 규칙(cadence·risk_approval_threshold·kpi_complete_action 허용값, lead_agent_name 실재 확인, 자율 ON은 LEAD 필수)을 공유한다.",
+  {
+    project_id: z.string().describe("대상 프로젝트 ID(STATUS.md 헤더 또는 get_current_context 로 확인)"),
+    goal: z.string().nullable().optional().describe("프로젝트 목표(자유 텍스트). null=초기화"),
+    kpi_json: z.string().nullable().optional().describe("KPI(JSON 문자열). null=초기화"),
+    custom_instruction: z.string().nullable().optional().describe("LEAD 에게 매 사이클 전달할 추가 지시. null=초기화"),
+    lead_agent_name: z.string().nullable().optional().describe("관찰 LEAD 에이전트 이름(agents.name 에 등록되어 있어야 함). null 또는 빈 문자열=LEAD 해제(→ 자율 자동 OFF 취급)"),
+    cadence: z.enum(CADENCE_VALUES).nullable().optional().describe(`박동 주기. 허용값: ${CADENCE_VALUES.join(", ")} ('off'=정지)`),
+    autonomy_level: z.string().nullable().optional().describe("자유 라벨(게이트엔 미영향, 표시/메타용)"),
+    autonomy_enabled: z.boolean().optional().describe("프로젝트 자율 on/off. true 로 켜려면 lead_agent_name 이 있어야 함(기존 또는 이번 호출에서 함께 지정)"),
+    risk_approval_threshold: z.enum(RISK_APPROVAL_THRESHOLD_VALUES).nullable().optional().describe(`이 등급부터 사람 승인 필요. 허용값: ${RISK_APPROVAL_THRESHOLD_VALUES.join(", ")} ('off'=위험도 무관 항상 자동판정 허용)`),
+    kpi_complete_action: z.enum(KPI_COMPLETE_ACTION_VALUES).nullable().optional().describe(`모든 KPI 달성 시 동작. 허용값: ${KPI_COMPLETE_ACTION_VALUES.join(", ")} (기본 'continue'=자율운영 유지, 'off'=자동 종료)`),
+    agent_name: z.string().optional().describe("변경 주체 에이전트/사용자(감사로그용, 기본 mcp)"),
+  },
+  async (params) => ({
+    content: [{ type: "text", text: JSON.stringify(projectAutonomyUpdate(params), null, 2) }],
   })
 );
 

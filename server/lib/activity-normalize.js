@@ -20,7 +20,8 @@ export const ACTIVITY_RESULTS = ['success', 'failed', 'partial', 'skipped', 'pen
 const ACTION_CATEGORY = {
   create: 'build', implement: 'build', update: 'build',
   milestone: 'decision',
-  config: 'deploy',
+  config: 'deploy', engine_setting_update: 'deploy',
+  app_setting_update: 'deploy', app_setting_delete: 'deploy',
   backfill: 'ops', bootstrap: 'ops', 'operator-activation': 'ops',
   rule_queue: 'system', rule_auto: 'system', worker_parse_fail: 'system',
   lead_parse_fail: 'system', diff_path_rejected: 'system', autonomy_toggle: 'system',
@@ -32,7 +33,14 @@ const SYSTEM_ACTIONS = new Set([
   'diff_path_rejected', 'backfill_stat',
 ])
 // 사람이 알아야 할 설정변경 감사 action(level=audit 예외 — §2.3 note).
-const AUDIT_ACTIONS = new Set(['autonomy_toggle', 'project_autonomy_update', 'config'])
+// engine_setting_update(2026-07-12 신설, engine-webapp-separation.md §4.2/§7-5) — engine.* 튜닝값
+// 변경은 자율 실행에 직접 영향을 주므로 autonomy_toggle과 동일하게 audit로 분류한다.
+// app_setting_update/app_setting_delete(2026-07-13 신설, app_settings 범용 설정 화면) — 형제 라우트인
+// engine_setting_update와 동일하게 설정값 변경/삭제는 감사 대상이므로 audit로 분류한다.
+const AUDIT_ACTIONS = new Set([
+  'autonomy_toggle', 'project_autonomy_update', 'config', 'engine_setting_update',
+  'app_setting_update', 'app_setting_delete',
+])
 
 // action → category. 매칭 없으면 안전 기본 'ops'.
 export function deriveCategory(action) {
