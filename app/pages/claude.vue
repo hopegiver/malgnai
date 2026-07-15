@@ -29,8 +29,8 @@
       </div>
       <div class="col-6 col-lg-3">
         <div class="card p-3 text-center">
-          <div class="text-muted small">대화 기록</div>
-          <div class="fs-4 fw-bold">{{ summary.history_count }}</div>
+          <div class="text-muted small">세션 수</div>
+          <div class="fs-4 fw-bold">{{ (summary.session_count || 0).toLocaleString() }}</div>
         </div>
       </div>
     </div>

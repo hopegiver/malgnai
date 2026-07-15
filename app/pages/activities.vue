@@ -206,6 +206,10 @@
             <option value="">전체 에이전트</option>
             <option v-for="name in agentOptions" :key="name" :value="name">{{ name }}</option>
           </select>
+          <select v-model="project" class="form-select form-select-sm" style="width:auto" @change="reload">
+            <option value="">전체 프로젝트</option>
+            <option v-for="p in cmdProjectOptions" :key="p.id" :value="p.id">{{ p.name }}</option>
+          </select>
         </div>
         <button class="btn btn-sm btn-outline-secondary" :disabled="loading" @click="reload" title="새로고침">
           <i class="bi bi-arrow-clockwise"></i>
@@ -270,10 +274,10 @@
       <div v-else-if="!loading" class="empty-state py-5">
         <i class="bi bi-clock-history empty-state-icon"></i>
         <div class="empty-state-title">
-          {{ (category || agent) ? '조건에 맞는 활동이 없습니다.' : '아직 기록된 활동이 없습니다.' }}
+          {{ (category || agent || project) ? '조건에 맞는 활동이 없습니다.' : '아직 기록된 활동이 없습니다.' }}
         </div>
         <div class="empty-state-hint">
-          <template v-if="category || agent">
+          <template v-if="category || agent || project">
             필터를 바꾸거나 <a href="#" @click.prevent="resetFilters">초기화</a>해 보세요.
           </template>
           <template v-else>
@@ -583,6 +587,7 @@ export default {
       level: 'work',
       category: '',
       agent: '',
+      project: '',
       agentOptions: [],
       categoryOptions: [
         { v: '', label: '전체 카테고리' },
@@ -867,6 +872,7 @@ export default {
       // level === 'work' 는 파라미터 없음 = 서버 기본(work+audit).
       if (this.category) p.set('category', this.category)
       if (this.agent) p.set('agent_name', this.agent)
+      if (this.project) p.set('project_id', this.project)
       p.set('limit', String(limit))
       const qs = p.toString()
       return '/api/activities' + (qs ? '?' + qs : '')
@@ -890,6 +896,7 @@ export default {
     resetFilters() {
       this.category = ''
       this.agent = ''
+      this.project = ''
       this.load()
     },
     async loadMore() {

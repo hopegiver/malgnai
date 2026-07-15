@@ -57,8 +57,9 @@ function insertMemory(tx, { project_id, memory_type, title, content, importance,
 }
 
 // activity_logs 단일 쓰기 관문(logActivity) 경유 — level/category 정규화 포함(system→telemetry).
-function audit(tx, { project_id, action, detail }) {
-  logActivity(tx, { project_id: project_id || null, agent_name: 'system', action, detail: detail || null, created_at: nowIso() })
+// command_id: 이 감사로그가 어느 cycle command 에서 나왔는지(계보) 기록(issue adc8cf66, 2026-07-15).
+function audit(tx, { project_id, action, detail, command_id }) {
+  logActivity(tx, { project_id: project_id || null, command_id: command_id || null, agent_name: 'system', action, detail: detail || null, created_at: nowIso() })
 }
 
 /**
@@ -132,7 +133,7 @@ export function ingestCycleResultTx(tx, command, cycleJson) {
     const pv = validateProposal(rawProposal)
     if (!pv.ok) {
       report.proposal_invalid = true
-      audit(tx, { project_id: projectId, action: 'cycle_proposal_reject', detail: `invalid proposal: ${pv.reason}` })
+      audit(tx, { project_id: projectId, command_id: command.id, action: 'cycle_proposal_reject', detail: `invalid proposal: ${pv.reason}` })
     } else {
       // 2-a) proposal 락(결정2 / §7-4 무한루프 방지): 살아있는 proposal command 가 이미 있으면 skip.
       //   멱등키 prefix 'cycle-...-proposal' + 미terminal 상태를 신호로 사용(§2.5 락과 동형).
@@ -143,7 +144,7 @@ export function ingestCycleResultTx(tx, command, cycleJson) {
       ).bind(projectId).first()
       if (livePrev) {
         report.proposal_locked = true
-        audit(tx, { project_id: projectId, action: 'cycle_proposal_lock', detail: `살아있는 proposal command(${livePrev.id}) 존재 → 신규 생성 skip` })
+        audit(tx, { project_id: projectId, command_id: command.id, action: 'cycle_proposal_lock', detail: `살아있는 proposal command(${livePrev.id}) 존재 → 신규 생성 skip` })
       } else {
         const { instruction, task_type, risk_level, next } = pv.value
         // (설계 §5) proposal = "다음 실행단위". 실행 가능/held 는 proposal 의 next 신호가 가른다:
@@ -184,7 +185,7 @@ export function ingestCycleResultTx(tx, command, cycleJson) {
             ? (!gate.canAutoDispatch ? gate.autoBlockReason() : `risk_approval_required(${risk_level}>=${projectRow?.risk_approval_threshold})`)
             : null
           audit(tx, {
-            project_id: projectId, action: 'cycle_proposal_create',
+            project_id: projectId, command_id: command.id, action: 'cycle_proposal_create',
             detail: `제안 command 생성: ${task_type} next=${next} → ${status}${demotedReason ? ' (자동원했으나 강등:' + demotedReason + ')' : (auto ? ' (자동집행)' : '')}`,
           })
         } catch (e) {
@@ -213,13 +214,13 @@ export function ingestCycleResultTx(tx, command, cycleJson) {
         // 모든 KPI 달성 + kpi_complete_action='off' → 자율 운영 종료
         tx.prepare('UPDATE projects SET autonomy_enabled=\'0\' WHERE id=?').bind(projectId).run()
         audit(tx, {
-          project_id: projectId, action: 'kpi_all_achieved',
+          project_id: projectId, command_id: command.id, action: 'kpi_all_achieved',
           detail: `모든 KPI 목표 달성(kpi_complete_action=off) → autonomy_enabled='0' 자동 설정. KPI: ${kpiSummary}`
         })
       } else {
         // 모든 KPI 달성 + kpi_complete_action='continue'(기본) → 자율 운영 유지
         audit(tx, {
-          project_id: projectId, action: 'kpi_all_achieved_continue',
+          project_id: projectId, command_id: command.id, action: 'kpi_all_achieved_continue',
           detail: `모든 KPI 목표 달성, kpi_complete_action=continue 라 자율운영 유지. KPI: ${kpiSummary}`
         })
       }
@@ -230,7 +231,7 @@ export function ingestCycleResultTx(tx, command, cycleJson) {
         .filter(([_, v]) => v && typeof v === 'object' && v.passed !== true)
         .map(([k, v]) => `${k}=${v.achieved}/${v.target}${v.unit ? v.unit : ''}`)
       audit(tx, {
-        project_id: projectId, action: 'kpi_partial_achieved',
+        project_id: projectId, command_id: command.id, action: 'kpi_partial_achieved',
         detail: `일부 KPI 미달성, 계속 자율 운영. 미달성: ${failedKpis.join(', ')}`
       })
       report.kpi_partial_achieved = true
@@ -252,7 +253,7 @@ export function ingestCycleResultTx(tx, command, cycleJson) {
     if (prevStatus && prevStatus !== declaredStatus) {
       tx.prepare('UPDATE projects SET status=? WHERE id=?').bind(declaredStatus, projectId).run()
       logActivity(tx, {
-        project_id: projectId, agent_name: leadAgent,
+        project_id: projectId, command_id: command.id, agent_name: leadAgent,
         action: PROJECT_STATUS_CHANGE_ACTION,
         detail: projectStatusChangeDetail(prevStatus, declaredStatus, '자율 워커 선언'),
         created_at: nowIso(),
@@ -266,7 +267,7 @@ export function ingestCycleResultTx(tx, command, cycleJson) {
 
   // ── 4) 멱등 마커 + 요약 감사로그. ──
   audit(tx, {
-    project_id: projectId, action: 'cycle_ingest',
+    project_id: projectId, command_id: command.id, action: 'cycle_ingest',
     detail: `cmd=${command.id} acted=${acted} proposal=${report.proposal_created ? report.proposal_status : (report.proposal_locked ? 'locked' : 'none')}`,
   })
 

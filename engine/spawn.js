@@ -138,7 +138,7 @@ export function spawnOneCycle(tx, p, now, maxTurns) {
 
   if (spawned) {
     logActivity(tx, {
-      project_id: p.id, agent_name: 'system', action: 'cycle_spawn',
+      project_id: p.id, command_id: cmdId, agent_name: 'system', action: 'cycle_spawn',
       detail: `project_cycle 스폰: ${idem}`, created_at: iso,
     })
     return { outcome: 'spawned', commandId: cmdId }
@@ -243,7 +243,7 @@ export async function runSpawnDue(db, pendingDispatches) {
         out.spawned++
         const dispatchPromise = dispatchApprovedCommand(db, commandId).catch((e) =>
           logActivity(db, {
-            project_id: p.id, agent_name: 'system',
+            project_id: p.id, command_id: commandId, agent_name: 'system',
             action: 'instant_dispatch_error', detail: e.message, created_at: nowIsoStr,
           }))
         // engine/run.js 가 넘긴 경우에만 수집(§ 위 JSDoc) — 안 넘기면 기존과 동일한 fire-and-forget.

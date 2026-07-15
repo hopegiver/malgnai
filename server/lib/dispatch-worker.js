@@ -153,7 +153,7 @@ function recordCycleParseFailureTx(db, command, errorCode, rawStdout) {
          VALUES (?, ?, 'ISSUE', ?, ?, 4, 'system', ?)`
       ).bind(crypto.randomUUID(), command.project_id,
         '프로젝트 사이클 출력 파싱 실패', `errorCode=${errorCode}${rawStdout ? '\n' + String(rawStdout).slice(0, 2000) : ''}`, now).run()
-      logActivity(tx, { project_id: command.project_id, agent_name: 'system', action: 'cycle_parse_fail', detail: `errorCode=${errorCode}`, created_at: now })
+      logActivity(tx, { project_id: command.project_id, command_id: command.id, agent_name: 'system', action: 'cycle_parse_fail', detail: `errorCode=${errorCode}`, created_at: now })
     })
   } catch { /* 실패 기록 자체 실패는 치명 아님(best-effort) */ }
 }
@@ -169,7 +169,7 @@ export async function dispatchApprovedCommand(db, commandId) {
   try {
     const command = await dao.findById(commandId)
     if (!command) {
-      logActivity(db, { agent_name: 'system', action: 'instant_dispatch_skip', detail: `command ${commandId} not found`, created_at: nowIso() })
+      logActivity(db, { command_id: commandId, agent_name: 'system', action: 'instant_dispatch_skip', detail: `command ${commandId} not found`, created_at: nowIso() })
       return
     }
     // 멱등 방어: 이미 종료 상태면 재실행하지 않는다(중복 트리거·재시도 안전).
@@ -178,7 +178,7 @@ export async function dispatchApprovedCommand(db, commandId) {
     const project = command.project_id ? await new ProjectsDao(db).findById(command.project_id) : null
     if (!project || !project.path) {
       await dao.updateStatus(commandId, { status: 'failed', error: 'dispatch: project not found or missing path' })
-      logActivity(db, { project_id: command.project_id || null, agent_name: 'system', action: 'instant_dispatch_error', detail: 'project missing path', created_at: nowIso() })
+      logActivity(db, { project_id: command.project_id || null, command_id: commandId, agent_name: 'system', action: 'instant_dispatch_error', detail: 'project missing path', created_at: nowIso() })
       return
     }
 
@@ -279,9 +279,9 @@ export async function dispatchApprovedCommand(db, commandId) {
       if (exitCode === 0 && isResume) {
         const rq = maybeRequeueResume(db, command, parsed.result)
         if (rq.requeued) {
-          logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'resume_requeue', detail: `다음 라운드 승인 필요 → command ${rq.newId} 큐잉`, created_at: nowIso() })
+          logActivity(db, { project_id: command.project_id, command_id: commandId, agent_name: 'system', action: 'resume_requeue', detail: `다음 라운드 승인 필요 → command ${rq.newId} 큐잉`, created_at: nowIso() })
         } else if (rq.reason) {
-          logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'resume_requeue_skip', detail: rq.reason, created_at: nowIso() })
+          logActivity(db, { project_id: command.project_id, command_id: commandId, agent_name: 'system', action: 'resume_requeue_skip', detail: rq.reason, created_at: nowIso() })
         }
       }
 
@@ -291,15 +291,15 @@ export async function dispatchApprovedCommand(db, commandId) {
       if (exitCode === 0) {
         const pc = maybeRequeuePhase(db, command, parsed.result)
         if (pc.requeued) {
-          logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'phase_chain_create', detail: `다음 단계 command ${pc.newId} 생성${pc.claimed ? ' (즉시 실행)' : ' (프로젝트 실행 중 → 안전망 poll 대기)'}`, created_at: nowIso() })
+          logActivity(db, { project_id: command.project_id, command_id: commandId, agent_name: 'system', action: 'phase_chain_create', detail: `다음 단계 command ${pc.newId} 생성${pc.claimed ? ' (즉시 실행)' : ' (프로젝트 실행 중 → 안전망 poll 대기)'}`, created_at: nowIso() })
           if (pc.claimed) {
             // await(예외적으로) — 위 파일 docstring 참고: 엔진 프로세스가 호출자일 때 다음 단계
             //   실행이 끝나기 전에 틱이 종료되면 안 되므로, 이 재귀 호출만은 fire-and-forget 하지 않는다.
             await dispatchApprovedCommand(db, pc.newId).catch((e) =>
-              logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: e.message, created_at: nowIso() }))
+              logActivity(db, { project_id: command.project_id, command_id: commandId, agent_name: 'system', action: 'instant_dispatch_error', detail: e.message, created_at: nowIso() }))
           }
         } else if (pc.reason) {
-          logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'phase_chain_skip', detail: pc.reason, created_at: nowIso() })
+          logActivity(db, { project_id: command.project_id, command_id: commandId, agent_name: 'system', action: 'phase_chain_skip', detail: pc.reason, created_at: nowIso() })
         }
       }
 
@@ -320,12 +320,12 @@ export async function dispatchApprovedCommand(db, commandId) {
               sendApprovalNotification(db, project.owner_user_id, {
                 id: report.proposal_command_id, title, status: 'queued',
               }).catch((e) => logActivity(db, {
-                project_id: command.project_id, agent_name: 'system',
+                project_id: command.project_id, command_id: commandId, agent_name: 'system',
                 action: 'push_notify_error', detail: e.message, created_at: nowIso(),
               }))
             }
           } catch (e) {
-            logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: `ingestCycleResultTx failed: ${e.message}`, created_at: nowIso() })
+            logActivity(db, { project_id: command.project_id, command_id: commandId, agent_name: 'system', action: 'instant_dispatch_error', detail: `ingestCycleResultTx failed: ${e.message}`, created_at: nowIso() })
           }
         } else {
           recordCycleParseFailureTx(db, command, extracted.error, stdout)
@@ -335,7 +335,7 @@ export async function dispatchApprovedCommand(db, commandId) {
         try {
           db.transaction((tx) => ingestCommandFailureTx(tx, command, errorMsg))
         } catch (e) {
-          logActivity(db, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: `ingestCommandFailureTx failed: ${e.message}`, created_at: nowIso() })
+          logActivity(db, { project_id: command.project_id, command_id: commandId, agent_name: 'system', action: 'instant_dispatch_error', detail: `ingestCommandFailureTx failed: ${e.message}`, created_at: nowIso() })
         }
       }
       }
@@ -348,7 +348,7 @@ export async function dispatchApprovedCommand(db, commandId) {
     // execMonitor.end() 는 start() 가 불린 경우에만 실제 동작(미호출 시 no-op).
     try { execMonitor.end(commandId, 'failed') } catch { /* best-effort */ }
     try {
-      logActivity(db, { agent_name: 'system', action: 'instant_dispatch_error', detail: e.message, created_at: nowIso() })
+      logActivity(db, { command_id: commandId, agent_name: 'system', action: 'instant_dispatch_error', detail: e.message, created_at: nowIso() })
     } catch { /* 감사 실패는 무시(best-effort) */ }
   }
 }

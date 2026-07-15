@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS agents (
   status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','inactive')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
-, md_content TEXT, md_hash TEXT, skills TEXT, skill_level TEXT NOT NULL DEFAULT 'beginner', learning_status TEXT NOT NULL DEFAULT 'idle', total_tasks_completed INTEGER NOT NULL DEFAULT 0, total_projects_participated INTEGER NOT NULL DEFAULT 0, last_active_at TEXT, knowledge TEXT, team TEXT, job_title TEXT, model TEXT, forbidden_tasks TEXT, approval_required_tasks TEXT, manager_agent_name TEXT, autonomy_level TEXT DEFAULT 'L1', allowed_task_types TEXT, kpi_json TEXT, budget_json TEXT);
+, md_content TEXT, md_hash TEXT, skills TEXT, skill_level TEXT NOT NULL DEFAULT 'beginner', learning_status TEXT NOT NULL DEFAULT 'idle', total_tasks_completed INTEGER NOT NULL DEFAULT 0, total_projects_participated INTEGER NOT NULL DEFAULT 0, last_active_at TEXT, knowledge TEXT, team TEXT, job_title TEXT, model TEXT, forbidden_tasks TEXT, approval_required_tasks TEXT, manager_agent_name TEXT, autonomy_level TEXT DEFAULT 'L1', allowed_task_types TEXT, kpi_json TEXT, budget_json TEXT, skill_level_locked INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
 

@@ -96,7 +96,7 @@ router.post('/', authMiddleware, async (c) => {
     if (claimed) {
       dispatchApprovedCommand(c.env.DB, command.id).catch((e) =>
         logActivity(c.env.DB, {
-          project_id, agent_name: 'system',
+          project_id, command_id: command.id, agent_name: 'system',
           action: 'instant_dispatch_error', detail: e.message, created_at: new Date().toISOString(),
         }))
     }
@@ -299,7 +299,7 @@ router.patch('/:id', apiKeyMiddleware, async (c) => {
   if (command.task_type === 'resume' && Number(body.exit_code) === 0) {
     const rq = maybeRequeueResume(c.env.DB, command, body.result)
     if (rq.requeued) {
-      logActivity(c.env.DB, { project_id: command.project_id, agent_name: 'system', action: 'resume_requeue', detail: `다음 라운드 승인 필요 → command ${rq.newId} 큐잉`, created_at: new Date().toISOString() })
+      logActivity(c.env.DB, { project_id: command.project_id, command_id: command.id, agent_name: 'system', action: 'resume_requeue', detail: `다음 라운드 승인 필요 → command ${rq.newId} 큐잉`, created_at: new Date().toISOString() })
     }
   }
 
@@ -308,13 +308,13 @@ router.patch('/:id', apiKeyMiddleware, async (c) => {
   if (Number(body.exit_code) === 0) {
     const pc = maybeRequeuePhase(c.env.DB, command, body.result)
     if (pc.requeued) {
-      logActivity(c.env.DB, { project_id: command.project_id, agent_name: 'system', action: 'phase_chain_create', detail: `다음 단계 command ${pc.newId} 생성${pc.claimed ? ' (즉시 실행)' : ' (프로젝트 실행 중 → 안전망 poll 대기)'}`, created_at: new Date().toISOString() })
+      logActivity(c.env.DB, { project_id: command.project_id, command_id: command.id, agent_name: 'system', action: 'phase_chain_create', detail: `다음 단계 command ${pc.newId} 생성${pc.claimed ? ' (즉시 실행)' : ' (프로젝트 실행 중 → 안전망 poll 대기)'}`, created_at: new Date().toISOString() })
       if (pc.claimed) {
         dispatchApprovedCommand(c.env.DB, pc.newId).catch((e) =>
-          logActivity(c.env.DB, { project_id: command.project_id, agent_name: 'system', action: 'instant_dispatch_error', detail: e.message, created_at: new Date().toISOString() }))
+          logActivity(c.env.DB, { project_id: command.project_id, command_id: pc.newId, agent_name: 'system', action: 'instant_dispatch_error', detail: e.message, created_at: new Date().toISOString() }))
       }
     } else if (pc.reason) {
-      logActivity(c.env.DB, { project_id: command.project_id, agent_name: 'system', action: 'phase_chain_skip', detail: pc.reason, created_at: new Date().toISOString() })
+      logActivity(c.env.DB, { project_id: command.project_id, command_id: command.id, agent_name: 'system', action: 'phase_chain_skip', detail: pc.reason, created_at: new Date().toISOString() })
     }
   }
   return c.json({ command })
@@ -364,6 +364,7 @@ router.patch('/:id/terminate', authMiddleware, async (c) => {
 
   logActivity(c.env.DB, {
     project_id: command.project_id,
+    command_id: id,
     agent_name: user?.sub || 'unknown',
     action: 'command_terminate',
     detail: `명령 ${id} 강제 종료 (이전 상태: ${command.status})`,
@@ -458,13 +459,14 @@ router.post('/:id/retry', authMiddleware, async (c) => {
   if (claimed) {
     dispatchApprovedCommand(c.env.DB, newCommand.id).catch((e) =>
       logActivity(c.env.DB, {
-        project_id: command.project_id, agent_name: 'system',
+        project_id: command.project_id, command_id: newCommand.id, agent_name: 'system',
         action: 'instant_dispatch_error', detail: e.message, created_at: new Date().toISOString(),
       }))
   }
 
   logActivity(c.env.DB, {
     project_id: command.project_id,
+    command_id: newCommand.id,
     agent_name: created_by || 'unknown',
     action: 'command_retry',
     detail: `원본 명령 ${command.id} → 재실행 명령 ${newCommand.id} 자가승인 생성 (session_id ${hasSession ? '있음, resume' : '없음, 처음부터'})`,

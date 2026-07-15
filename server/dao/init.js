@@ -221,91 +221,6 @@ async function backfillActivityStructure(db) {
 }
 
 /**
- * dropTasksTable — 실행 인프라 재설계 Phase B(execution-infra-redesign.md §1.8 최종 마무리).
- *
- * tasks→commands 이관(backfillTasksToCommands)과 FK 재조준(migrateTaskIdFkToCommands)이 이미
- *   라이브에 적용된 뒤(두 함수는 임무를 마쳐 코드에서 제거됨), tasks 원본 테이블과 잔존 task_id
- *   컬럼(decisions/issues — 0건 확인, commands — task_id 를 채우는 코드가 전무해 항상 NULL)을
- *   제거해 tasks/commands 완전 통합을 마무리한다.
- *
- * ⚠️ tasks 잔존 7행(task_type IS NOT NULL: repro_issue/audit_risk/investigate_failure/review_change/
- *   lead_cycle)은 task_router 제거로 애초에 실행 경로가 없던 죽은 pending 체크리스트다(전부
- *   status='pending' 또는 'failed', backfillTasksToCommands 이관 대상도 아니었음) — 이관 없이 그대로
- *   버려도 유실되는 진행 중 작업이 없다(사전 확인).
- *
- * 멱등: 컬럼/테이블이 이미 없으면 각 단계 조용히 skip. DROP INDEX 는 컬럼 DROP 전 필수
- *   (컬럼을 참조하는 인덱스가 남아있으면 SQLite ALTER TABLE DROP COLUMN 이 실패한다).
- */
-async function dropTasksTable(db) {
-  try {
-    const hasColumn = async (table, col) =>
-      ((await db.prepare(`PRAGMA table_info(${table})`).all()).results || []).some((r) => r.name === col)
-
-    if (await hasColumn('commands', 'task_id')) {
-      try { await db.prepare('DROP INDEX IF EXISTS idx_commands_task').run() } catch { /* 없으면 무시 */ }
-      await db.prepare('ALTER TABLE commands DROP COLUMN task_id').run()
-      console.warn('[drop-tasks] commands.task_id column dropped')
-    }
-    if (await hasColumn('decisions', 'task_id')) {
-      await db.prepare('ALTER TABLE decisions DROP COLUMN task_id').run()
-      console.warn('[drop-tasks] decisions.task_id column dropped')
-    }
-    if (await hasColumn('issues', 'task_id')) {
-      await db.prepare('ALTER TABLE issues DROP COLUMN task_id').run()
-      console.warn('[drop-tasks] issues.task_id column dropped')
-    }
-    // feedbacks 는 이 파일의 TABLES 에 없다(별도 정리 작업 소관, 이 파일은 테이블 존재 자체를 모른다).
-    // 다만 stale MCP 서브프로세스가 구버전 mcp/db/schema.js 를 메모리에 든 채 최초 getDb() 호출 시
-    // CREATE TABLE IF NOT EXISTS 로 tasks/feedbacks 를 되살리는 사례가 실측됐다(2026-07-03) — 테이블
-    // 존치 여부는 건드리지 않고 task_id 컬럼만 있으면 제거(hasColumn 은 테이블 부재 시 빈 배열이라 안전).
-    if (await hasColumn('feedbacks', 'task_id')) {
-      try { await db.prepare('DROP INDEX IF EXISTS idx_feedbacks_task').run() } catch { /* 없으면 무시 */ }
-      await db.prepare('ALTER TABLE feedbacks DROP COLUMN task_id').run()
-      console.warn('[drop-tasks] feedbacks.task_id column dropped')
-    }
-
-    const exists = await db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'`).first()
-    if (exists) {
-      const before = await db.prepare('SELECT COUNT(*) AS c FROM tasks').first()
-      await db.prepare('DROP TABLE tasks').run()
-      console.warn(`[drop-tasks] tasks table dropped (had ${before?.c ?? '?'} legacy rows — already migrated or dead pending checklist items)`)
-    } else {
-      console.warn('[drop-tasks] matched=0 (이미 제거됨, no-op)')
-    }
-  } catch (e) {
-    console.warn('[drop-tasks]', e?.message)
-  }
-}
-
-/**
- * renameTaskIdToCommandId — 순수 네이밍 정리(dropTasksTable 과 무관, 독립 실행).
- *
- * activity_logs/memories 의 task_id 컬럼은 FK 대상이 이미 오래 전 commands(id) 로 재조준돼
- *   있었다(위 CREATE TABLE 주석 참고) — 즉 "이름은 task_id, 실제 의미는 command_id"인 상태였다.
- *   tasks 개념/테이블이 완전히 제거된 지금, 컬럼명 자체를 command_id 로 바꿔 이름과 의미를
- *   일치시킨다. SQLite ALTER TABLE RENAME COLUMN 은 비파괴이며 해당 컬럼을 참조하는
- *   인덱스/뷰가 있으면 자동 갱신하는데, 두 테이블 모두 이 컬럼을 이름으로 참조하는
- *   인덱스/뷰가 없어 추가 처리가 필요 없다.
- *
- * 멱등: 컬럼이 이미 command_id 로 바뀌었거나 애초에 없으면 조용히 skip.
- */
-async function renameTaskIdToCommandId(db) {
-  try {
-    const hasColumn = async (table, col) =>
-      ((await db.prepare(`PRAGMA table_info(${table})`).all()).results || []).some((r) => r.name === col)
-
-    for (const table of ['activity_logs', 'memories']) {
-      if (await hasColumn(table, 'task_id')) {
-        await db.prepare(`ALTER TABLE ${table} RENAME COLUMN task_id TO command_id`).run()
-        console.warn(`[rename-task-id] ${table}.task_id renamed to command_id`)
-      }
-    }
-  } catch (e) {
-    console.warn('[rename-task-id]', e?.message)
-  }
-}
-
-/**
  * admin 사용자 시드 — lockout 방지(매우 중요).
  *
  * users 가 비어 있고 ADMIN_PASSWORD 가 있으면 username 'admin' 을 그 비번 해시로 생성한다
@@ -376,12 +291,10 @@ export async function runDataMigrations(db) {
   // 활동 로그 재설계: 기존 activity_logs 신규 구조 컬럼 백필(level/category/title/result/target_ref).
   //   단일 트랜잭션 + changes() 실증. detail 불변. 멱등(대상 NULL 행만).
   try { await backfillActivityStructure(db) } catch (e) { console.warn('[backfill-activity]', e?.message) }
-  // 실행 인프라 재설계 Phase B(§1.8 마무리): tasks 원본 테이블 + 잔존 task_id 컬럼(decisions/issues/
-  //   commands) 완전 제거. tasks→commands 이관과 FK 재조준은 이미 라이브에 적용 완료된 상태.
-  try { await dropTasksTable(db) } catch (e) { console.warn('[drop-tasks]', e?.message) }
-  // activity_logs/memories.task_id 는 이미 commands(id) 를 가리키던 컬럼이라(FK 재조준은 완료 상태),
-  //   dropTasksTable 과 무관하게 순수 네이밍만 command_id 로 정리한다.
-  try { await renameTaskIdToCommandId(db) } catch (e) { console.warn('[rename-task-id]', e?.message) }
+  // 실행 인프라 재설계 Phase B(§1.8) 마무리 — tasks 원본 테이블 + 잔존 task_id 컬럼(decisions/issues/
+  //   commands/activity_logs/memories) 제거 및 command_id 리네임은 라이브에 적용 완료(2026-07-03),
+  //   이후 매 실행이 영구 no-op 이던 dropTasksTable/renameTaskIdToCommandId 함수는 2026-07-15
+  //   실측 재확인(테이블 부재·컬럼명 command_id 확인) 후 제거(이슈 d6295cc1).
 }
 
 /**

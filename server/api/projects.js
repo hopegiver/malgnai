@@ -3,6 +3,7 @@ import { readdirSync, statSync, existsSync, createReadStream, readFileSync, rmSy
 import { join, normalize, basename, extname, sep } from 'node:path'
 import { homedir } from 'node:os'
 import ProjectsDao from '../dao/projects.js'
+import CollaboratorsDao from '../dao/collaborators.js'
 import ClaudeDao from '../dao/claude.js'
 import { AUTONOMOUS_KINDS } from '../dao/init.js'
 import { notFound, badRequest, conflict } from '../utils/response.js'
@@ -807,6 +808,62 @@ router.put('/:id/status', authMiddleware, async (c) => {
     })
   } catch { /* 감사 실패 무시 */ }
   return c.json({ project: withDerived(project) })
+})
+
+// ── 프로젝트 공유(협업자) 관리 (이슈 bfe2bf02 — DAO/테이블은 이미 있었으나 API 라우트가 없어
+//   실제로 공유를 추가/해제할 방법이 없던 갭. 이제 이 3개 라우트로 배선한다) ──
+//
+//  GET    /api/projects/:id/collaborators        [JWT, owner]  공유 목록 조회
+//  POST   /api/projects/:id/collaborators        [JWT, owner]  공유 추가/역할 변경 { user, role }
+//  DELETE /api/projects/:id/collaborators/:user  [JWT, owner]  공유 해제
+//
+// 소유자만 공유를 관리한다(editor가 제3자에게 접근권을 위임하는 체인은 범위 밖 — 필요해지면
+//   별도 결정으로 확장). 존재하지 않거나 소유자가 아니면 404(이 파일의 기존 정보누출 방지 방침과 동일).
+router.get('/:id/collaborators', authMiddleware, async (c) => {
+  const dao = new ProjectsDao(c.env.DB)
+  const existing = await dao.findById(c.req.param('id'))
+  if (!existing) return notFound(c, 'Project not found')
+  if (existing.owner_user_id !== c.get('user')?.sub) return notFound(c, 'Project not found')
+  const collaborators = await new CollaboratorsDao(c.env.DB).listByProject(existing.id)
+  return c.json({ collaborators })
+})
+
+router.post('/:id/collaborators', authMiddleware, async (c) => {
+  const dao = new ProjectsDao(c.env.DB)
+  const existing = await dao.findById(c.req.param('id'))
+  if (!existing) return notFound(c, 'Project not found')
+  if (existing.owner_user_id !== c.get('user')?.sub) return notFound(c, 'Project not found')
+  const body = await c.req.json().catch(() => ({}))
+  const user = typeof body.user === 'string' ? body.user.trim() : ''
+  if (!user) return badRequest(c, 'user is required')
+  if (user === existing.owner_user_id) return badRequest(c, 'owner already has full access')
+  const collabDao = new CollaboratorsDao(c.env.DB)
+  const role = await collabDao.share(existing.id, user, body.role) // share() 내부에서 viewer/editor 만 허용
+  try {
+    logActivity(c.env.DB, {
+      project_id: existing.id, agent_name: c.get('user')?.sub || 'web',
+      action: 'project_share_add', detail: `owner=${existing.owner_user_id} shared user=${user} role=${role}`,
+    })
+  } catch { /* 감사 실패는 본 동작을 막지 않음 */ }
+  return c.json({ collaborator: { project_id: existing.id, user, role } })
+})
+
+router.delete('/:id/collaborators/:user', authMiddleware, async (c) => {
+  const dao = new ProjectsDao(c.env.DB)
+  const existing = await dao.findById(c.req.param('id'))
+  if (!existing) return notFound(c, 'Project not found')
+  if (existing.owner_user_id !== c.get('user')?.sub) return notFound(c, 'Project not found')
+  const user = c.req.param('user')
+  const removed = await new CollaboratorsDao(c.env.DB).unshare(existing.id, user)
+  if (removed) {
+    try {
+      logActivity(c.env.DB, {
+        project_id: existing.id, agent_name: c.get('user')?.sub || 'web',
+        action: 'project_share_remove', detail: `owner=${existing.owner_user_id} unshared user=${user}`,
+      })
+    } catch { /* 감사 실패는 본 동작을 막지 않음 */ }
+  }
+  return c.json({ removed })
 })
 
 // 워크스페이스 폴더 일괄 동기화

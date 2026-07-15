@@ -75,7 +75,7 @@ router.post('/turns', authMiddleware, async (c) => {
   if (outcome.created && outcome.claimed) {
     dispatchApprovedCommand(c.env.DB, outcome.command.id).catch((e) =>
       logActivity(c.env.DB, {
-        project_id, agent_name: 'system',
+        project_id, command_id: outcome.command.id, agent_name: 'system',
         action: 'instant_dispatch_error', detail: e.message, created_at: new Date().toISOString(),
       }))
   }

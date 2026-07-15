@@ -428,7 +428,6 @@ export default class ClaudeDao {
     ])
 
     return {
-      history_count: 0,
       stats_days: statsDays?.cnt || 0,
       memory_count: memoryCount?.cnt || 0,
       session_count: sessionCount?.cnt || 0,

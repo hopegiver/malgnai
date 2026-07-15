@@ -13,8 +13,12 @@ import { getDb } from "../db/connection.js";
  *   - recent_decisions  : 최근/중요 결정사항
  *   - key_memories      : 중요 메모리(lesson 등)
  *   - recent_activities : 최근 활동 로그(짧게)
+ *   - pending_commands  : 대기중(queued)/승인후 미착수(approved) commands(짧게)
  *
- * (참고: 승인 여부는 instruction에 자동 추가되는 [✅ 승인됨] 메모로 워커가 직접 인지 가능 — get_current_context 별도 노출 불필요)
+ * (참고: "지금 실행 중인 이 명령"의 승인 여부는 instruction에 자동 추가되는 [✅ 승인됨]
+ *  메모로 워커가 직접 인지 가능하다 — 그건 이 필드로 다시 보여주지 않는다. pending_commands는
+ *  그와 별개로 "내가 전에 command_add로 올려둔 다른 제안/질문이 아직 어떤 상태인지"를
+ *  워커가 스스로 확인할 수 있게 하는 용도다(issue f09eb6ea).
  *
  * project_id를 주면 해당 프로젝트로 범위를 좁힌다.
  */
@@ -80,6 +84,20 @@ export function getCurrentContext(params = {}) {
     )
     .all(bind);
 
+  // issue f09eb6ea: 워커가 이전에 올려둔 제안/질문(command_add)이 아직 승인 대기중인지,
+  // 승인은 됐지만 아직 실행되지 않았는지를 스스로 확인할 방법이 없었다. queued/approved 만
+  // 짧게 보여준다(claimed/running 이후는 위 in_progress_tasks 가 이미 커버).
+  const pending_commands = db
+    .prepare(
+      `SELECT id, project_id,
+              COALESCE(title, substr(instruction, 1, 120)) AS title,
+              status, review_status, created_at
+         FROM commands
+        WHERE status IN ('queued','approved') ${projFilter}
+        ORDER BY created_at DESC LIMIT 10`
+    )
+    .all(bind);
+
   return {
     generated_at: new Date().toISOString(),
     scope: { project_id: pid },
@@ -89,5 +107,6 @@ export function getCurrentContext(params = {}) {
     recent_decisions,
     key_memories,
     recent_activities,
+    pending_commands,
   };
 }

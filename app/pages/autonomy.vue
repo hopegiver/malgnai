@@ -121,7 +121,7 @@
                 <template v-if="status.last_cycle.cost_usd != null"> · ${{ (status.last_cycle.cost_usd || 0).toFixed(2) }}</template>
               </div>
               <div v-if="status.last_cycle.error" class="small text-danger mt-1 pd-clamp-2" :title="status.last_cycle.error">
-                <i class="bi bi-exclamation-circle me-1"></i>{{ status.last_cycle.error }}
+                <i class="bi bi-exclamation-circle me-1"></i>{{ friendlyCycleError(status.last_cycle.error) }}
               </div>
             </template>
             <template v-else>
@@ -361,6 +361,21 @@ export default {
     },
     cycleLabel(s) {
       return { done: '완료', failed: '실패', running: '실행 중', claimed: '실행 중', queued: '대기', approved: '승인됨', rejected: '반려', expired: '만료' }[s] || s || '—'
+    },
+    // 자율 사이클 실패 사유는 워커/엔진이 남긴 원문(대개 영문 로그 문구)이라 운영자가 한눈에
+    // 판단하기 어렵다. 자주 보이는 패턴만 한글 한 줄 요약을 앞에 붙이고 원문은 그대로 이어
+    // 붙여(및 title 툴팁) 디버깅 정보 손실 없이 가독성만 보강한다(이슈 c7a15244 Minor-2).
+    friendlyCycleError(raw) {
+      if (!raw) return ''
+      const patterns = [
+        [/force.?kill|forcefully terminated/i, '🛑 강제 종료됨'],
+        [/timed out|hanging for/i, '⏱ 시간 초과로 중단됨'],
+        [/max.?turns|max_turns/i, '🔁 최대 턴 수 초과'],
+        [/zombie reaped|stale cycle reaped/i, '👻 유실된 실행(서버 재시작 등)으로 회수됨'],
+        [/json.?pars/i, '⚠ 결과 파싱 실패'],
+      ]
+      const hit = patterns.find(([re]) => re.test(raw))
+      return hit ? `${hit[1]} — ${raw}` : raw
     },
     failureRatePct(p) {
       if (!p.cycles_total) return 0

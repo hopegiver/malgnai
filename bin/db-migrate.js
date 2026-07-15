@@ -42,6 +42,7 @@ loadDotVars(join(ROOT, '.dev.vars'))
 
 const DB_PATH = process.env.DB_PATH || process.env.MALGNAI_DB_PATH || join(ROOT, 'data', 'malgnai.db')
 const DRY = process.argv.includes('--dry-run')
+// ⚠️ --no-backup: 라이브(운영) DB에는 쓰지 말 것 — 로컬 스크래치 DB/테스트 전용. 운영에선 항상 사전백업(VACUUM INTO)을 남긴다.
 const NO_BACKUP = process.argv.includes('--no-backup')
 const ts = () => new Date().toISOString().replace(/[:.]/g, '-')
 

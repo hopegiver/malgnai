@@ -145,6 +145,13 @@ async function main() {
 
   const data = await res.json()
   console.log(`[sync] ${data.synced} agents synced to ${SERVER_URL}`)
+
+  // 이슈 6a01f9ab: skill_level_locked=1 인 에이전트는 트레이너 수동평가 보호 중이라 이번 sync의
+  // 키워드매칭 재계산이 서버에서 무시됐다 — 조용히 넘어가지 않고 알린다.
+  const locked = (data.agents || []).filter(a => Number(a.skill_level_locked) === 1)
+  if (locked.length) {
+    console.log(`  🔒 스킬 수동고정(자동재계산 미적용): ${locked.map(a => `${a.name}(${a.skill_level})`).join(", ")}`)
+  }
 }
 
 main().catch(e => { console.error(e); process.exit(1) })

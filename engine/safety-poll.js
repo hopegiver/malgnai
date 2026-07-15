@@ -92,7 +92,7 @@ function recordCycleParseFailureTx(db, command, errorCode, rawStdout) {
          VALUES (?, ?, 'ISSUE', ?, ?, 4, 'system', ?)`
       ).bind(crypto.randomUUID(), command.project_id,
         '프로젝트 사이클 출력 파싱 실패', `errorCode=${errorCode}${rawStdout ? '\n' + String(rawStdout).slice(0, 2000) : ''}`, now).run()
-      logActivity(tx, { project_id: command.project_id, agent_name: 'system', action: 'cycle_parse_fail', detail: `errorCode=${errorCode}`, created_at: now })
+      logActivity(tx, { project_id: command.project_id, command_id: command.id, agent_name: 'system', action: 'cycle_parse_fail', detail: `errorCode=${errorCode}`, created_at: now })
     })
   } catch { /* 실패 기록 자체 실패는 치명 아님(best-effort) */ }
 }

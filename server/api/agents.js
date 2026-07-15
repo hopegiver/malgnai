@@ -49,6 +49,26 @@ router.post('/sync', async (c) => {
   return c.json({ agents: results, synced: results.length })
 })
 
+// 스킬 수준 수동 오버라이드 (이슈 6a01f9ab): 트레이너 실질평가로 skill_level 을 확정하고,
+// locked:true 면 이후 bin/sync-agents.js 일괄 /sync 의 자동 재계산으로부터 보호한다.
+// locked:false 로 호출하면 다시 자동 재계산 대상으로 풀린다.
+router.patch('/:name/skill-level', async (c) => {
+  const name = c.req.param('name')
+  const dao = new AgentsDao(c.env.DB)
+  const existing = await dao.findByName(name)
+  if (!existing) return notFound(c, 'Agent not found')
+  const body = await c.req.json()
+  const VALID_LEVELS = ['beginner', 'intermediate', 'advanced', 'expert']
+  if (body.skill_level === undefined && body.locked === undefined) {
+    return badRequest(c, 'skill_level or locked is required')
+  }
+  if (body.skill_level !== undefined && !VALID_LEVELS.includes(body.skill_level)) {
+    return badRequest(c, `skill_level must be one of: ${VALID_LEVELS.join(', ')}`)
+  }
+  const agent = await dao.setSkillOverride(name, { skill_level: body.skill_level, locked: body.locked })
+  return c.json({ agent })
+})
+
 // 학습 이력 추가
 router.post('/:name/learning', async (c) => {
   const name = c.req.param('name')

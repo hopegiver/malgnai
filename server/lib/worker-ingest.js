@@ -91,6 +91,7 @@ export function ingestCommandFailureTx(tx, command, errorMsg) {
 
   logActivity(tx, {
     project_id: command.project_id || null,
+    command_id: command.id,
     agent_name: command.created_by || 'system',
     action: 'command_fail',
     detail: `cmd=${command.id} task_type=${command.task_type || ''} error=${errorMsg || '(no error message)'}`,
