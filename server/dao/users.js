@@ -36,9 +36,11 @@ export async function listAll(db) {
   return results
 }
 
-export async function updateRoleStatus(db, id, { role, status }) {
+/** 관리자 PATCH /api/admin/users/:id 전용 — name/role/status 부분 갱신(server/api/admin-users.js). */
+export async function updateRoleStatus(db, id, { name, role, status }) {
   const sets = []
   const binds = []
+  if (name !== undefined) { sets.push('name = ?'); binds.push(name) }
   if (role) { sets.push('role = ?'); binds.push(role) }
   if (status) { sets.push('status = ?'); binds.push(status) }
   if (!sets.length) return
@@ -46,4 +48,23 @@ export async function updateRoleStatus(db, id, { role, status }) {
   binds.push(new Date().toISOString())
   binds.push(id)
   await db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).bind(...binds).run()
+}
+
+/** 본인 PATCH /api/auth/me 전용 — name만 갱신 가능(email/role/status는 이 경로로 불가, server/api/auth.js). */
+export async function updateName(db, id, name) {
+  await db.prepare('UPDATE users SET name = ?, updated_at = ? WHERE id = ?')
+    .bind(name, new Date().toISOString(), id).run()
+}
+
+/** 비밀번호 변경(server/api/auth.js POST /change-password) — password_hash만 갱신. */
+export async function updatePasswordHash(db, id, passwordHash) {
+  await db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?')
+    .bind(passwordHash, new Date().toISOString(), id).run()
+}
+
+/** 활성 administrator 인원 수 — 마지막 남은 관리자를 강등/비활성화하지 못하게 막는 가드에 사용
+ *  (server/api/admin-users.js PATCH /:id). */
+export async function countActiveAdmins(db) {
+  const row = await db.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'administrator' AND status = 'active'").first()
+  return row ? row.cnt : 0
 }

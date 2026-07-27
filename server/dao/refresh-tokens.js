@@ -25,11 +25,12 @@ export async function markRotated(db, id) {
   ).bind(now, id).run()
 }
 
-/** 재사용 탐지(grace window 밖 재사용, 또는 logout/이미 reuse_detected된 토큰의 재사용) 시
- *  해당 유저의 모든 refresh token을 일괄 폐기(api.md §5.1) — revoke_reason='reuse_detected'로
- *  남겨 이후 이 토큰들이 다시 들어와도 grace window 대상이 되지 않게 한다. */
-export async function revokeAllForUser(db, userId) {
+/** 해당 유저의 모든 refresh token을 일괄 폐기. reason 기본값은 재사용 탐지(grace window 밖 재사용,
+ *  또는 logout/이미 reuse_detected된 토큰의 재사용) 경로 그대로 'reuse_detected' — 이후 이 토큰들이
+ *  다시 들어와도 grace window 대상이 되지 않는다. 비밀번호 변경 등 명시적 로그아웃 성격의 폐기는
+ *  reason='logout'으로 호출한다(server/api/auth.js POST /change-password 참고, grace window와 무관). */
+export async function revokeAllForUser(db, userId, reason = 'reuse_detected') {
   await db.prepare(
-    "UPDATE refresh_tokens SET status='revoked', revoke_reason='reuse_detected', revoked_at=? WHERE user_id = ? AND status != 'revoked'"
-  ).bind(new Date().toISOString(), userId).run()
+    "UPDATE refresh_tokens SET status='revoked', revoke_reason=?, revoked_at=? WHERE user_id = ? AND status != 'revoked'"
+  ).bind(reason, new Date().toISOString(), userId).run()
 }

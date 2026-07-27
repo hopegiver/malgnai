@@ -19,11 +19,23 @@
       <nav class="admin-nav flex-grow-1 px-2 py-2" style="overflow-y: auto;" role="navigation" aria-label="주 네비게이션">
         <router-link to="/" class="admin-nav-item" :class="{ 'is-active': $route.path === '/' }" @click="closeSidebarOnMobile">
           <i class="bi bi-folder2"></i>
-          대시보드
+          프로젝트
         </router-link>
         <router-link to="/usage" class="admin-nav-item" :class="{ 'is-active': $route.path.startsWith('/usage') }" @click="closeSidebarOnMobile">
           <i class="bi bi-bar-chart"></i>
           사용량
+        </router-link>
+        <router-link to="/profile" class="admin-nav-item" :class="{ 'is-active': $route.path.startsWith('/profile') }" @click="closeSidebarOnMobile">
+          <i class="bi bi-person"></i>
+          프로필
+        </router-link>
+        <router-link to="/keys" class="admin-nav-item" :class="{ 'is-active': $route.path.startsWith('/keys') }" @click="closeSidebarOnMobile">
+          <i class="bi bi-key"></i>
+          인증키 관리
+        </router-link>
+        <router-link v-if="isAdmin" to="/admin/users" class="admin-nav-item" :class="{ 'is-active': $route.path.startsWith('/admin/users') }" @click="closeSidebarOnMobile">
+          <i class="bi bi-people"></i>
+          사용자 관리
         </router-link>
       </nav>
 
@@ -69,7 +81,7 @@
     <nav class="admin-tabbar d-lg-none" role="navigation" aria-label="하단 탭 내비게이션">
       <router-link to="/" class="admin-tab-item" :class="{ 'is-active': $route.path === '/' }">
         <i class="bi bi-folder2"></i>
-        <span>대시보드</span>
+        <span>프로젝트</span>
       </router-link>
       <router-link to="/usage" class="admin-tab-item" :class="{ 'is-active': $route.path.startsWith('/usage') }">
         <i class="bi bi-bar-chart"></i>
@@ -105,11 +117,17 @@ export default {
     },
     breadcrumbs() {
       const p = this.$route.path
-      if (p === '/') return [{ label: '대시보드' }]
-      if (p.match(/^\/projects\/[^/]+/)) return [{ label: '대시보드', to: '/' }, { label: this.$route.params?.id || '프로젝트 상세' }]
+      if (p === '/') return [{ label: '프로젝트' }]
+      if (p.match(/^\/projects\/[^/]+/)) return [{ label: '프로젝트', to: '/' }, { label: this.$route.params?.id || '프로젝트 상세' }]
       if (p.startsWith('/usage')) return [{ label: '사용량' }]
       if (p.startsWith('/pair')) return [{ label: '기기 연결' }]
+      if (p.startsWith('/profile')) return [{ label: '프로필' }]
+      if (p.startsWith('/keys')) return [{ label: '인증키 관리' }]
+      if (p.startsWith('/admin/users')) return [{ label: '사용자 관리' }]
       return [{ label: '' }]
+    },
+    isAdmin() {
+      return this.user?.role === 'administrator'
     },
   },
   async mounted() {

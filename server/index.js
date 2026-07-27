@@ -9,6 +9,7 @@ import authRouter from './api/auth.js'
 import devicesRouter from './api/devices.js'
 import projectsRouter, { repositories as repositoriesRouter } from './api/projects.js'
 import eventsRouter from './api/events.js'
+import adminUsersRouter from './api/admin-users.js'
 
 const webApp = new Hono()
 
@@ -20,6 +21,7 @@ webApp.route('/api/devices', devicesRouter)
 webApp.route('/api/projects', projectsRouter)
 webApp.route('/api/projects', eventsRouter)
 webApp.route('/api/repositories', repositoriesRouter)
+webApp.route('/api/admin/users', adminUsersRouter)
 
 webApp.get('/api/health', (c) => c.json({ ok: true }))
 

@@ -60,6 +60,20 @@ export async function sha256Hex(raw) {
 }
 
 // ---------------------------------------------------------------------------
+// 관리자 신규 계정 생성 시 임시 비밀번호(사람이 읽고 옮겨적기 쉬운 형태) — 응답에 1회만 노출.
+// 혼동되는 문자(0/O, 1/l/I 등) 제외한 32자 세트, crypto.getRandomValues 기반.
+// ---------------------------------------------------------------------------
+const TEMP_PASSWORD_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789'
+const TEMP_PASSWORD_LENGTH = 14
+
+export function generateTempPassword() {
+  const bytes = crypto.getRandomValues(new Uint8Array(TEMP_PASSWORD_LENGTH))
+  let out = ''
+  for (const b of bytes) out += TEMP_PASSWORD_CHARS[b % TEMP_PASSWORD_CHARS.length]
+  return out
+}
+
+// ---------------------------------------------------------------------------
 // JWT (jose, HS256) — 웹 로그인 access token
 // ---------------------------------------------------------------------------
 export const JWT_ISSUER = 'malgnai-hub'

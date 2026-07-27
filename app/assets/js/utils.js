@@ -295,3 +295,70 @@ function parseJsonArray(raw) {
     return []
   }
 }
+
+/** users.role(schema.sql §3.1): employee/administrator. */
+function userRoleMeta(role) {
+  const M = {
+    employee: { label: '직원', cls: 'bg-secondary' },
+    administrator: { label: '관리자', cls: 'bg-primary' },
+  }
+  return M[role] || { label: role || '-', cls: 'bg-secondary' }
+}
+
+/** users.status(schema.sql §3.1): active/disabled. */
+function userStatusMeta(status) {
+  return status === 'disabled'
+    ? { label: '비활성', cls: 'bg-secondary' }
+    : { label: '활성', cls: 'bg-success' }
+}
+
+/** device_tokens.status(schema.sql §3.8): active/revoked. */
+function deviceStatusMeta(status) {
+  return status === 'revoked'
+    ? { label: '폐기됨', cls: 'bg-secondary' }
+    : { label: '활성', cls: 'bg-success' }
+}
+
+/**
+ * 문자열 콘텐츠를 파일로 즉시 다운로드시킨다(Blob URL 패턴 — 트리거 즉시 해제해 누수 방지).
+ * @param {string} filename
+ * @param {string} content
+ * @param {string} mime
+ */
+function downloadTextFile(filename, content, mime = 'application/json') {
+  const blob = new Blob([content], { type: mime })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * 클립보드 복사. Clipboard API 우선, 실패(권한 거부/비보안 컨텍스트) 시 textarea+execCommand로 폴백.
+ * @param {string} text
+ * @returns {Promise<boolean>} 성공 여부
+ */
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      ta.remove()
+      return true
+    } catch {
+      return false
+    }
+  }
+}

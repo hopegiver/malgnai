@@ -2,7 +2,10 @@
 import { Hono } from 'hono'
 import * as usersDao from '../dao/users.js'
 import * as refreshTokensDao from '../dao/refresh-tokens.js'
-import { verifyPassword, signAccessToken, generateOpaqueToken, sha256Hex, REFRESH_TOKEN_TTL_SECONDS, REUSE_GRACE_MS } from '../lib/tokens.js'
+import { verifyPassword, hashPassword, signAccessToken, generateOpaqueToken, sha256Hex, REFRESH_TOKEN_TTL_SECONDS, REUSE_GRACE_MS } from '../lib/tokens.js'
+
+const NAME_MAX_LENGTH = 100
+const NEW_PASSWORD_MIN_LENGTH = 12
 
 const auth = new Hono()
 
@@ -85,6 +88,57 @@ auth.get('/me', async (c) => {
   const user = await usersDao.findById(c.env.DB, c.get('userId'))
   if (!user) return c.json({ error: { code: 'NOT_FOUND', message: 'user not found' } }, 404)
   return c.json({ id: user.id, email: user.email, name: user.name, role: user.role, status: user.status })
+})
+
+// PATCH /api/auth/me — 본인 name만 수정 가능. email/role/status는 이 엔드포인트로 불가
+// (role/status는 administrator 전용 /api/admin/users/:id로만, email 변경 자체는 v1 범위 밖).
+auth.patch('/me', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  if (typeof body.name !== 'string') {
+    return c.json({ error: { code: 'VALIDATION_ERROR', message: 'name is required' } }, 400)
+  }
+  const name = body.name.trim()
+  if (!name) {
+    return c.json({ error: { code: 'VALIDATION_ERROR', message: 'name must not be empty' } }, 400)
+  }
+  if (name.length > NAME_MAX_LENGTH) {
+    return c.json({ error: { code: 'VALIDATION_ERROR', message: `name must be at most ${NAME_MAX_LENGTH} characters` } }, 400)
+  }
+
+  const userId = c.get('userId')
+  await usersDao.updateName(c.env.DB, userId, name)
+  const updated = await usersDao.findById(c.env.DB, userId)
+  return c.json({ id: updated.id, email: updated.email, name: updated.name, role: updated.role, status: updated.status })
+})
+
+// POST /api/auth/change-password — 본인 비밀번호 변경. 성공 시 이 유저의 모든 refresh_token을
+// revoke_reason='logout'으로 폐기(다른 세션/디바이스 강제 로그아웃 — 재사용 grace window 대상
+// 아님, 'rotated'가 아니므로 auth.js POST /refresh의 grace 로직을 타지 않는다). 지금 쓰던 access
+// token은 자연 만료(최대 4h, ACCESS_TOKEN_TTL_SECONDS)까지는 유효 — 의도된 단순화.
+auth.post('/change-password', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const currentPassword = typeof body.currentPassword === 'string' ? body.currentPassword : ''
+  const newPassword = typeof body.newPassword === 'string' ? body.newPassword : ''
+  if (!currentPassword || !newPassword) {
+    return c.json({ error: { code: 'VALIDATION_ERROR', message: 'currentPassword and newPassword are required' } }, 400)
+  }
+  if (newPassword.length < NEW_PASSWORD_MIN_LENGTH) {
+    return c.json({ error: { code: 'VALIDATION_ERROR', message: `newPassword must be at least ${NEW_PASSWORD_MIN_LENGTH} characters` } }, 400)
+  }
+
+  const userId = c.get('userId')
+  const user = await usersDao.findById(c.env.DB, userId)
+  if (!user) return c.json({ error: { code: 'NOT_FOUND', message: 'user not found' } }, 404)
+
+  if (!(await verifyPassword(currentPassword, user.password_hash))) {
+    return c.json({ error: { code: 'UNAUTHORIZED', message: 'current password is incorrect' } }, 401)
+  }
+
+  const newHash = await hashPassword(newPassword)
+  await usersDao.updatePasswordHash(c.env.DB, userId, newHash)
+  await refreshTokensDao.revokeAllForUser(c.env.DB, userId, 'logout')
+
+  return c.json({ status: 'password_changed' })
 })
 
 export default auth
