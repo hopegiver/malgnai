@@ -1,43 +1,41 @@
 # STATUS — malgnai-hub
-_최종 갱신: 2026-07-27 — WBS(`wbs_items`) v1 반영 확정(3자 토론 후 대표 정정으로 편입, MCP 도구 6→10개, architecture.md §0 결정20)._
+_최종 갱신: 2026-07-27 — v1(1단계 전체+2단계 스키마) 구현 완료, https://malgnai-hub.malgnsoft.workers.dev 실배포 및 스모크 테스트 통과._
 <!-- malgnai-mcp project_id: 693caed1-0d3d-4819-b787-75baa829bb80 -->
 
 > **malgnai-hub** = **"맑은소프트 공통 프로젝트 메모리 MCP + 대시보드"** — 프로젝트 운영 이벤트 허브이자 Claude Code 플러그인의 조직 학습 시스템. 회사 전 직원이 공유하는 공통 MCP로 프로젝트별 작업이력·결정·이슈·상태를 Cloudflare D1에 축적하고, 웹 대시보드로 본인 작업이력·토큰/세션 사용량을 조회한다.
-> ⚠️ **2026-07-27 전환**: 이 저장소는 예전엔 private malgnai("1인 AI 자율 프로젝트 운영 플랫폼")의 배포판 미러(`bin/build-public-dist.sh` 1방향 덮어쓰기)였으나, 이제 완전히 새 제품 전용이다. 그 스크립트(또는 이를 호출하는 동기화 스크립트)를 이 저장소에 다시는 실행하지 말 것.
 > **새 세션은 이 파일 + `CLAUDE.md`면 오리엔테이션 충분.** 깊은 설계 판단은 `docs/architecture.md`(§0 핵심 결정)·`docs/schema.sql`·`docs/mcp-tools.md`·`docs/api.md`가 정본. **상황 파악하려고 코드/docs 통독 금지.**
 > 이 파일이 malgnai-hub 진행 상태의 **단일 소스**다. 착수 전 읽고, 상태가 바뀌면 끝내기 전 갱신한다.
 > **길이 규칙(전역 지침):** 완료 항목은 **1줄 요약(+MCP id)**, 완료 섹션은 **최근 5~7개만** 유지. **헤더 라인은 매번 통째로 교체**(과거 세션 "직전:" 체이닝 절대 금지). 상세는 STATUS.md에 쓰지 말고 MCP(`decision_add`/`memory_add`/`issue_add`)에 남긴다. 과거 이력은 `get_current_context`/`memory_search`로 조회.
 
 ## 🟢 현재 라이브 상태
 
-- **v1 범위 확정(1단계+2단계만)**: idea.md §25 로드맵 중 프로젝트 메모리 MCP(1단계)+세션/토큰 통계(2단계)까지만 v1. MCP 도구는 `get_my_guidance`를 제외한 10개(WBS 4종 포함) 등록 예정. 3단계(직원 가이드)·4단계(조직학습)는 스키마 초안만 문서화하고 실사용 데이터가 쌓인 뒤 재검토(decision `6100c11a`).
-- **WBS(`wbs_items`) v1 편입**: "여러 사람이 같이 보는 협업 도구"라는 잘못된 전제로 논쟁이 커졌으나, 대표가 "project_id 종속 개인 작업계획(AI 연속성+진행률 파악용)"이라 정정하면서 접근권한 리스크가 소멸 — decisions/issues/works와 동일 스코핑의 4번째 테이블로 바로 편입(decision `9c9321b6`).
-- **아키텍처 확정 완료**: 단일 Cloudflare Worker(MCP+API+Queue Consumer를 라우트로 분리) + `agents` SDK `McpAgent`(Durable Object) + D1. organizations/project_members 테이블 제거, `projects.user_id` 직접소유+`repositories` 신규, `project_events` 통합 이벤트소싱을 폐기하고 `decisions`/`issues`/`works` 3분리 테이블로 확정. 텔레메트리 수집은 이 저장소가 아니라 외부 OTel Collector가 담당(decision `dfb4e7c4`/`28f6b694`/`74e35446`/`f0629f4d`).
-- **정본 문서 4종 분리 확정**: `docs/architecture.md`(핵심 결정+설계 근거)/`schema.sql`(D1 정의)/`mcp-tools.md`(MCP 10종 명세)/`api.md`(REST 명세).
-- **⚠️ `docs/`가 `.gitignore` 대상**(`.gitignore:20`) — architecture.md 등 정본 문서 전부가 git 추적 밖에 있다. 의도된 것인지 후속 확인 필요.
-- **레거시 정리 진행 중, 커밋 대기**: `bin/`·`engine/` 삭제는 스테이징만 됐고 아직 커밋 전(백업 `~/workspace/malgnai-public-legacy-backup-20260727.tar.gz`). `CLAUDE.md` 전면 교체도 워킹트리에 반영됐으나 미커밋. `server/`·`app/`·`mcp/`·`migrations/`·루트 `schema.sql`은 옛 1인용 구현체로 신제품 코드가 아니다 — 조만간 신제품 코드로 전면 교체·제거 예정(CLAUDE.md "레거시 코드 안내" 참고).
-- **구현 코드는 아직 착수 전**: 저장소 루트 `wrangler.jsonc`(Worker+D1+DO+Queue 바인딩)만 스캐폴딩됐고, v1 실제 구현 순서(architecture.md §9.3)의 1번(D1 마이그레이션)부터가 다음 단계. `app/`·`server/`·`mcp/`·`migrations/`는 옛 1인용 구현체가 그대로 남아있고, 이 저장소 하나에서 웹(`app/`)·API(`server/`)·MCP(`mcp/`)를 모두 만드는 구조로 실제 구현 착수 시 교체된다(별도 하위 프로젝트 폴더로 감싸지 않음, architecture.md §2.1).
+- **v1 실배포 완료**: `https://malgnai-hub.malgnsoft.workers.dev` (Cloudflare Worker 단일, D1 `malgnai-hub` database_id `03e447c3-7080-47ca-8b1e-876bba84e3ab`). `app/`은 별도 Pages 대신 Worker 정적 자산(assets) 바인딩으로 같은 URL에서 서빙(`/api/*`·`/mcp*`만 `run_worker_first`로 Worker 강제 라우팅) — architecture.md §1/§9.2의 Pages 분리안에서 벗어난 결정(decision `7165ccd5`).
+- **구현 범위**: architecture.md §9.3 순서 1~5 전부 + sessions/usage_daily 스키마(POST /api/sessions·사용량 화면 실구현은 미착수, 2단계 후반부 백로그). JWT(4h)+refresh(30일 회전형, 재사용 grace window 10초) 로그인, 디바이스 페어링, MCP 10개 도구(mcp/agent.js, McpAgent/DO), REST 읽기 API(projects/decisions/issues/works/wbs), app/ 웹 화면(로그인/대시보드/프로젝트상세/페어링승인/사용량) — 전부 배포된 URL에서 스모크 테스트 통과(로그인→REST, 디바이스페어링→MCP tools/list→record_work 쓰기→REST 재조회→디바이스 폐기 즉시 차단).
+- **administrator 계정 시드 완료**: `dev@malgnsoft.com` / role=administrator. 임시 비밀번호는 대표에게 이 세션 대화로 별도 전달(STATUS.md/git에는 없음) — 최초 로그인 후 비밀번호 변경 API가 아직 없으니(REST 읽기 API만 v1 범위) 3단계 이전에라도 추가 필요.
+- **사내 private malgnai 프로젝트를 검증된 참고자료로 활용**: DAO 레이어가 D1 호환 어댑터 패턴으로 이미 짜여 있어 대조가 쉬웠고, 대조 중 실사용 버그 2건 발견·수정(vue-zero.js JWT base64url 디코딩 버그, refresh token 재사용 grace window 누락) — decision `330e54a2`, issue `92dc5d43`(해결)/`18a07e45`(해결).
+- **v1 범위 확정 그대로 유지**: idea.md §25 로드맵 중 1단계+2단계까지만. MCP 도구는 `get_my_guidance` 제외 10개(WBS 4종 포함). 3단계(직원 가이드)·4단계(조직학습)는 스키마 초안만 문서화, 실사용 데이터 쌓인 뒤 재검토(decision `6100c11a`).
+- **⚠️ `docs/`가 `.gitignore` 대상**(`.gitignore:20`, 의도된 설계 — "문서 창고, git 추적 제외" 주석 확인됨) — architecture.md 등 정본 문서는 로컬에만 있고 원격 저장소엔 없다. 새 환경(다른 macOS 사용자·CI)에서 이어받으려면 이 로컬 디스크의 docs/를 별도로 전달해야 한다.
 
 ## ✅ 최근 완료 (상세=MCP decision id)
 
-- **[07-27] WBS(`wbs_items`) v1 반영 확정** — 3자 토론(architect/planner/reviewer) 후 대표 정정으로 협업 리스크 전제 소멸, MCP 도구 6→10개 — decision `9c9321b6`.
-- **[07-27] 저장소를 신제품 전용으로 전환** — CLAUDE.md 전면 교체, docs/idea.md 정본 채택. decision `fded5b8f`.
-- **[07-27] v1 범위(1+2단계) 확정 + MCP 도구 6종 확정**(`get_my_guidance` 미등록) — decision `6100c11a`.
+- **[07-27] v1 실배포 + 스모크 테스트 통과** — 위 "현재 라이브 상태" 참고. WBS `204dd008`(s10) 등 전체 WBS는 `wbs_list`로 조회.
+- **[07-27] 사내 malgnai 소스 대조로 실사용 버그 2건 발견·수정** — decision `330e54a2`.
+- **[07-27] app/를 Worker assets 바인딩으로 단일 배포 결정** — decision `7165ccd5`.
+- **[07-27] 레거시 정리 커밋(`bin/`·`engine/`·옛 `migrations/`·루트 `schema.sql` 삭제, CLAUDE.md 교체)** — commit `9993594`.
+- **[07-27] WBS(`wbs_items`) v1 반영 확정** — MCP 도구 6→10개 — decision `9c9321b6`.
 - **[07-27] 아키텍처 확정 — 단일 Worker+McpAgent(DO)+D1 스키마** — decision `dfb4e7c4`.
-- **[07-27] organizations/project_members 제거, `projects.user_id` 직접소유+`repositories` 신설** — decision `28f6b694`.
-- **[07-27] `project_events` 이벤트소싱 폐기 → decisions/issues/works 3분리 회귀** — decision `74e35446`.
-- **[07-27] 텔레메트리 수집을 외부 OTel Collector 담당으로 재설계** — decision `f0629f4d`.
 - _그 이전(옛 private malgnai 이력)은 이 저장소 범위 밖 — 필요 시 malgnai(private) 프로젝트 쪽 `get_current_context`/`memory_search`로 조회._
 
 ## 🚧 차단 없는 백로그 (비차단)
 
-- v1 구현 착수: D1 마이그레이션(architecture.md §9.3 순서 1) → 웹 로그인 → 디바이스 페어링 → MCP 10종 도구.
-- `docs/`가 `.gitignore` 대상인 이유 확인 — 정본 문서가 버전관리 밖에 있는 게 의도된 것인지.
-- `bin/`·`engine/` 삭제 + `CLAUDE.md` 교체 커밋(사용자 확인 대기).
+- 2단계 후반부: `POST /api/sessions`(OTel Collector 연동) + 사용량 웹 화면 실데이터 연결(화면 뼈대는 이미 있음, mock 없이 빈 상태만 확인됨).
+- administrator 비밀번호 변경 API(현재 REST는 읽기 전용이라 없음) — 시드 임시 비밀번호를 대표가 계속 쓰게 두지 않으려면 우선순위 높음.
+- `docs/api.md`에 wbs 라우트(`GET /api/projects/:id/wbs`)와 디바이스 페어링 3종 라우트가 누락돼 있음 — 문서 갱신 필요(구현은 이미 반영됨).
+- `docs/`가 git 추적 밖이라 원격에는 정본 문서가 없음 — 다른 머신에서 이어받을 계획이 있으면 docs/ 전달 방법을 정해야 함.
 
 ## 📌 핵심 메모
 
 - **상태=STATUS.md 한 줄 / 상세=MCP** — 이중기록 아니라 역할 분담. 헤더 라인은 절대 "직전:"으로 체이닝하지 않는다.
 - **이 프로젝트의 malgnai-mcp project_id는 `693caed1-0d3d-4819-b787-75baa829bb80`** — 옛 private malgnai project_id(`b00eaa81...`)와 혼동 금지(memory `84a8b4fb`).
-- **레거시 코드(`server/`·`app/`·`mcp/`·`migrations/`·루트 `schema.sql`)는 신제품 아키텍처가 아니다** — 참고 자료로만 쓰고, 아키텍처 판단은 반드시 `docs/architecture.md` 등 정본 문서 기준.
-- **패키지 매니저는 pnpm만**(전역 규칙, npm/yarn 금지).
+- **패키지 매니저는 pnpm만**(전역 규칙, npm/yarn 금지). `pnpm-workspace.yaml`은 모노레포 설정이 아니라 `pnpm approve-builds`가 만든 네이티브 postinstall 승인 파일(esbuild/workerd/core-js-pure)일 뿐이니 지우지 말 것.
+- **Cloudflare 계정은 info@malgnsoft.com**(wrangler OAuth 로그인 상태), workers.dev 서브도메인은 `malgnsoft`로 이미 등록됨.
