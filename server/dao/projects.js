@@ -1,21 +1,23 @@
 // projects 테이블 DAO — user_id 직접 소유, project_members 없음(architecture.md §0-9).
 import { newId } from '../lib/ulid.js'
 
-/** (userId, repository.id)로 get-or-create — 없으면 그 사용자의 신규 project 1개를 생성(§4.1/§4.2). */
-export async function getOrCreateForUser(db, userId, repository) {
+/** (userId, repository.id)로 get-or-create — 없으면 그 사용자의 신규 project 1개를 생성(§4.1/§4.2).
+ *  name은 최초 생성 시에만 사용(없으면 repository.name), 이미 존재하면 무시(bootstrap_project §4.11과 동일 원칙). */
+export async function getOrCreateForUser(db, userId, repository, name) {
   const existing = await db.prepare('SELECT * FROM projects WHERE user_id = ? AND repository_id = ?')
     .bind(userId, repository.id).first()
   if (existing) return existing
 
   const id = newId()
   const now = new Date().toISOString()
+  const finalName = name || repository.name
   try {
     await db.prepare(
       `INSERT INTO projects (id, user_id, repository_id, project_key, name, status, classification, created_at, updated_at)
        VALUES (?, ?, ?, NULL, ?, 'active', ?, ?, ?)`
-    ).bind(id, userId, repository.id, repository.name, repository.classification, now, now).run()
+    ).bind(id, userId, repository.id, finalName, repository.classification, now, now).run()
     return {
-      id, user_id: userId, repository_id: repository.id, project_key: null, name: repository.name,
+      id, user_id: userId, repository_id: repository.id, project_key: null, name: finalName,
       status: 'active', classification: repository.classification, created_at: now, updated_at: now
     }
   } catch (e) {

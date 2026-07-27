@@ -1,4 +1,4 @@
-// MalgnMcpAgent — McpAgent(Durable Object) 서브클래스, MCP 도구 10개 등록(docs/mcp-tools.md 정본).
+// MalgnMcpAgent — McpAgent(Durable Object) 서브클래스, MCP 도구 11개 등록(docs/mcp-tools.md 정본).
 // 인증 컨텍스트는 this.props(deviceAuthMiddleware가 주입, architecture.md §6.2)에서 얻는다 —
 // 클라이언트가 보내는 userId는 절대 신뢰하지 않는다(idea.md §12.3). 매 호출마다 D1을 직접 조회하고
 // state/storage에 업무데이터를 이중 저장하지 않는다(architecture.md §0 결정2).
@@ -14,6 +14,7 @@ import { recordIssue } from '../server/lib/issues.js'
 import { updateState } from '../server/lib/project-state.js'
 import { searchProjectHistory } from '../server/lib/search.js'
 import * as wbsLib from '../server/lib/wbs.js'
+import { bootstrapProject } from '../server/lib/bootstrap.js'
 
 function textResult(obj) {
   return { content: [{ type: 'text', text: JSON.stringify(obj) }] }
@@ -306,6 +307,27 @@ export class MalgnMcpAgent extends McpAgent {
         try {
           const { project } = await this.resolveProject(repositoryKey)
           const out = await wbsLib.wbsUpdate(this.env.DB, { projectId: project.id, ...rest })
+          return textResult(out)
+        } catch (e) {
+          return errorResult(e)
+        }
+      }
+    )
+
+    this.server.registerTool(
+      'bootstrap_project',
+      {
+        description: '이 레포지토리를 malgnai-hub에 최초 등록(get-or-create)하고, 현재 컨텍스트(상태/결정/이슈/최근작업)를 조합해 프로젝트 루트 STATUS.md에 그대로 쓸 수 있는 마크다운(YAML frontmatter 포함)을 반환한다. 이미 등록된 프로젝트에 재호출해도 아무것도 덮어쓰지 않고 조회만 한다(멱등).',
+        inputSchema: {
+          repositoryKey: z.string().min(1),
+          repositoryName: z.string().optional(),
+          projectName: z.string().optional()
+        }
+      },
+      async ({ repositoryKey, repositoryName, projectName }) => {
+        try {
+          const userId = this.props.userId
+          const out = await bootstrapProject(this.env.DB, userId, { repositoryKey, repositoryName, projectName })
           return textResult(out)
         } catch (e) {
           return errorResult(e)
