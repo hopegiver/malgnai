@@ -1,5 +1,5 @@
 # STATUS — malgnai-hub
-_최종 갱신: 2026-07-27 — v1(1단계 전체+2단계 스키마) 구현 완료, https://malgnai-hub.malgnsoft.workers.dev 실배포 및 스모크 테스트 통과._
+_최종 갱신: 2026-07-27 — 계정관리(프로필/비밀번호변경/관리자 사용자관리/인증키·.mcp.json) 화면 추가 배포, https://malgnai-hub.malgnsoft.workers.dev 실배포 유지 중._
 <!-- malgnai-mcp project_id: 693caed1-0d3d-4819-b787-75baa829bb80 -->
 
 > **malgnai-hub** = **"맑은소프트 공통 프로젝트 메모리 MCP + 대시보드"** — 프로젝트 운영 이벤트 허브이자 Claude Code 플러그인의 조직 학습 시스템. 회사 전 직원이 공유하는 공통 MCP로 프로젝트별 작업이력·결정·이슈·상태를 Cloudflare D1에 축적하고, 웹 대시보드로 본인 작업이력·토큰/세션 사용량을 조회한다.
@@ -18,10 +18,10 @@ _최종 갱신: 2026-07-27 — v1(1단계 전체+2단계 스키마) 구현 완�
 
 ## ✅ 최근 완료 (상세=MCP decision id)
 
-- **[07-27] v1 실배포 + 스모크 테스트 통과** — 위 "현재 라이브 상태" 참고. WBS `204dd008`(s10) 등 전체 WBS는 `wbs_list`로 조회.
+- **[07-27] 계정관리 라운드 배포** — 프로필/비밀번호변경/관리자 사용자관리(GET·POST·PATCH /api/admin/users, 마지막관리자 보호)/인증키(디바이스) 관리+.mcp.json 복사·다운로드. 실 URL 스모크 테스트 통과, commit `9870af9`. MCP 인증 OAuth 도입은 이번엔 보류 — decision `bfc11390`.
+- **[07-27] v1 실배포 + 스모크 테스트 통과** — 위 "현재 라이브 상태" 참고. 전체 WBS는 `wbs_list`로 조회.
 - **[07-27] 사내 malgnai 소스 대조로 실사용 버그 2건 발견·수정** — decision `330e54a2`.
 - **[07-27] app/를 Worker assets 바인딩으로 단일 배포 결정** — decision `7165ccd5`.
-- **[07-27] 레거시 정리 커밋(`bin/`·`engine/`·옛 `migrations/`·루트 `schema.sql` 삭제, CLAUDE.md 교체)** — commit `9993594`.
 - **[07-27] WBS(`wbs_items`) v1 반영 확정** — MCP 도구 6→10개 — decision `9c9321b6`.
 - **[07-27] 아키텍처 확정 — 단일 Worker+McpAgent(DO)+D1 스키마** — decision `dfb4e7c4`.
 - _그 이전(옛 private malgnai 이력)은 이 저장소 범위 밖 — 필요 시 malgnai(private) 프로젝트 쪽 `get_current_context`/`memory_search`로 조회._
@@ -29,9 +29,9 @@ _최종 갱신: 2026-07-27 — v1(1단계 전체+2단계 스키마) 구현 완�
 ## 🚧 차단 없는 백로그 (비차단)
 
 - 2단계 후반부: `POST /api/sessions`(OTel Collector 연동) + 사용량 웹 화면 실데이터 연결(화면 뼈대는 이미 있음, mock 없이 빈 상태만 확인됨).
-- administrator 비밀번호 변경 API(현재 REST는 읽기 전용이라 없음) — 시드 임시 비밀번호를 대표가 계속 쓰게 두지 않으려면 우선순위 높음.
-- `docs/api.md`에 wbs 라우트(`GET /api/projects/:id/wbs`)와 디바이스 페어링 3종 라우트가 누락돼 있음 — 문서 갱신 필요(구현은 이미 반영됨).
 - `docs/`가 git 추적 밖이라 원격에는 정본 문서가 없음 — 다른 머신에서 이어받을 계획이 있으면 docs/ 전달 방법을 정해야 함.
+- Claude Code 플러그인(회사 공통 배포용) 자체는 이 저장소 범위 밖 — 지금은 `/keys` 화면에서 수동 발급한 `.mcp.json`을 직접 붙여넣는 방식으로만 MCP 연결 가능.
+- MCP 인증 OAuth 병행 도입은 claude.ai 원격 연동 요구가 실제로 생기면 재검토(decision `bfc11390`).
 
 ## 📌 핵심 메모
 
