@@ -5,6 +5,13 @@
   "compatibility_date": "2026-07-01",
   "compatibility_flags": ["nodejs_compat"],
 
+  // `agents` 패키지가 AIChatAgent 경로에서 선택적으로 동적 import하는 "ai"(Vercel AI SDK)를
+  // no-op 스텁으로 치환 — 이 프로젝트는 McpAgent를 순수 MCP 서버로만 쓰고 그 경로를 호출하지
+  // 않는다(server/stubs/ai-noop.js 주석 참고). 미설치 상태에서 빌드가 깨지는 것만 막는 용도.
+  "alias": {
+    "ai": "./server/stubs/ai-noop.js"
+  },
+
   "durable_objects": {
     "bindings": [
       { "name": "MCP_AGENT", "class_name": "MalgnMcpAgent" }
@@ -18,11 +25,21 @@
     {
       "binding": "DB",
       "database_name": "malgnai-hub",
-      // wrangler d1 create malgnai-hub 실행 후 반환되는 id로 교체
-      "database_id": "...",
+      "database_id": "03e447c3-7080-47ca-8b1e-876bba84e3ab",
       "migrations_dir": "./migrations"
     }
   ],
+
+  // app/(SPA)을 별도 Pages 배포 대신 Worker 정적 자산 바인딩으로 단일 배포(대표 지시,
+  // architecture.md §1/§9.2의 별도 Pages안에서 벗어난 v1 결정 — decision_add로 기록).
+  // /api/*·/mcp*는 정적 파일 매칭 여부와 무관하게 항상 Worker(server/index.js)로 먼저 라우팅하고,
+  // 나머지 경로는 정적 자산을 서빙하다가 매칭 실패 시 index.html로 폴백(SPA 클라이언트 라우팅).
+  "assets": {
+    "directory": "./app",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/mcp*"]
+  },
 
   "observability": {
     "enabled": true

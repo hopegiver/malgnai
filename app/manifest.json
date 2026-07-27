@@ -1,7 +1,7 @@
 {
-  "name": "malgnai · 자율 프로젝트 운영",
-  "short_name": "malgnai",
-  "description": "AI 자율 프로젝트 운영 플랫폼. 에이전트가 당신의 프로젝트를 자동으로 진행합니다.",
+  "name": "malgnai-hub · 프로젝트 메모리",
+  "short_name": "malgnai-hub",
+  "description": "맑은소프트 공통 프로젝트 메모리 MCP + 대시보드. 프로젝트별 작업이력·결정·이슈·상태와 세션/토큰 사용량을 조회합니다.",
   "start_url": "/?pwa=1",
   "scope": "/",
   "display": "standalone",
@@ -28,70 +28,20 @@
       "purpose": "maskable"
     }
   ],
-  "screenshots": [
-    {
-      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 540 720'%3E%3Crect width='540' height='720' fill='%23F8F9FC'/%3E%3Crect width='540' height='80' fill='%235B6AF5'/%3E%3Ctext x='270' y='50' font-size='32' font-weight='700' fill='white' text-anchor='middle' font-family='system-ui'%3Emalgnai%3C/text%3E%3C/svg%3E",
-      "sizes": "540x720",
-      "type": "image/svg+xml",
-      "form_factor": "narrow"
-    },
-    {
-      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'%3E%3Crect width='1280' height='720' fill='%23F8F9FC'/%3E%3Crect width='1280' height='80' fill='%235B6AF5'/%3E%3Ctext x='640' y='50' font-size='48' font-weight='700' fill='white' text-anchor='middle' font-family='system-ui'%3Emalgnai · 자율 프로젝트 운영%3C/text%3E%3C/svg%3E",
-      "sizes": "1280x720",
-      "type": "image/svg+xml",
-      "form_factor": "wide"
-    }
-  ],
   "categories": ["productivity", "business"],
   "shortcuts": [
     {
-      "name": "프로젝트",
-      "short_name": "프로젝트",
-      "description": "프로젝트 목록으로 이동",
-      "url": "/projects",
+      "name": "사용량",
+      "short_name": "사용량",
+      "description": "세션/토큰 사용량 확인",
+      "url": "/usage",
       "icons": [
         {
-          "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Crect width='96' height='96' fill='%235B6AF5'/%3E%3Ctext x='48' y='65' font-size='48' font-weight='700' fill='white' text-anchor='middle' font-family='system-ui'%3EP%3C/text%3E%3C/svg%3E",
-          "sizes": "96x96",
-          "type": "image/svg+xml"
-        }
-      ]
-    },
-    {
-      "name": "승인함",
-      "short_name": "승인함",
-      "description": "승인 대기 중인 작업 확인",
-      "url": "/approvals",
-      "icons": [
-        {
-          "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Crect width='96' height='96' fill='%2310B981'/%3E%3Ctext x='48' y='65' font-size='48' font-weight='700' fill='white' text-anchor='middle' font-family='system-ui'%3E✓%3C/text%3E%3C/svg%3E",
-          "sizes": "96x96",
-          "type": "image/svg+xml"
-        }
-      ]
-    },
-    {
-      "name": "활동",
-      "short_name": "활동",
-      "description": "활동 로그 확인",
-      "url": "/activities",
-      "icons": [
-        {
-          "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Crect width='96' height='96' fill='%235B6AF5'/%3E%3Ctext x='48' y='65' font-size='48' font-weight='700' fill='white' text-anchor='middle' font-family='system-ui'%3EA%3C/text%3E%3C/svg%3E",
+          "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Crect width='96' height='96' fill='%235B6AF5'/%3E%3Ctext x='48' y='65' font-size='48' font-weight='700' fill='white' text-anchor='middle' font-family='system-ui'%3EU%3C/text%3E%3C/svg%3E",
           "sizes": "96x96",
           "type": "image/svg+xml"
         }
       ]
     }
-  ],
-  "share_target": {
-    "action": "/share",
-    "method": "POST",
-    "enctype": "multipart/form-data",
-    "params": {
-      "title": "title",
-      "text": "text",
-      "url": "url"
-    }
-  }
+  ]
 }

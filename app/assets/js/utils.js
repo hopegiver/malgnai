@@ -1,24 +1,27 @@
 /**
- * utils.js — 전역 유틸 함수 모음
+ * utils.js — 전역 유틸 함수 모음 (malgnai-hub)
  * index.html에서 <script src="/assets/js/utils.js"> 로 로드.
- * .vue 파일에서 import 없이 바로 사용.
+ * .vue 파일에서 import 없이 바로 사용(vue-zero Blob URL 패턴 — composables 금지, 공유 로직은
+ * 전부 이 파일의 전역 함수로 등록해 window.* 처럼 어디서나 호출). API 계약은 docs/api.md 정본.
  */
 
 /**
  * useApi — 범용 API fetch 헬퍼
  *
  * GET:
- *   const { data, error } = await useApi('/api/users')
+ *   const { data, error } = await useApi('/api/projects')
  *   if (error) { this.error = error; return }
- *   this.users = data.users
+ *   this.projects = data.data
  *
  * POST:
- *   const { data, error } = await useApi('/api/posts', {
+ *   const { data, error } = await useApi('/api/devices/pair-approve', {
  *     method: 'POST',
- *     body: { title: '제목', content: '내용' },
+ *     body: { pairing_code: code },
  *   })
  *
  * 인증 토큰은 localStorage.token 이 있으면 자동으로 Authorization 헤더에 추가됩니다.
+ * 에러 응답 계약(docs/api.md): { error: { code: 'SNAKE_CASE_CODE', message, details? } } —
+ * 이 함수는 실패 시 그 { code, message, details } 객체(또는 파싱 불가 시 문자열)를 error로 반환한다.
  */
 async function useApi(url, options = {}) {
   const { method = 'GET', body, _retried = false } = options
@@ -50,23 +53,21 @@ async function useApi(url, options = {}) {
     }
     return { data, error: null }
   } catch {
-    return { data: null, error: '네트워크 오류가 발생했습니다.' }
+    return { data: null, error: { code: 'NETWORK_ERROR', message: '네트워크 오류가 발생했습니다.' } }
   }
 }
 
 /**
  * refreshAccessToken — localStorage.refresh_token으로 새 access+refresh 쌍을 발급받는다.
  * useApi()를 쓰면 401 처리 로직과 순환참조 위험이 있어 raw fetch를 직접 사용.
- * refresh_token은 서버가 사용 즉시 폐기하는 회전(rotation) 방식이라, 응답으로 받은
- * 새 refresh_token으로 반드시 교체 저장한다(이전 값 재사용 시 다음 갱신은 401).
+ * refresh_token은 서버가 사용 즉시 폐기하는 회전(rotation) 방식이라(docs/api.md §5.1
+ * TOKEN_REUSED), 응답으로 받은 새 refresh_token으로 반드시 교체 저장한다.
  * 성공: localStorage.token/refresh_token 갱신 후 true. 실패: 둘 다 지우고 false.
  *
- * [in-flight dedup] index.html 부트 시 사전갱신, default.vue 5분 주기 타이머, useApi()의
- * 401 재시도가 거의 동시에 만료를 감지하면(예: PWA를 오래 후에 재오픈) 각자 refresh를
- * 호출해 같은 refresh_token으로 경쟁하게 된다 — 회전형이라 먼저 도착한 요청만 성공하고
- * 나머지는 401(invalid_refresh_token)로 불필요하게 로그아웃될 위험이 있다. 진행 중인
- * refresh가 있으면 새 요청을 만들지 않고 그 Promise를 공유해 실제 네트워크 호출은
- * 항상 최대 1개만 나가게 한다.
+ * [in-flight dedup] index.html 부트 시 사전갱신, default.vue 주기 타이머, useApi()의 401 재시도가
+ * 거의 동시에 만료를 감지하면 각자 refresh를 호출해 같은 refresh_token으로 경쟁하게 된다 —
+ * 회전형이라 먼저 도착한 요청만 성공하고 나머지는 401로 불필요하게 로그아웃될 위험이 있다.
+ * 진행 중인 refresh가 있으면 그 Promise를 공유해 실제 네트워크 호출은 항상 최대 1개만 나가게 한다.
  */
 let _refreshInFlight = null
 
@@ -112,40 +113,169 @@ async function refreshAccessToken() {
 }
 
 /**
- * 인증이 필요한 파일 다운로드. localStorage.token 을 Authorization 헤더에 실어
- * fetch → blob → 프로그램matic 클릭으로 저장한다.
- *
- * <a href download> 직접 링크는 브라우저 네비게이션이라 Authorization 헤더가 실리지
- * 않는다. Cloudflare 터널 경유 시 /api/* 는 JWT 필수라 헤더 없는 요청이 401 JSON 을
- * 반환하고, download 속성 때문에 그 JSON 이 파일로 저장되는 문제가 있었다.
- * 반환: { ok: true } | { ok: false, error }
+ * 로그아웃 — docs/api.md §5.1에는 login/refresh/me 3개뿐 별도 서버측 로그아웃(revoke) 라우트가
+ * 없으므로 로컬 토큰만 지우고 /login으로 이동한다(서버 호출 없음). refresh_token은 회전형이라
+ * 다음 사용 시도가 있으면 TOKEN_REUSED로 자연히 막히고, 그렇지 않으면 만료(30일)로 정리된다.
  */
-async function downloadFileAuth(url, filename) {
-  const headers = {}
-  const token = localStorage.getItem('token')
-  if (token) headers['Authorization'] = `Bearer ${token}`
-  try {
-    const res = await fetch(url, { headers })
-    if (!res.ok) {
-      if (res.status === 401) logout()
-      return { ok: false, error: `HTTP ${res.status}` }
-    }
-    const blob = await res.blob()
-    const objUrl = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = objUrl
-    a.download = filename || 'download'
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(objUrl)
-    return { ok: true }
-  } catch {
-    return { ok: false, error: '네트워크 오류가 발생했습니다.' }
+function logout() {
+  localStorage.removeItem('token')
+  localStorage.removeItem('refresh_token')
+  _currentUser = null
+  _currentUserPromise = null
+  const path = window.location.pathname + window.location.search
+  if (window.location.pathname !== '/login') {
+    const q = path && path !== '/' ? `?redirect=${encodeURIComponent(path)}` : ''
+    window.location.href = `/login${q}`
   }
 }
 
-/** 큰 수를 1.2M / 980K 식으로 축약(토큰·메시지 등). */
+/**
+ * decodeJwtPayload — JWT의 payload 세그먼트를 디코드한다.
+ * JWT는 RFC 7519상 base64url(문자 62/63번이 '-'/'_', 패딩 '=' 없음)로 인코딩되는데, 표준
+ * atob()는 base64(+, /)만 받아들여 '-'/'_'가 포함된 payload(한글 이름 등 UTF-8 바이트가
+ * 섞이면 흔히 발생)에서 예외를 던진다 — 실제로 이 프로젝트의 JWT는 backend가 `jose`로
+ * 발급하므로(package.json 의존성) 이 케이스가 실사용에서 재현된다. 반드시 이 헬퍼를 거쳐서만
+ * 디코드한다(atob 직접 호출 금지).
+ */
+function decodeJwtPayload(token) {
+  const seg = token.split('.')[1]
+  if (!seg) return null
+  let b64 = seg.replace(/-/g, '+').replace(/_/g, '/')
+  while (b64.length % 4) b64 += '='
+  return JSON.parse(atob(b64))
+}
+
+/** 현재 로그인 토큰의 payload 디코드(만료/형식오류면 null). JWT 클레임 상세는 서버 구현에 달려있어
+ * exp만 신뢰하고 그 외 필드(이름 등 표시용)는 getCurrentUser()(GET /api/auth/me)로 따로 조회한다. */
+function tokenPayload() {
+  try {
+    const t = localStorage.getItem('token')
+    if (!t) return null
+    const p = decodeJwtPayload(t)
+    if (!p || (p.exp && p.exp * 1000 <= Date.now())) return null
+    return p
+  } catch {
+    return null
+  }
+}
+
+/**
+ * getCurrentUser — GET /api/auth/me 캐시 래퍼. 레이아웃(default.vue)이 사용자명 표시를 위해
+ * 마운트마다 호출해도 실제 네트워크 요청은 세션당 1번만 나가도록 in-memory 캐시 + in-flight dedup.
+ * 로그인/로그아웃 시 반드시 무효화해야 하므로 logout()에서 직접 초기화한다.
+ */
+let _currentUser = null
+let _currentUserPromise = null
+
+async function getCurrentUser(force = false) {
+  if (force) {
+    _currentUser = null
+    _currentUserPromise = null
+  }
+  if (_currentUser) return _currentUser
+  if (_currentUserPromise) return _currentUserPromise
+
+  _currentUserPromise = (async () => {
+    const { data, error } = await useApi('/api/auth/me')
+    _currentUserPromise = null
+    if (error || !data) return null
+    // 응답 봉투 형태가 { data: {...} } 인지 최상위 사용자 객체인지 불확실해 둘 다 수용.
+    _currentUser = data.data ?? data.user ?? data
+    return _currentUser
+  })()
+  return _currentUserPromise
+}
+
+/** ISO 문자열 → 'YYYY-MM-DD HH:mm' (로컬 타임존). 파싱 실패/빈 값은 '-'. */
+function formatDate(iso) {
+  if (!iso) return '-'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '-'
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/** ISO 문자열 → 상대 시간(방금 전/N분 전/N시간 전/N일 전). 7일 이상은 절대 날짜로 표시. */
+function formatRelative(iso) {
+  if (!iso) return '-'
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return '-'
+  const diff = Date.now() - t
+  const min = Math.floor(diff / 60000)
+  if (min < 1) return '방금 전'
+  if (min < 60) return `${min}분 전`
+  const h = Math.floor(min / 60)
+  if (h < 24) return `${h}시간 전`
+  const d = Math.floor(h / 24)
+  if (d < 7) return `${d}일 전`
+  return formatDate(iso).slice(0, 10)
+}
+
+/**
+ * 도메인 enum → 배지 메타 매핑. base.css가 이미 시맨틱 컬러(success/warning/danger/info,
+ * WCAG AA 대비 검증됨, base.css:76~97 주석 참고)와 .badge.bg-* 클래스를 정의하고 있어
+ * 신규 팔레트 없이 기존 토큰에 각 테이블의 enum(schema.sql)을 그대로 매핑한다.
+ */
+
+/** projects.status(schema.sql §3.3): active/archived. */
+function projectStatusMeta(status) {
+  const M = {
+    active: { label: '진행', cls: 'bg-primary' },
+    archived: { label: '보관', cls: 'bg-secondary' },
+  }
+  return M[status] || { label: status || '-', cls: 'bg-secondary' }
+}
+
+/** issues.severity(schema.sql §3.5): low/medium/high/critical. */
+function issueSeverityMeta(severity) {
+  const M = {
+    low: { label: '낮음', cls: 'bg-secondary' },
+    medium: { label: '보통', cls: 'bg-info' },
+    high: { label: '높음', cls: 'bg-warning' },
+    critical: { label: '심각', cls: 'bg-danger' },
+  }
+  return M[severity] || { label: severity || '-', cls: 'bg-secondary' }
+}
+
+/** issues.status(schema.sql §3.5): open/resolved. */
+function issueStatusMeta(status) {
+  return status === 'resolved'
+    ? { label: '해결', cls: 'bg-success' }
+    : { label: '열림', cls: 'bg-danger' }
+}
+
+/** decisions.importance(schema.sql §3.4, 1~5). 4 이상은 영구보존 대상(architecture.md §10)과
+ * 맞춰 danger로 강조한다. */
+function decisionImportanceMeta(importance) {
+  const n = Number(importance) || 0
+  if (n >= 4) return { label: `중요 ${n}`, cls: 'bg-danger' }
+  if (n === 3) return { label: `보통 ${n}`, cls: 'bg-info' }
+  return { label: `낮음 ${n}`, cls: 'bg-secondary' }
+}
+
+/** WBS 계산된 bucket(mcp-tools.md §4.7): planned/in_progress/done/delayed.
+ * delayed는 저장 컬럼이 아니라 조회 시점 파생값이므로 그대로 문자열을 받아 매핑만 한다. */
+function wbsStatusMeta(bucket) {
+  const M = {
+    planned: { label: '계획', cls: 'bg-secondary' },
+    in_progress: { label: '진행중', cls: 'bg-primary' },
+    done: { label: '완료', cls: 'bg-success' },
+    delayed: { label: '지연', cls: 'bg-danger' },
+  }
+  return M[bucket] || { label: bucket || '-', cls: 'bg-secondary' }
+}
+
+/** device_pairings.status(schema.sql §3.9): pending/approved/expired. */
+function pairingStatusMeta(status) {
+  const M = {
+    pending: { label: '대기', cls: 'bg-info' },
+    approved: { label: '승인됨', cls: 'bg-success' },
+    expired: { label: '만료', cls: 'bg-secondary' },
+  }
+  return M[status] || { label: status || '-', cls: 'bg-secondary' }
+}
+
+/** 큰 수를 1.2M / 980K 식으로 축약(토큰 사용량 등). */
 function formatTokens(n) {
   if (!n) return '0'
   if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B'
@@ -154,97 +284,8 @@ function formatTokens(n) {
   return String(n)
 }
 
-/**
- * renderMarkdown — 의존성 없는 경량 마크다운 → HTML 변환.
- * STATUS.md 등 신뢰 가능한 로컬 파일을 카드에 보기 좋게 표시하는 용도.
- * HTML 을 먼저 이스케이프하므로 v-html 로 안전하게 출력 가능.
- * 지원: 코드펜스, 헤딩(#~######), 구분선(---), 인용(>), 순서/비순서 리스트,
- *       인라인 코드/볼드/이탤릭/링크.
- */
-function renderMarkdown(md) {
-  if (!md) return ''
-  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  const inline = (s) =>
-    esc(s)
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-      .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
-      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-
-  const lines = md.replace(/\r\n/g, '\n').split('\n')
-  const out = []
-  let listType = null // 'ul' | 'ol' | null
-  let inCode = false
-  const closeList = () => { if (listType) { out.push(`</${listType}>`); listType = null } }
-
-  for (const raw of lines) {
-    if (/^\s*```/.test(raw)) {
-      closeList()
-      if (inCode) { out.push('</code></pre>'); inCode = false }
-      else { out.push('<pre class="md-code"><code>'); inCode = true }
-      continue
-    }
-    if (inCode) { out.push(esc(raw)); continue }
-
-    const line = raw.trimEnd()
-    if (!line.trim()) { closeList(); continue }
-
-    const h = line.match(/^(#{1,6})\s+(.*)$/)
-    if (h) { closeList(); const lv = h[1].length; out.push(`<h${lv}>${inline(h[2])}</h${lv}>`); continue }
-    if (/^(---|\*\*\*|___)\s*$/.test(line)) { closeList(); out.push('<hr>'); continue }
-    const q = line.match(/^>\s?(.*)$/)
-    if (q) { closeList(); out.push(`<blockquote>${inline(q[1])}</blockquote>`); continue }
-
-    const ul = line.match(/^\s*[-*+]\s+(.*)$/)
-    if (ul) { if (listType !== 'ul') { closeList(); out.push('<ul>'); listType = 'ul' } out.push(`<li>${inline(ul[1])}</li>`); continue }
-    const ol = line.match(/^\s*\d+\.\s+(.*)$/)
-    if (ol) { if (listType !== 'ol') { closeList(); out.push('<ol>'); listType = 'ol' } out.push(`<li>${inline(ol[1])}</li>`); continue }
-
-    closeList()
-    out.push(`<p>${inline(line)}</p>`)
-  }
-  closeList()
-  if (inCode) out.push('</code></pre>')
-  return out.join('\n')
-}
-
-/**
- * activityCategoryMeta — 활동 category(§2.3 8종) → 배지 표시 메타.
- * 반환 { label, icon, fg, bg } (앱 공통 soft 배지 스타일: 연한 배경 + 짙은 글자).
- * 미지정/미등록 category 는 null 반환(호출부에서 '-' 표시 → 백필 전 category=NULL 안전).
- */
-function activityCategoryMeta(category) {
-  const M = {
-    plan:     { label: '기획',   icon: 'bi-lightbulb',       fg: '#5b4bd6', bg: 'rgba(91,75,214,0.12)' },
-    design:   { label: '설계',   icon: 'bi-easel',           fg: '#0075de', bg: 'rgba(0,117,222,0.10)' },
-    build:    { label: '구현',   icon: 'bi-hammer',          fg: '#157a29', bg: 'rgba(26,174,57,0.12)' },
-    verify:   { label: '검증',   icon: 'bi-clipboard-check', fg: '#b5540a', bg: 'rgba(221,91,0,0.12)' },
-    decision: { label: '결정',   icon: 'bi-flag-fill',       fg: '#7a3ff2', bg: 'rgba(122,63,242,0.12)' },
-    deploy:   { label: '배포',   icon: 'bi-rocket-takeoff',  fg: '#1f7d79', bg: 'rgba(42,157,153,0.14)' },
-    ops:      { label: '운영',   icon: 'bi-gear-fill',       fg: '#5c636a', bg: 'rgba(108,117,125,0.14)' },
-    system:   { label: '시스템', icon: 'bi-cpu',             fg: '#7a828a', bg: 'rgba(173,181,189,0.20)' },
-  }
-  return M[category] || null
-}
-
-/**
- * activityResultMeta — 활동 result → 배지 { label, cls }.
- * success/failed/partial/skipped/pending. NULL·미지정(정보성 로그)은 null 반환.
- * cls 는 앱 공통 배지 클래스(base.css .badge.bg-*)를 재사용.
- */
-function activityResultMeta(result) {
-  const M = {
-    success: { label: '성공',   cls: 'bg-success' },
-    failed:  { label: '실패',   cls: 'bg-danger' },
-    partial: { label: '부분',   cls: 'bg-warning' },
-    skipped: { label: '건너뜀', cls: 'bg-secondary' },
-    pending: { label: '대기',   cls: 'bg-info' },
-  }
-  return M[result] || null
-}
-
-/** links_json(문자열 JSON 배열) → 링크 배열. 실패/빈 값/비배열은 []. 이미 배열이면 그대로. */
-function parseActivityLinks(raw) {
+/** links_json/artifacts 같은 문자열 JSON 배열 필드 파싱. 실패/빈 값/비배열은 []. 이미 배열이면 그대로. */
+function parseJsonArray(raw) {
   if (!raw) return []
   if (Array.isArray(raw)) return raw
   try {
@@ -252,52 +293,5 @@ function parseActivityLinks(raw) {
     return Array.isArray(arr) ? arr : []
   } catch {
     return []
-  }
-}
-
-/** 현재 로그인 토큰의 payload 디코드(만료/형식오류면 null). { sub, role, exp ... } */
-function tokenPayload() {
-  try {
-    const t = localStorage.getItem('token')
-    if (!t) return null
-    const p = JSON.parse(atob(t.split('.')[1]))
-    if (p.exp && p.exp * 1000 <= Date.now()) return null
-    return p
-  } catch {
-    return null
-  }
-}
-
-/** 현재 로그인 사용자가 최고관리자(role==='super_admin')인지. admin/user는 권한상 동일(라벨만 다름) — UI 가드는 이 이진 판단 하나만 쓴다. */
-function isSuperAdmin() {
-  return tokenPayload()?.role === 'super_admin'
-}
-
-/** 현재 로그인 사용자가 staff(super_admin 또는 admin)인지. user(일반)만 false. */
-function isStaff() {
-  const role = tokenPayload()?.role
-  return role === 'super_admin' || role === 'admin'
-}
-
-/**
- * 토큰 삭제 후 로그인 페이지로 이동(현재 경로를 redirect 로 보존).
- * refresh_token이 있으면 서버에 revoke를 fire-and-forget으로 알린다(응답을 기다리지 않음 —
- * 사용자를 로그아웃 흐름에서 지연시키지 않기 위함, 실패해도 무시).
- */
-function logout() {
-  const refreshToken = localStorage.getItem('refresh_token')
-  if (refreshToken) {
-    fetch('/api/auth/logout', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refresh_token: refreshToken }),
-    }).catch(() => {})
-  }
-  localStorage.removeItem('token')
-  localStorage.removeItem('refresh_token')
-  const path = window.location.pathname + window.location.search
-  if (window.location.pathname !== '/login') {
-    const q = path && path !== '/' ? `?redirect=${encodeURIComponent(path)}` : ''
-    window.location.href = `/login${q}`
   }
 }

@@ -8,18 +8,17 @@
             <path d="M7 8h10M7 12h10M7 16h6" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
           </svg>
         </span>
-        <span class="fw-bold fs-5 text-white">맑은AI</span>
+        <span class="fw-bold fs-5 text-white">malgnai-hub</span>
       </div>
       <div>
-        <div class="login-pulse mb-4"><span></span></div>
         <h1 class="text-white fw-bold mb-3" style="font-size:1.9rem; line-height:1.25; letter-spacing:-0.03rem;">
-          AI가 스스로 진행하는<br>자율 프로젝트 운영 플랫폼
+          맑은소프트 공통<br>프로젝트 메모리
         </h1>
         <p class="mb-0" style="color:rgba(255,255,255,0.78); font-size:0.95rem;">
-          프로젝트를 만들면, 지정 에이전트가 심장박동마다 스스로 판단·수행합니다.
+          프로젝트별 작업이력·결정·이슈·상태를 조회하고, 세션/토큰 사용량을 확인하세요.
         </p>
       </div>
-      <p class="mb-0" style="color:rgba(255,255,255,0.55); font-size:0.8125rem;">© 맑은소프트 · malgnai</p>
+      <p class="mb-0" style="color:rgba(255,255,255,0.55); font-size:0.8125rem;">© 맑은소프트 · malgnai-hub</p>
     </div>
 
     <!-- 우: 폼 -->
@@ -31,72 +30,45 @@
             <path d="M7 8h10M7 12h10M7 16h6" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
           </svg>
         </span>
-        <span class="fw-bold fs-6">맑은AI</span>
+        <span class="fw-bold fs-6">malgnai-hub</span>
       </div>
       <h2 class="fw-bold mb-1" style="font-size:1.5rem;">로그인</h2>
-      <p class="text-muted mb-4" style="font-size:0.9375rem;">AI 자율 프로젝트 운영 플랫폼에 접속하세요.</p>
+      <p class="text-muted mb-4" style="font-size:0.9375rem;">회사 이메일 계정으로 접속하세요.</p>
 
       <form @submit.prevent="submit">
         <div class="mb-3">
-          <label class="form-label small fw-semibold">아이디</label>
+          <label class="form-label small fw-semibold" for="loginEmail">이메일</label>
           <input
-            ref="id"
-            v-model="username"
-            type="text"
+            id="loginEmail"
+            ref="email"
+            v-model="email"
+            type="email"
             class="form-control"
             autocomplete="username"
-            :disabled="loading || totpRequired"
-            placeholder="아이디"
+            :disabled="loading"
+            placeholder="name@malgnsoft.com"
           />
         </div>
 
         <div class="mb-3">
-          <label class="form-label small fw-semibold">비밀번호</label>
+          <label class="form-label small fw-semibold" for="loginPw">비밀번호</label>
           <input
+            id="loginPw"
             ref="pw"
             v-model="password"
             type="password"
             class="form-control"
             autocomplete="current-password"
-            :disabled="loading || totpRequired"
+            :disabled="loading"
             placeholder="비밀번호"
           />
-        </div>
-
-        <!-- TOTP 단계: totp_required 응답을 받은 뒤에만 노출 -->
-        <div v-if="totpRequired" class="mb-3">
-          <label class="form-label small fw-semibold">인증 코드</label>
-          <input
-            ref="code"
-            v-model="code"
-            type="text"
-            inputmode="numeric"
-            autocomplete="one-time-code"
-            pattern="[0-9]*"
-            maxlength="6"
-            class="form-control login-code-input"
-            :disabled="loading"
-            placeholder="000000"
-            @input="onCodeInput"
-          />
-          <div class="form-text small">Google Authenticator 6자리 코드를 입력하세요.</div>
         </div>
 
         <div v-if="error" class="alert alert-danger py-2 small mb-3" role="alert">{{ error }}</div>
 
         <button type="submit" class="btn btn-primary w-100" :disabled="submitDisabled">
           <span v-if="loading" class="spinner-border spinner-border-sm me-2"></span>
-          {{ buttonLabel }}
-        </button>
-
-        <button
-          v-if="totpRequired"
-          type="button"
-          class="btn btn-link btn-sm w-100 mt-2 text-muted"
-          :disabled="loading"
-          @click="resetToPassword"
-        >
-          비밀번호 다시 입력
+          {{ loading ? '확인 중…' : '로그인' }}
         </button>
       </form>
     </div>
@@ -109,26 +81,18 @@ export default {
   // 가드 제외 + 레이아웃(사이드바) 없이 단독 렌더.
   layout: false,
   auth: false,
-  title: '로그인 · 맑은AI',
+  title: '로그인 · malgnai-hub',
   data() {
     return {
-      username: '',
+      email: '',
       password: '',
-      code: '',
-      totpRequired: false,
       loading: false,
       error: '',
     }
   },
   computed: {
-    buttonLabel() {
-      if (this.loading) return '확인 중…'
-      return this.totpRequired ? '인증' : '로그인'
-    },
     submitDisabled() {
-      if (this.loading) return true
-      if (this.totpRequired) return this.code.length !== 6
-      return !this.username || !this.password
+      return this.loading || !this.email.trim() || !this.password
     },
   },
   mounted() {
@@ -137,15 +101,15 @@ export default {
       this.$router.replace(this.redirectTarget())
       return
     }
-    this.$refs.id?.focus()
+    this.$refs.email?.focus()
   },
   methods: {
     hasValidToken() {
       try {
         const t = localStorage.getItem('token')
         if (!t) return false
-        const p = JSON.parse(atob(t.split('.')[1]))
-        return !p.exp || p.exp * 1000 > Date.now()
+        const p = decodeJwtPayload(t)
+        return !!p && (!p.exp || p.exp * 1000 > Date.now())
       } catch {
         return false
       }
@@ -154,30 +118,13 @@ export default {
       const r = this.$route.query.redirect
       return typeof r === 'string' && r.startsWith('/') ? r : '/'
     },
-    onCodeInput() {
-      // 숫자만 허용, 최대 6자리.
-      this.code = this.code.replace(/\D/g, '').slice(0, 6)
-      // 6자리 입력 완료 시 자동 서브밋
-      if (this.code.length === 6) {
-        this.$nextTick(() => this.submit())
-      }
-    },
-    resetToPassword() {
-      this.totpRequired = false
-      this.code = ''
-      this.error = ''
-      this.$nextTick(() => this.$refs.pw?.focus())
-    },
     async submit() {
       this.error = ''
       this.loading = true
 
-      const body = { username: this.username, password: this.password }
-      if (this.totpRequired) body.code = this.code
-
       const { data, error } = await useApi('/api/auth/login', {
         method: 'POST',
-        body,
+        body: { email: this.email.trim(), password: this.password },
       })
       this.loading = false
 
@@ -188,45 +135,23 @@ export default {
         return
       }
 
-      // 에러 분기 (계약 기준)
-      switch (error) {
-        case 'totp_required':
-          this.totpRequired = true
-          this.error = ''
-          this.$nextTick(() => this.$refs.code?.focus())
-          break
-        case 'invalid_code':
-          this.error = '인증 코드가 올바르지 않습니다.'
-          this.code = ''
-          this.$nextTick(() => this.$refs.code?.focus())
-          break
-        case 'invalid_credentials':
-          this.error = '아이디 또는 비밀번호가 올바르지 않습니다.'
-          this.totpRequired = false
-          this.password = ''
-          this.code = ''
-          this.$nextTick(() => this.$refs.pw?.focus())
-          break
-        default:
-          this.error = error || '로그인에 실패했습니다.'
-          if (!this.totpRequired) {
-            this.password = ''
-            this.$nextTick(() => this.$refs.pw?.focus())
-          }
+      // 에러 분기 — docs/api.md §5.1: 비번 틀림 401 INVALID_CREDENTIALS, 그 외 400 VALIDATION_ERROR.
+      const code = error?.code
+      if (code === 'INVALID_CREDENTIALS') {
+        this.error = '이메일 또는 비밀번호가 올바르지 않습니다.'
+      } else if (code === 'VALIDATION_ERROR') {
+        this.error = '입력값을 확인해주세요.'
+      } else {
+        this.error = error?.message || (typeof error === 'string' ? error : '로그인에 실패했습니다.')
       }
+      this.password = ''
+      this.$nextTick(() => this.$refs.pw?.focus())
     },
   },
 }
 </script>
 
 <style>
-.login-code-input {
-  letter-spacing: 0.4em;
-  font-size: 1.25rem;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
 /* 좌측 브랜드 패널 */
 .login-brand {
   flex: 0 0 42%;
@@ -247,21 +172,7 @@ export default {
 }
 .login-brand-mark--sm { width: 26px; height: 26px; background: var(--color-primary); }
 
-/* 자율 "broadcast" 펄스 링 (autonomy 화면 모티프와 통일) */
-.login-pulse { position: relative; width: 14px; height: 14px; }
-.login-pulse span {
-  position: absolute; inset: 0; border-radius: 50%;
-  background: #7fffd4; box-shadow: 0 0 0 0 rgba(127,255,212,0.6);
-  animation: loginPulse 2.4s var(--ease-out-back) infinite;
-}
-@keyframes loginPulse {
-  0%   { box-shadow: 0 0 0 0 rgba(127,255,212,0.5); }
-  70%  { box-shadow: 0 0 0 16px rgba(127,255,212,0); }
-  100% { box-shadow: 0 0 0 0 rgba(127,255,212,0); }
-}
-@media (prefers-reduced-motion: reduce) { .login-pulse span { animation: none; } }
-
-/* 폼 카드: 340px 고정 → 유동 + 큰 라운드/그림자 (base.css .login-card 오버라이드) */
+/* 폼 카드 */
 .login-card {
   width: 100%; max-width: 400px;
   border-radius: var(--rounded-xl);

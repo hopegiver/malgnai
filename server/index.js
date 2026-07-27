@@ -1,90 +1,71 @@
+// 최상위 라우팅 — architecture.md §2.3. /mcp는 device_token 인증 후 McpAgent(DO)로,
+// /api/*는 Hono(webApp)로 위임한다. 단일 Worker(MCP+API 한 스크립트, §0 결정1).
 import { Hono } from 'hono'
-import { cors } from 'hono/cors'
-import { ensureSchema } from './dao/init.js'
-import { authMiddleware } from './middleware/auth.js'
-import register from './_registry.js'
+import { deviceAuthMiddleware } from '../mcp/device-auth.js'
+import { MalgnMcpAgent } from '../mcp/agent.js'
+import { corsMiddleware } from './middleware/cors.js'
+import { jwtAuthMiddleware } from './middleware/jwt-auth.js'
+import authRouter from './api/auth.js'
+import devicesRouter from './api/devices.js'
+import projectsRouter, { repositories as repositoriesRouter } from './api/projects.js'
+import eventsRouter from './api/events.js'
 
-// 앱 팩토리 — Node 진입점(server/node.js)이 env(DB 어댑터/ASSETS/시크릿/vars)를
-// 주입해 호출한다. 이전의 Cloudflare Workers 전용 c.env 바인딩은 폐기했고,
-// 이제 이 env 가 유일한 주입 경로다(globalThis 우회 없음).
-//
-// env 필수 키:
-//   DB         — sqlite-adapter.wrapD1(better-sqlite3) (D1 호환 인터페이스)
-//   ASSETS     — { fetch(Request): Response } 정적 자산 서빙
-//   ENVIRONMENT, APP_ORIGIN, JWT_SECRET, ADMIN_PASSWORD, MALGNAI_API_KEY
-export function createApp(env) {
-  const app = new Hono()
+const webApp = new Hono()
 
-  // 모든 요청 컨텍스트에 env 주입(라우트/미들웨어가 c.env 로 접근).
-  app.use('*', async (c, next) => {
-    c.env = env
-    await next()
-  })
+webApp.use('/api/*', async (c, next) => corsMiddleware(c.env)(c, next))
+webApp.use('/api/*', jwtAuthMiddleware)
 
-  // [H-001] CORS: 전체 Origin 반영 금지. APP_ORIGIN(쉼표 다중) 화이트리스트만 허용.
-  // 로컬 개발(ENVIRONMENT==='development')에서는 localhost 도 허용한다.
-  app.use('/api/*', async (c, next) => {
-    const allowed = (c.env.APP_ORIGIN || '')
-      .split(',')
-      .map((o) => o.trim())
-      .filter(Boolean)
-    const isDev = c.env.ENVIRONMENT === 'development'
-    const corsMw = cors({
-      origin: (origin) => {
-        if (!origin) return undefined
-        if (allowed.includes(origin)) return origin
-        if (isDev && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
-          return origin
-        }
-        return undefined
-      },
-      allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
-      credentials: false,
-    })
-    return corsMw(c, next)
-  })
+webApp.route('/api/auth', authRouter)
+webApp.route('/api/devices', devicesRouter)
+webApp.route('/api/projects', projectsRouter)
+webApp.route('/api/projects', eventsRouter)
+webApp.route('/api/repositories', repositoriesRouter)
 
-  app.use('/api/*', async (c, next) => {
-    // adminPassword 를 넘겨 users 비었을 때 admin 시드(lockout 방지, 멱등).
-    // 로컬 개발(.dev.vars 에 ADMIN_PASSWORD 미설정)에서도 로그인 가능하도록 dev 기본비번 사용.
-    const isDev = c.env.ENVIRONMENT === 'development'
-    const adminPassword = c.env.ADMIN_PASSWORD || (isDev ? 'malgnai-dev' : undefined)
-    await ensureSchema(c.env.DB, { adminPassword })
-    await next()
-  })
+webApp.get('/api/health', (c) => c.json({ ok: true }))
 
-  // [보안] 터널(Cloudflare) 경유 외부 요청은 JWT 로그인 필수.
-  // Cloudflare 엣지는 모든 요청에 cf-ray/cf-connecting-ip 헤더를 붙이고, 이 헤더는
-  // 클라이언트가 위조할 수 없다(엣지에서 덮어씀). origin 은 터널 밖에서 도달 불가하므로
-  // 이 헤더 유무로 '외부(터널) vs 로컬(localhost 직결)'을 구분한다.
-  //   - 로컬 직결(sync/MCP) → 통과(기존 동작 유지, 스크립트 무수정)
-  //   - 외부 → /api/auth/login·refresh·logout 만 예외, 그 외 전부 JWT 검증
-  // [refresh token] /refresh·/logout 은 access JWT 가 이미 만료된 상태에서 호출되는
-  // 경로이므로(그게 존재 이유) 여기서 authMiddleware 를 걸면 refresh 자체가 불가능해진다.
-  // 두 라우트 자체 핸들러(server/api/auth.js)가 refresh_token(DB 조회) 로 별도 인증한다.
-  const AUTH_PUBLIC_PATHS = new Set(['/api/auth/login', '/api/auth/refresh', '/api/auth/logout'])
-  app.use('/api/*', async (c, next) => {
-    const viaCloudflare = c.req.header('cf-ray') || c.req.header('cf-connecting-ip')
-    if (!viaCloudflare) return next()
-    const path = new URL(c.req.url).pathname
-    if (AUTH_PUBLIC_PATHS.has(path)) return next()
-    return authMiddleware(c, next)
-  })
+// error.name → HTTP 상태코드 단일 매핑(backend-security-audit 규약 — 에러 처리는 항상 이 경로로).
+const STATUS_BY_ERROR_NAME = {
+  ValidationError: 400,
+  UnauthorizedError: 401,
+  ForbiddenError: 403,
+  NotFoundError: 404,
+  ConflictError: 409
+}
 
-  register(app)
+webApp.onError((err, c) => {
+  const status = STATUS_BY_ERROR_NAME[err.name] || 500
+  if (status === 500) {
+    console.error('[unhandled]', err)
+  }
+  const body = { error: { code: err.code || err.name || 'INTERNAL_ERROR', message: status === 500 ? 'internal error' : err.message } }
+  if (err.name === 'ConflictError' && err.current !== undefined) body.current = err.current
+  return c.json(body, status)
+})
 
-  // 정적 자산 + SPA 폴백.
-  app.all('*', async (c) => {
-    const assets = c.env.ASSETS
-    const url = new URL(c.req.url)
-    let res = await assets.fetch(new Request(url))
-    if (res.status === 404) {
-      // SPA fallback: serve index.html for non-API routes
-      res = await assets.fetch(new Request(new URL('/', url)))
+webApp.notFound((c) => c.json({ error: { code: 'NOT_FOUND', message: 'route not found' } }, 404))
+
+export { MalgnMcpAgent }
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url)
+
+    if (url.pathname.startsWith('/mcp')) {
+      const authed = await deviceAuthMiddleware(request, env)
+      if (!authed.ok) {
+        return new Response(JSON.stringify({ error: { code: 'UNAUTHORIZED', message: authed.reason } }), {
+          status: 401,
+          headers: { 'content-type': 'application/json' }
+        })
+      }
+      ctx.props = authed.identity
+      return MalgnMcpAgent.serve('/mcp', { binding: 'MCP_AGENT' }).fetch(request, env, ctx)
     }
-    return res
-  })
 
-  return app
+    if (url.pathname.startsWith('/api')) {
+      return webApp.fetch(request, env, ctx)
+    }
+
+    return new Response('Not found', { status: 404 })
+  }
 }
