@@ -1,5 +1,5 @@
 # STATUS — malgnai-hub
-_최종 갱신: 2026-07-27 — 계정관리(프로필/비밀번호변경/관리자 사용자관리/인증키·.mcp.json) 화면 추가 배포, https://malgnai-hub.malgnsoft.workers.dev 실배포 유지 중._
+_최종 갱신: 2026-07-27 — MCP 11번째 도구 bootstrap_project 추가 배포, https://malgnai-hub.malgnsoft.workers.dev 실배포 유지 중._
 <!-- malgnai-mcp project_id: 693caed1-0d3d-4819-b787-75baa829bb80 -->
 
 > **malgnai-hub** = **"맑은소프트 공통 프로젝트 메모리 MCP + 대시보드"** — 프로젝트 운영 이벤트 허브이자 Claude Code 플러그인의 조직 학습 시스템. 회사 전 직원이 공유하는 공통 MCP로 프로젝트별 작업이력·결정·이슈·상태를 Cloudflare D1에 축적하고, 웹 대시보드로 본인 작업이력·토큰/세션 사용량을 조회한다.
@@ -18,13 +18,13 @@ _최종 갱신: 2026-07-27 — 계정관리(프로필/비밀번호변경/관리�
 
 ## ✅ 최근 완료 (상세=MCP decision id)
 
+- **[07-27] MCP 11번째 도구 `bootstrap_project` 추가** — repositories/projects get-or-create(멱등) + 서버가 조립하는 STATUS.md(YAML frontmatter `malgnai_hub:` 블록, 사내 malgnai-mcp 관례와 이름·형식 분리). 플러그인 연동은 범위 밖(보류) — commit `6675537`, decision `ee32e109`.
 - **[07-27] 계정관리 라운드 배포** — 프로필/비밀번호변경/관리자 사용자관리(GET·POST·PATCH /api/admin/users, 마지막관리자 보호)/인증키(디바이스) 관리+.mcp.json 복사·다운로드. 실 URL 스모크 테스트 통과, commit `9870af9`. MCP 인증 OAuth 도입은 이번엔 보류 — decision `bfc11390`.
 - **[07-27] v1 실배포 + 스모크 테스트 통과** — 위 "현재 라이브 상태" 참고. 전체 WBS는 `wbs_list`로 조회.
 - **[07-27] 사내 malgnai 소스 대조로 실사용 버그 2건 발견·수정** — decision `330e54a2`.
 - **[07-27] app/를 Worker assets 바인딩으로 단일 배포 결정** — decision `7165ccd5`.
-- **[07-27] WBS(`wbs_items`) v1 반영 확정** — MCP 도구 6→10개 — decision `9c9321b6`.
-- **[07-27] 아키텍처 확정 — 단일 Worker+McpAgent(DO)+D1 스키마** — decision `dfb4e7c4`.
-- _그 이전(옛 private malgnai 이력)은 이 저장소 범위 밖 — 필요 시 malgnai(private) 프로젝트 쪽 `get_current_context`/`memory_search`로 조회._
+- **[07-27] WBS(`wbs_items`) v1 반영 확정** — MCP 도구 6→10개(→11개, 위 참고) — decision `9c9321b6`.
+- _그 이전(아키텍처 확정 등 옛 이력)은 `decision_list`/`memory_search`로 조회._
 
 ## 🚧 차단 없는 백로그 (비차단)
 
