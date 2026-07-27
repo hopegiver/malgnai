@@ -1,39 +1,43 @@
-# STATUS — malgnai
-_최종 갱신: 2026-07-15 — 자율엔진(coo·hourly)이 이슈 `6a01f9ab`(트레이너 스킬 수동승급이 sync-agents.js 자동재계산에 덮어써지던 문제) 해결: agents.skill_level_locked 컬럼(마이그레이션 016)+PATCH /api/agents/:name/skill-level 로 잠금 시 보존. 검증 완료, 커밋 `47d7e2f`, decision `ce33f690`.
-<!-- malgnai-mcp project_id: b00eaa81-7cea-4e38-b1bc-8cb024974cd9 -->
+# STATUS — malgnai-hub
+_최종 갱신: 2026-07-27 — WBS(`wbs_items`) v1 반영 확정(3자 토론 후 대표 정정으로 편입, MCP 도구 6→10개, architecture.md §0 결정20)._
+<!-- malgnai-mcp project_id: 693caed1-0d3d-4819-b787-75baa829bb80 -->
 
-> **malgnai** = **"AI 자율 프로젝트 운영 플랫폼"** — 직원들이 각자 로그인해 자기 업무 프로젝트를 생성하면 AI가 그 프로젝트를 스스로 진행(기획→설계→개발→검증). ⚠️ **2026-07-02 비전 재정의: "1인 회사 운영 OS" 개념 폐기**(decision `e11f376d`). 자율 LEAD 루프 + 승인함 엔진은 라이브(R1)이며 새 비전의 뼈대로 재활용.
-> **새 세션은 이 파일(라이브 상태) + `CLAUDE.md`(구조·규칙)면 오리엔테이션 충분.** 구조 상세는 malgnai-mcp memory `96f4878f`/`get_current_context`, 깊은 문서는 `docs/README.md`. **상황 파악하려고 코드/docs 통독 금지.**
-> 이 파일이 malgnai 진행 상태의 **단일 소스**다. 작업 착수 전 읽고, 상태가 바뀌면 끝내기 전 갱신한다.
-> **길이 규칙(전역 지침):** 완료 항목은 **1줄 요약(+MCP id)**, 완료 섹션은 **최근 5~7개만** 유지. **헤더 라인은 매번 통째로 교체**(과거 세션 "직전:" 체이닝 절대 금지, 1~2문장·약 150자 이내만 — `lessons/malgnai-status-header-chaining.md`). 상세(검증로그·파일목록·근거)는 STATUS.md에 쓰지 말고 MCP(`decision_add`/`memory_add`/`issue_add`)에 남긴다. 과거 이력은 `get_current_context`/`memory_search`로 조회. **"미커밋/확인대기" 문구는 실제 커밋 여부를 `git log`로 재확인한 뒤에만 남긴다** — 확인 없이 다음 세션으로 그대로 체이닝하지 말 것(이번 정정 사례 참고).
+> **malgnai-hub** = **"맑은소프트 공통 프로젝트 메모리 MCP + 대시보드"** — 프로젝트 운영 이벤트 허브이자 Claude Code 플러그인의 조직 학습 시스템. 회사 전 직원이 공유하는 공통 MCP로 프로젝트별 작업이력·결정·이슈·상태를 Cloudflare D1에 축적하고, 웹 대시보드로 본인 작업이력·토큰/세션 사용량을 조회한다.
+> ⚠️ **2026-07-27 전환**: 이 저장소는 예전엔 private malgnai("1인 AI 자율 프로젝트 운영 플랫폼")의 배포판 미러(`bin/build-public-dist.sh` 1방향 덮어쓰기)였으나, 이제 완전히 새 제품 전용이다. 그 스크립트(또는 이를 호출하는 동기화 스크립트)를 이 저장소에 다시는 실행하지 말 것.
+> **새 세션은 이 파일 + `CLAUDE.md`면 오리엔테이션 충분.** 깊은 설계 판단은 `docs/architecture.md`(§0 핵심 결정)·`docs/schema.sql`·`docs/mcp-tools.md`·`docs/api.md`가 정본. **상황 파악하려고 코드/docs 통독 금지.**
+> 이 파일이 malgnai-hub 진행 상태의 **단일 소스**다. 착수 전 읽고, 상태가 바뀌면 끝내기 전 갱신한다.
+> **길이 규칙(전역 지침):** 완료 항목은 **1줄 요약(+MCP id)**, 완료 섹션은 **최근 5~7개만** 유지. **헤더 라인은 매번 통째로 교체**(과거 세션 "직전:" 체이닝 절대 금지). 상세는 STATUS.md에 쓰지 말고 MCP(`decision_add`/`memory_add`/`issue_add`)에 남긴다. 과거 이력은 `get_current_context`/`memory_search`로 조회.
 
 ## 🟢 현재 라이브 상태
 
-- **⚠️ 자율엔진↔인터랙티브 세션 git 워킹트리 공유 위험(issue `86fa7c85`) — 07-14 정책으로 절반 해소**: "커밋 전 사람 승인"이 전제였던 우회 문제는 대표 지시("AI 작업은 승인 없이 바로 커밋, push/force만 별개")로 전제 자체가 사라져 해소. 다만 **동일 워킹트리를 여러 프로세스(coo·hourly 사이클 + 인터랙티브 세션)가 동시에 건드리는 문제는 여전**: 지난 세션 dangling commit `3c79d8d` 유실 사고가 있었으나(SIGTERM 수정분), 이번 사이클에선 반대로 다른 세션이 재작성해둔 미커밋 변경을 검증 후 그대로 커밋 완료(위 완료목록 `d6ce9d7`) — 협업이 실제로 작동한 사례. 동시편집 충돌 방지 관점의 격리(worktree 분리 등)는 여전히 검토 대상.
-- **malgnai 자율 재가동 중(coo·hourly, project `b00eaa81`, DB 실측 `autonomy_enabled=1` 확인, 07-14 재점검)** — 목표: "지속 자기관찰·개선"(엔진↔웹앱분리는 완결돼 폐기). custom_instruction: 게이트(비용상한/연속실패) 재활성화·엔진 안전판단 변경은 승인함 경유, 사소한 수정만 자동. KPI: 문서드리프트 target 0건, 오류건수 target 0건(측정불가 "완성도" 점수는 폐기). kpi_complete_action=continue라 KPI 달성해도 자동종료 안 됨.
-- **유일 실동작 자율 안전게이트 = `risk_approval_threshold`**(기본 high, low/medium만 자동집행 후보) — `server/lib/autonomy.js#riskAllowsAuto()`. 기존 비용상한/연속실패 게이트 3종은 여전히 DEV MODE로 우회 중이며 재활성화는 반복 보류(decision `583239ac`/`83785da8`/`37cb6f3d`) — **먼저 상의 없이 건드리지 말 것**. 안정성 판단은 감이 아니라 `/autonomy`의 실측 실패율(cycles_failed/cycles_total, commit `b075ac1`)로.
-- **엔진↔웹앱 분리 Phase 0~3 完(07-12/07-13), "엔진이 유일한 실행경로" 서술은 07-14 정정(issue `11ddeda1` 종결)** — 정기 스폰·폴링(spawn-due/safety-poll)은 `com.malgnai.engine`이 전담하나, **승인 즉시실행/직접명령/phase체인은 여전히 웹서버(`com.malgnai.server`) 프로세스 안(`dispatch-worker.js`)에서 돈다**(설계문서 §2 C6이 이미 이 한계를 명시). 구 HTTP 라우트 3종 물리삭제 완료(commit `9be5b60`). Phase 4(선택·저우선순위: cycle-ingest/autonomy.js를 engine/로 물리이전 + 즉시디스패치 이전 여부 별도 검토)만 남음. 실시간모니터 브리징 race 버그는 07-14 수정 完(decision `8cdc959a`). 재시작 시 끊김 위험(issue `964bb1ea`)은 그대로 유효.
-- **승인함 신뢰성 기반 다짐 완료** — 승인/반려/수정요청 3종 모두 memories(FEEDBACK) 통일기록(commit `cf0ad61`, decision `3e17ff4b`), 자율 워커 proposal 큐잉 시 푸시알림 배선(commit `b083102`), 실시간 실행모니터가 엔진 프로세스 이벤트까지 커버(commit `b9da9cf`). 잔여 한계: cadence-off/비자율 프로젝트는 project_cycle 강제주입 통로 자체가 없어 피드백 미도달(후속 검토 대상).
-- **운영:** 로컬 Node(:9000) + Cloudflare Named Tunnel. DB=단일 sqlite `data/malgnai.db`. 에이전트 MCP=저장소 내 `mcp/`(12툴). GitHub 공개 배포 저장소: `github.com/hopegiver/malgnai`(`bin/build-public-dist.sh`로 반영, decision `4c1dab2a`).
+- **v1 범위 확정(1단계+2단계만)**: idea.md §25 로드맵 중 프로젝트 메모리 MCP(1단계)+세션/토큰 통계(2단계)까지만 v1. MCP 도구는 `get_my_guidance`를 제외한 10개(WBS 4종 포함) 등록 예정. 3단계(직원 가이드)·4단계(조직학습)는 스키마 초안만 문서화하고 실사용 데이터가 쌓인 뒤 재검토(decision `6100c11a`).
+- **WBS(`wbs_items`) v1 편입**: "여러 사람이 같이 보는 협업 도구"라는 잘못된 전제로 논쟁이 커졌으나, 대표가 "project_id 종속 개인 작업계획(AI 연속성+진행률 파악용)"이라 정정하면서 접근권한 리스크가 소멸 — decisions/issues/works와 동일 스코핑의 4번째 테이블로 바로 편입(decision `9c9321b6`).
+- **아키텍처 확정 완료**: 단일 Cloudflare Worker(MCP+API+Queue Consumer를 라우트로 분리) + `agents` SDK `McpAgent`(Durable Object) + D1. organizations/project_members 테이블 제거, `projects.user_id` 직접소유+`repositories` 신규, `project_events` 통합 이벤트소싱을 폐기하고 `decisions`/`issues`/`works` 3분리 테이블로 확정. 텔레메트리 수집은 이 저장소가 아니라 외부 OTel Collector가 담당(decision `dfb4e7c4`/`28f6b694`/`74e35446`/`f0629f4d`).
+- **정본 문서 4종 분리 확정**: `docs/architecture.md`(핵심 결정+설계 근거)/`schema.sql`(D1 정의)/`mcp-tools.md`(MCP 10종 명세)/`api.md`(REST 명세).
+- **⚠️ `docs/`가 `.gitignore` 대상**(`.gitignore:20`) — architecture.md 등 정본 문서 전부가 git 추적 밖에 있다. 의도된 것인지 후속 확인 필요.
+- **레거시 정리 진행 중, 커밋 대기**: `bin/`·`engine/` 삭제는 스테이징만 됐고 아직 커밋 전(백업 `~/workspace/malgnai-public-legacy-backup-20260727.tar.gz`). `CLAUDE.md` 전면 교체도 워킹트리에 반영됐으나 미커밋. `server/`·`app/`·`mcp/`·`migrations/`·루트 `schema.sql`은 옛 1인용 구현체로 신제품 코드가 아니다 — 조만간 신제품 코드로 전면 교체·제거 예정(CLAUDE.md "레거시 코드 안내" 참고).
+- **구현 코드는 아직 착수 전**: 저장소 루트 `wrangler.jsonc`(Worker+D1+DO+Queue 바인딩)만 스캐폴딩됐고, v1 실제 구현 순서(architecture.md §9.3)의 1번(D1 마이그레이션)부터가 다음 단계. `app/`·`server/`·`mcp/`·`migrations/`는 옛 1인용 구현체가 그대로 남아있고, 이 저장소 하나에서 웹(`app/`)·API(`server/`)·MCP(`mcp/`)를 모두 만드는 구조로 실제 구현 착수 시 교체된다(별도 하위 프로젝트 폴더로 감싸지 않음, architecture.md §2.1).
 
 ## ✅ 최근 완료 (상세=MCP decision id)
 
-- **[07-15] 이슈 `6a01f9ab` 해결 — agents.skill_level_locked 로 트레이너 수동승급 보호** — 마이그레이션 016(비파괴 ADD COLUMN)+DAO upsert 잠금 로직+PATCH /api/agents/:name/skill-level+sync-agents.js 콘솔 안내. 임시 테스트 에이전트로 잠금 전/후 시나리오 검증 후 정리, 실 19개 에이전트 sync 왕복 확인, 단위64/64·API182/183(무관 dashboard.ai_cost 1건은 이슈 `82190445`로 별도 기록). 커밋 `47d7e2f`, decision `ce33f690`.
-- **[07-15] 이슈 `adc8cf66` 해결 — activity_logs.command_id 채우기** — 시스템 감사로그 경로 24곳에 command_id 보강. 단위64/64·API171/172 통과. decision `cb8996ce`.
-- **[07-15] 이슈 `0e5454a0` 해결 — 활동 로그 탭에 프로젝트 필터 추가** — 커밋 `18b3a8d`.
-- **[07-15] 스테일 이슈 `b19875df` 종결 — 원격 D1 sync 이슈는 폐기 아키텍처 잔재** — 코드 변경 없이 이슈만 종결.
-- **[07-15] 이슈 `c7a15244` 해결 — 자율 사이클 실패사유 한글 요약 + 무인증 라우트 재확인** — 커밋 `a006bc8`.
-- **[07-15] 이슈 `1cef0e3e` 해결 — mcp/db/connection.js 유령 DB 폴백 제거** — decision `89b905d3`.
-- _그 이전은 `get_current_context`/`memory_search`로 조회._
+- **[07-27] WBS(`wbs_items`) v1 반영 확정** — 3자 토론(architect/planner/reviewer) 후 대표 정정으로 협업 리스크 전제 소멸, MCP 도구 6→10개 — decision `9c9321b6`.
+- **[07-27] 저장소를 신제품 전용으로 전환** — CLAUDE.md 전면 교체, docs/idea.md 정본 채택. decision `fded5b8f`.
+- **[07-27] v1 범위(1+2단계) 확정 + MCP 도구 6종 확정**(`get_my_guidance` 미등록) — decision `6100c11a`.
+- **[07-27] 아키텍처 확정 — 단일 Worker+McpAgent(DO)+D1 스키마** — decision `dfb4e7c4`.
+- **[07-27] organizations/project_members 제거, `projects.user_id` 직접소유+`repositories` 신설** — decision `28f6b694`.
+- **[07-27] `project_events` 이벤트소싱 폐기 → decisions/issues/works 3분리 회귀** — decision `74e35446`.
+- **[07-27] 텔레메트리 수집을 외부 OTel Collector 담당으로 재설계** — decision `f0629f4d`.
+- _그 이전(옛 private malgnai 이력)은 이 저장소 범위 밖 — 필요 시 malgnai(private) 프로젝트 쪽 `get_current_context`/`memory_search`로 조회._
 
 ## 🚧 차단 없는 백로그 (비차단)
 
-- Jira 파이프라인·Phase 3 LEAD·MCP 가지치기 — 여유 시간에 처리.
+- v1 구현 착수: D1 마이그레이션(architecture.md §9.3 순서 1) → 웹 로그인 → 디바이스 페어링 → MCP 10종 도구.
+- `docs/`가 `.gitignore` 대상인 이유 확인 — 정본 문서가 버전관리 밖에 있는 게 의도된 것인지.
+- `bin/`·`engine/` 삭제 + `CLAUDE.md` 교체 커밋(사용자 확인 대기).
 
 ## 📌 핵심 메모
 
-- **상태=STATUS.md 한 줄 / 상세=MCP** — 이중기록 아니라 역할 분담. STATUS.md를 다시 통짜로 부풀리지 말 것(decision `c688d96c`). **헤더 라인은 절대 "직전:"으로 체이닝하지 않는다** — 매번 완전 교체(`lessons/malgnai-status-header-chaining.md`).
-- **MCP 역할 경계: 기억한다, 실행하지 않는다.** 프로젝트/태스크/에이전트 상태변경(create/update/delete)은 앱 게이트(승인함)의 역할, MCP는 조회+append 기록만.
-- **B-5 사업모듈 보류** — 실제 SaaS 고객/매출 데이터 유입 전까지 만들지 않음(유령 메뉴 방지).
-- **비파괴 ADD COLUMN 마이그레이션**은 재승인 없이 배포 허용(전후 row count 보존 실증 조건). decision `8c58dece`.
-- **상용화 모델 = SaaS 아닌 고가 개별구축**(턴키: 박스/서버+클로드계정+전용 에이전트설계+교육+안전장치). 멀티테넌시 재설계 불요. decision `aa94fc2d`.
+- **상태=STATUS.md 한 줄 / 상세=MCP** — 이중기록 아니라 역할 분담. 헤더 라인은 절대 "직전:"으로 체이닝하지 않는다.
+- **이 프로젝트의 malgnai-mcp project_id는 `693caed1-0d3d-4819-b787-75baa829bb80`** — 옛 private malgnai project_id(`b00eaa81...`)와 혼동 금지(memory `84a8b4fb`).
+- **레거시 코드(`server/`·`app/`·`mcp/`·`migrations/`·루트 `schema.sql`)는 신제품 아키텍처가 아니다** — 참고 자료로만 쓰고, 아키텍처 판단은 반드시 `docs/architecture.md` 등 정본 문서 기준.
+- **패키지 매니저는 pnpm만**(전역 규칙, npm/yarn 금지).

@@ -2,106 +2,70 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-<!-- 구조 드리프트 대조: 기대값은 `.claude/doc-drift.json` 매니페스트에. `pnpm run check-docs`(전역 훅이 세션시작 시 자동). 구조 변경 시 매니페스트 expected + 아래 구조 서술을 함께 갱신. -->
+## ⚠️ 최우선 경고 — 이 저장소는 더 이상 배포판 미러가 아니다
+
+이 저장소(`malgnai-public`)는 예전에는 private `~/workspace/malgnai`("1인 AI 자율 프로젝트 운영 플랫폼")의 `bin/build-public-dist.sh`(git archive 스냅샷)로 **1방향 자동 덮어쓰기**되던 배포판 미러였다. **2026-07-27부로 이 저장소는 완전히 새로운 제품 전용으로 전환되었다.**
+
+- **`bin/build-public-dist.sh`(또는 이를 호출하는 어떤 동기화 스크립트도) 이 저장소에 대해 다시는 실행하지 말 것.** 실행하면 이번에 정리한 CLAUDE.md와 앞으로 쌓일 신제품 산출물이 옛 1인용 malgnai 소스로 통째로 덮어써진다.
+- 아래 "레거시 코드 안내" 절을 참고해, 기존 `server/`, `app/`, `engine/`, `mcp/`, `migrations/`, `schema.sql` 등을 신제품 아키텍처로 오인하지 말 것.
 
 ## 새 세션 부트스트랩 (읽기 순서 = 토큰 예산)
 
-새 세션은 **자동 주입되는 `STATUS.md` + 이 `CLAUDE.md` 두 개면 오리엔테이션이 끝난다.** 현 상황을 파악하겠다고 코드나 docs/를 통독하지 말 것 — 토큰 낭비이자 옛 정보 오독의 원인이다.
+- **L0 (자동 주입, 항상 지불):** `STATUS.md` + 이 `CLAUDE.md`. 다만 **`STATUS.md`는 아직 옛 malgnai 내용 그대로이며 이번 작업 범위 밖이라 미갱신 상태다** — 후속 세션에서 반드시 신제품 기준으로 다시 써야 한다(현 상태 문구를 그대로 믿지 말 것).
+- **L1 (선택적 호출):** 텍스트 검색이나 다중프로젝트 범위 필터링이 필요할 때만 malgnai-mcp `get_current_context` 호출.
+- **L2 (깊은 작업일 때만):** 아래 "정본 문서" 표에서 필요한 것만 집어 읽기 — **아키텍처/스키마/API/MCP 설계 판단은 코드가 아직 없으니 반드시 그 문서들을 먼저 참고**(구현 전 단계라 "코드가 진실"이 아직 성립하지 않음).
 
-- **L0 (자동 주입, 항상 지불):** `STATUS.md`(라이브 상태 — 지금 돌아가는 것·다음·열린 이슈) + `CLAUDE.md`(안정 구조·규칙, 이 파일). → **대부분의 경우 이것만으로 충분.**
-- **L1 (선택적 호출):** 텍스트 검색 필요하거나 다중프로젝트 범위 필터링이 필요할 때만 malgnai-mcp `get_current_context` 호출(기본은 L0으로 충분, 불필요한 호출은 토큰 낭비). 구조 상세는 memory `96f4878f`(현행 구조 스냅샷), 과거 맥락은 `decision_list`/`memory_search`.
-- **L2 (깊은 작업일 때만):** `docs/README.md`(문서 지도) → 필요한 설계/이력 문서만 집어 읽기. 무엇이 현행/드리프트/이력인지 지도에 표기됨.
-
-**필수 규율 (비협상):**
-1. **진행 상태 = `STATUS.md` 단일 소스.** 착수 전 읽고, 상태가 바뀌면 끝내기 전 갱신한다. 메모리·다른 문서로 상태를 단정하지 않는다. 위임받은 서브에이전트(COO 포함)도 동일 — 사이클 종료 시 STATUS.md 갱신은 COO 책임.
-2. **맥락 기록 = malgnai-mcp.** 주요 결정→`decision_add`, 막힌 것→`issue_add`(해결 시 `issue_resolve`), 재사용 교훈·요약→`memory_add`, 의미 있는 활동→`activity_log`. STATUS=상태 한 줄(정답), MCP=검색 가능한 상세(역할 분담, 이중기록 금지). 사소한 단계는 생략, "다음에 또 찾을 것"만 기록.
+**필수 규율 (비협상, 전역 관례 유지):**
+1. **진행 상태 = `STATUS.md` 단일 소스**(갱신은 후속 작업 범위 — 위 경고 참고).
+2. **맥락 기록 = malgnai-mcp.** 주요 결정→`decision_add`, 막힌 것→`issue_add`(해결 시 `issue_resolve`), 재사용 교훈·요약→`memory_add`, 의미 있는 활동→`activity_log`.
+3. **패키지 매니저는 pnpm만 사용**(npm/yarn 금지, 전역 `~/.claude/CLAUDE.md` 공통 규칙).
 
 ## Project Overview
 
-**malgnai** — **"AI 자율 프로젝트 운영 플랫폼"**. 직원들이 각자 로그인해 자기 업무 프로젝트를 생성하면, 전역/프로젝트별 에이전트를 활용·학습시켜 AI가 그 프로젝트를 스스로 진행(기획→설계→개발→검증)해 원하는 결과물을 만든다. ⚠️ **2026-07-02 비전 재정의**: 이전 "1인 회사 운영 OS" 개념은 **폐기**(STATUS.md, decision `e11f376d`). 기존에 구축된 자율 LEAD 루프 + 규칙엔진 + 예산게이트 + 승인함(commands 큐)은 **새 비전의 실행 뼈대로 재활용**한다. 모든 데이터는 로컬 sqlite, 터널로 외부(모바일) 접근. 정본 비전: `docs/vision/malgnai-vision.md`, 단순화 정본(현행 방향): `docs/design/simple-core.md`. ※07-02 재설계 상세(`autonomous-platform-redesign.md` 등)와 옛 "1인 SaaS 회사" 문서는 `docs/_archive/`로 강등됨(참고용).
+**맑은소프트 공통 프로젝트 메모리 MCP + 대시보드** (프로젝트명 `malgnai-hub`, 대표 확정 — 저장소 이름 `malgnai-public`과는 별개). 정본 개념 문서 `docs/idea.md`의 정의를 그대로 따른다(단, idea는 idea일 뿐 — 이후 뒤집힌 항목이 많으니 이름을 포함해 그대로 정답으로 읽지 말 것):
 
-## Tech Stack
+> 프로젝트 운영 이벤트 허브이면서, Claude Code 플러그인의 조직 학습 시스템
 
-- **Frontend**: vue-zero (Vue 3 Options API, 제로빌드), Bootstrap 5, Bootstrap Icons
-- **Backend**: Hono on **Node** (`@hono/node-server`) + **better-sqlite3** (로컬 SQLite 파일)
-- **인증**: 멀티유저(users 테이블, role=admin/user) + JWT(4h) + 선택적 TOTP 2FA(otplib). 단일 admin 아님.
-- **운영**: 맥미니 로컬 Node 서버 상시 기동(:9000) + **Cloudflare Named Tunnel**(`malgnai.apiserver.kr`)로 외부 노출. **Cloudflare Workers/D1/wrangler 는 폐기됨**(2026-06-24 전환).
+회사 전 직원이 공유하는 **공통 MCP**를 통해 프로젝트별 작업 이력·결정사항·이슈·현재 상태를 중앙(Cloudflare D1)에 축적하고, **웹 대시보드**로 직원 본인의 작업이력과 Claude Code 토큰/세션 사용량을 조회한다. 이전의 "1인 AI 자율 프로젝트 운영 플랫폼"(로컬 sqlite, 단일 사용자, 자율 실행 엔진 중심) 개념은 이 저장소에서 완전히 폐기되었고, 이제는 **다인원·조직 단위** 제품이다.
 
-> 에이전트용 MCP는 **이 저장소 내부** `mcp/`(stdio, JS 소스, 엔트리 `mcp/index.js`, 12 툴 — 이력 기록 5종(`activity_log`·`decision_add`·`issue_add`·`issue_resolve`·`memory_add`)+학습 이력 1종(`agent_learning_log_add`)+**승인 필요 건 등록 1종(`command_add`, 2026-07-06 §8/§9 신설 — 승인함에 queued 등록, session_id 주면 §9 claude --resume 재개)**+**라이프사이클 선언 1종(`project_status_set`, 2026-07-07 신설 — 프로젝트 status 대기/진행/완료/보류 전이. 웹 `PUT /:id/status`와 `server/lib/project-status.js` 계약 공유, 저위험·가역이라 승인함 우회 직접 전이+감사로그. 자율 워커는 대신 cycle JSON `project_status` 필드로도 선언 가능)**+**자율 설정 조회/변경 2종(`project_autonomy_get`/`project_autonomy_update`, 2026-07-13 신설 — 프로젝트별 goal/kpi_json/custom_instruction/lead_agent_name/cadence/autonomy_level/autonomy_enabled/risk_approval_threshold. 웹 `GET/PUT /:id/autonomy`와 cadence 허용값(`server/lib/cadence.js#CADENCE_VALUES`)·위험임계값(`server/lib/autonomy.js#RISK_APPROVAL_THRESHOLD_VALUES`)·LEAD 실재확인·자율ON시 LEAD필수 fail-safe까지 계약 공유. AI 콘솔 대화 중 자율 설정을 직접 조회/변경하는 용도)**+조회 2종(`get_current_context`·`memory_search`), 2026-07-03 실사용 기준 20→8 정리 후 command_add·project_status_set 추가로 10→2026-07-13 project_autonomy_get/update 추가로 12, `coo.md`/`trainer.md` 실제 호출 지침과 대응)로 통합됨(옛 별도 `~/workspace/malgnai-mcp` TS 프로젝트를 흡수). `agent_learning_log_add`·`command_add`·`project_status_set`·`project_autonomy_update`는 예외적으로 쓰기 허용 — 나머지 조회 툴은 read-only 원칙 유지. 웹앱과 **동일 sqlite 정본**을 공유하며(웹은 `/api/*`, 에이전트는 stdio MCP) DB 경로는 `MALGNAI_DB_PATH`/`DB_PATH`로 지정. 실행 등록: 전역 `~/.claude.json`(user-scope)이 `node mcp/index.js` 를 가리킨다. 1인·단일머신 사용이라 프로젝트 `.mcp.json`은 중복이라 2026-07-08 제거.
-> 서버 진입점은 `server/node.js`(유일). 앱 구성은 `server/index.js`의 `createApp(env)` 팩토리. DB 는 D1 호환 어댑터(`server/db/sqlite-adapter.js`)로 better-sqlite3 를 감싸 DAO 무수정. DB 경로는 `DB_PATH`(기본 `data/malgnai.db`) — **정본 sqlite는 `data/malgnai.db`(malgnai 내부)**. **스키마 정본 = 루트 `schema.sql`(단일 소스, 2026-07-06 일원화).** 테이블/인덱스는 여기 하나로 선언하고, 기존 테이블 변경분은 `migrations/NNN-*.sql`에 적는다. 라이브 반영은 **`pnpm run db:migrate`(`bin/db-migrate.js`) 한 경로뿐** — 자동 pre-migrate 백업 후 schema.sql 적용→migrations 순차→`_schema_meta.version`(schema+migrations 지문) 스탬프. **웹서버 부팅과 MCP 는 스키마를 만들지 않는다**: 부팅은 `server/dao/init.js`의 `verifySchema`(읽기전용)로 버전만 대조하고 미초기화/드리프트면 부팅 중단(안내). `mcp/db/schema.js`는 PRAGMA만(테이블 생성 제거). 데이터 백필(1회성)은 별도 `pnpm run migrate`(`bin/migrate.js`). ※이 일원화로 옛 좀비 MCP가 `CREATE IF NOT EXISTS`로 삭제 테이블을 부활시키던 사고(issue `43110872`)를 근본 차단.
+### v1 범위 (이번에 실제로 만들 것)
 
-## Commands (pnpm 사용 — 전역 규칙)
+`docs/idea.md` §25의 4단계 로드맵 중, 대표 요청 원문("공통 MCP + 사용자별 작업이력·토큰사용량 조회 웹사이트")에 정확히 대응하는 **1단계 + 2단계까지만 v1**으로 확정한다.
 
-```bash
-pnpm start             # 로컬 서버 기동 (node server/node.js, http://localhost:9000)
-pnpm run scan          # pages.json, components.json, _registry.js 갱신
-pnpm run sync-agents   # ~/.claude/agents/*.md → 서버 DB 동기화
-pnpm run sync-projects # ~/workspace 프로젝트 → 서버 DB 동기화
-pnpm run sync-claude   # Claude 세션/토큰/메모리 통계 동기화 (세션·에이전트별 토큰/비용 적재 포함)
-pnpm run token-report  # 토큰 "도둑 색출" 리포트 (DB만 읽어 0토큰; --since today|week, --limit N)
-pnpm run check-docs    # CLAUDE.md 구조 서술 ↔ 코드 실측 드리프트 대조
-pnpm test              # Playwright E2E
-```
+- **1단계 — 프로젝트 메모리 MCP**: 사용자 인증, MCP 10개 도구(`get_project_context`/`record_work`/`record_decision`/`record_issue`/`update_project_state`/`search_project_history`/`wbs_list`/`wbs_add`/`wbs_bulk_add`/`wbs_update` — `get_my_guidance`는 등록조차 안 함), 직원 웹 조회 화면. 프로젝트는 **사용자 1명이 소유**하는 개인 작업기록이다(팀 공유 아님) — 조직/멤버 개념 자체가 없다(아래 "확정 아키텍처" 참고). **WBS(`wbs_items`)는 2026-07-27 토론 후 v1에 포함 확정** — 여러 사람이 같이 보는 협업 도구가 아니라 `project_id` 단일소유 스코핑의 작업 계획(AI 세션 연속성 + 사람의 진행률 파악용, architecture.md §0 결정20).
+- **2단계 — 세션/토큰 통계**: 외부 설치·운영되는 OTel Collector(이 저장소 구현범위 밖)가 Claude Code native OTel 출력을 세션 요약으로 만들어 `POST /api/sessions`로 전송 → `sessions`/`usage_daily` 저장 → 사용량 웹 대시보드.
 
-> **정확성 보증(드리프트 가드):** 전역 SessionStart 훅(`~/.claude/hooks/session-context.mjs`)이 세션 시작 시 STATUS.md 주입과 함께 `.claude/doc-drift.json` 매니페스트로 구조 서술(api/tables/pages/runners/agents)을 코드와 대조한다. **일치하면 아무것도 안 붙이고(0토큰), 어긋나면 경고만 주입**한다. 구조를 바꿨으면 매니페스트 expected + 서술을 갱신하고 `pnpm run check-docs`로 확인. (이 표준은 전 프로젝트 공통 — 전역 `~/.claude/CLAUDE.md` 참조.)
+**후속 단계로 명확히 분리(지금 손대지 않음):**
+- **3단계 — 직원 가이드**(`guidance`, 규칙 기반 사용 패턴 분석·개선 안내)
+- **4단계 — 조직 학습**(`insights`/`lessons`, Agent/Skill/Knowledge 개선 후보 생성·검증·승인·재배포 파이프라인)
 
-비밀번호/시크릿은 `.dev.vars`(KEY=value)에서 `server/node.js`가 자동 로드. `ADMIN_PASSWORD`=최초 admin 시드 비번(users 비었을 때만), `JWT_SECRET`, `MALGNAI_API_KEY`. 환경변수(`PORT`, `DB_PATH`, `APP_DIR`, `ENVIRONMENT`)로 덮어쓰기 가능.
+3·4단계는 1·2단계로 데이터가 충분히 쌓인 뒤 재검토한다. `docs/schema.sql`에 이 3개 테이블 초안은 미리 적어뒀지만(설계만, v1 migrations 미적용) 실제 반영은 그때 재검토 후 한다.
 
-## vue-zero Rules
+## 아키텍처 확정 상태 (2026-07-27 완료 — 더 이상 "다음 단계" 아님)
 
-- Options API만 사용 (setup/Composition API 금지)
-- `<style scoped>` 금지
-- 유틸 함수는 `app/assets/js/utils.js`에 추가 (import 불가)
-- 파일 추가/삭제 시 `pnpm run scan` (PostToolUse hook이 자동 실행)
-- composables/ 사용 금지
+`docs/idea.md`(원본 개념)를 기반으로 **아키텍처 설계는 이미 완료됐다.** 구현 착수 시 다음 4개 문서가 정본이다:
 
-## Architecture
+- **`docs/architecture.md`** — 시스템 컨텍스트, Worker 구성(단일 Worker+라우트 분리), 핵심 결정 20개와 트레이드오프(§0 — 왜 idea.md 원안에서 이렇게 바뀌었는지 전부 여기), 인증/인가, 텔레메트리 수집 경로, 장애대응, 배포 토폴로지, 데이터 보존정책.
+- **`docs/schema.sql`** — D1 CREATE TABLE/INDEX 정의 정본(users/repositories/projects/decisions/issues/works/project_states/device_tokens/device_pairings/sessions/session_agent_usage/usage_daily/audit_logs/wbs_items + 3~4단계 예정 초안).
+- **`docs/mcp-tools.md`** — MCP 10개 도구 입출력 명세 정본.
+- **`docs/api.md`** — 웹 REST API 라우트 명세 정본.
 
-- **Layout**: 왼쪽 사이드바 (admin 스타일) — `app/layouts/default.vue`. 컴포넌트는 페이지 내 인라인(app/components 비어있음).
-- **Pages (16 + 404 폴백)** (`app/pages/pages.json`): 대시보드(/), 로그인, **승인함(/approvals)**, **자율제어판(/autonomy)**, 사용자관리(/users), 개인설정(/settings), 에이전트(/agents, /agents/:name), 프로젝트(/projects, /projects/:id), 워크스페이스(/workspaces), 활동(/activities), 인사이트(/insights), Claude 모니터(/claude), **AI 콘솔(/console)**, **기능 요청(/feature-requests, 2026-07-14 신설)**.
-- **Server**: Hono API (`server/api/`) + 정적 서빙 + better-sqlite3(D1 호환 어댑터 경유).
-- **DAO** (`server/dao/`): activities, agents, claude, commands, context, projects, users, init(스키마).
-- **DB Tables (22)** (정본 `schema.sql`, 변경분 `migrations/`): users, projects, **project_collaborators**(프로젝트 소유·협업자 공유), activity_logs, agents, agent_learning_logs, claude_stats, claude_memories, claude_sessions, claude_token_stats, claude_model_usage, claude_project_sessions, **claude_session_usage**(세션별 토큰·비용, main/sub 분리·캐시1h·5m), **claude_agent_usage**(서브에이전트 type별 턴/토큰/비용), **commands**(웹→로컬 실행 큐), decisions, issues, memories(Context Router), **app_settings**(전역 K-V, 마스터 킬스위치 등), **push_subscriptions**(PWA 웹푸시 구독, 2026-07-11 추가), **refresh_tokens**(30일 회전형 리프레시 토큰, 2026-07-13 추가), **feature_requests**(malgnai 플랫폼 자체 기능 개선 요청 + AI 완전자동 심사 큐, `review_attempts`로 재시도 상한 관리, 2026-07-14 추가). ※projects/agents/commands 등은 base 스키마 이후 ALTER 마이그레이션으로 컬럼 확장(kind·lead_agent_name·autonomy_*·risk_level 등). **activity_logs**도 재설계로 구조화 컬럼 7 확장(level=work/telemetry/audit·category·title·target_ref·result·links_json·correlation_id). 모든 쓰기는 단일 관문 `server/lib/activity-log.js`(정규화 `activity-normalize.js` 통과) 경유 — 엔진 직접 INSERT 금지. ⚠️ **2026-07-03 단순 코어 전환(P3)**: 실행 규칙 엔진(`execution_rules`)은 최소안전 3종으로 흡수되어 테이블·시드까지 완전 제거됨(`docs/design/simple-core.md`). ⚠️ **2026-07-03 미사용 테이블 정리**: `feedbacks`(완전 배선됐으나 0건 미사용 기능)·`file_summaries`(고아, 참조 無)·`sync_outbox`(폐기된 Cloudflare Workers 원격 아웃박스, 전건 실패 누적 중) 코드+테이블 완전 제거. ⚠️ **2026-07-03 tasks/commands 완전 통합 Phase B**: `tasks` 테이블(및 `decisions`/`issues`/`commands`의 잔존 `task_id` 컬럼) 완전 제거 — tasks→commands 이관은 이미 완료돼 있었고(Phase A), 남은 원본 테이블·죽은 컬럼만 정리(`pnpm run migrate`로 라이브 적용, 사전 백업 확인).
+**idea.md 원안 대비 확정된 핵심 변경**(상세 근거는 architecture.md §0):
+- **organizations 테이블 없음** — 회사가 하나(malgnsoft)뿐이라 멀티테넌시 자체를 안 만든다.
+- **project_members 없음** — "프로젝트"는 팀 공유 엔티티가 아니라 **사용자 1명이 자기 레포지토리에 대해 갖는 개인 작업기록**이다. 같은 코드베이스라는 사실만 신규 `repositories` 테이블로 별도 관리한다.
+- **project_events 통합 이벤트소싱 폐기** — `decisions`(불변 INSERT)/`issues`(PK UPDATE로 open→resolved)/`works`(work 기록) 3테이블 분리로 되돌아갔다(옛 malgnai 실사용 검증 모델 회귀 — architect·backend-dev 교차토론 결과).
+- **텔레메트리는 외부 OTel Collector가 담당** — 이 저장소는 로컬 수집 스크립트를 만들지 않고 `POST /api/sessions`로 완성된 세션 요약만 받는다.
+- **디렉터리**: `src/`가 아니라 `server/`(레거시 계승) + 최상위 `mcp/` 분리, `services/`·`ingest/` 레이어 이름은 안 씀.
 
-## API (`server/api/`)
+## 레거시 코드 안내 — `server/`, `app/`, `mcp/`, `migrations/`, `schema.sql`(루트)
 
-activities, agents, auth(로그인·TOTP·비번), claude(세션/토큰/메모리/프로젝트세션/사용량 통계), commands(명령 큐·claim·승인카드), **console**(Claude 웹콘솔 멀티턴 채팅, commands 테이블 재사용·`task_type='console'`), context(decisions/issues/memories 읽기), dashboard(집계), **feature-requests**(malgnai 플랫폼 자체 기능 개선 요청 제출·조회, 2026-07-14 신설 — project_id는 클라이언트가 지정하지 않고 서버가 항상 malgnai 자신의 프로젝트로 고정, 소유권 스코핑 없는 공유 백로그. 심사는 `engine/feature-review.js`가 엔진 틱마다 완전자동 수행, 승인 시 기존 memories(FEEDBACK) 경로로 다음 project_cycle에 반영 — 아래 "자율 운영 엔진" 참고), **lead**(⚠️ 2026-07-12 엔진↔웹앱 분리 컷오버로 `spawn-due`·`cycle-result`·`command-failed` 3개 라우트 410 Gone+경고로그 소킹 중 — 실행경로는 `com.malgnai.engine`으로 이관됨, 아래 "자율 운영 엔진" 참고. `worker-result`·마스터 킬스위치 라우트는 계속 라이브), **monitor**(실시간 실행 모니터 SSE — `/monitor/stream`으로 exec-monitor.js 이벤트 팬아웃, DB 저장 無·서버 재시작 시 초기화), projects(CRUD·파일탐색·**`/:id/timeline` 3원천 통합 타임라인**), **push**(PWA 웹푸시 구독·발송), **system**(관리자 전용 서버 재시작), users(관리자 전용 CRUD). activities는 GET level/category 필터·POST 정규화 확장. ※`rules`(실행규칙 CRUD)·`/api/commands/scheduled`(정기업무)는 2026-07-03 단순 코어 전환(P3/P4)으로, `feedbacks`는 2026-07-03 미사용 테이블 정리로, `tasks`(`/api/tasks` 호환 shim)는 2026-07-03 tasks/commands 완전 통합 Phase B 마무리로 제거됨(프로젝트 상세 "작업 카드 만들기"는 `/api/commands` 직접 호출로 전환). ※`claude_history` 테이블 및 관련 엔드포인트(`/history`, `/sync/history`)는 2026-07-10 제거(VSCode 확장이 history.jsonl 미갱신으로 stale).
+이 저장소에 남아 있는 위 디렉터리/파일들은 **옛 1인용 "AI 자율 프로젝트 운영 플랫폼"의 구현체이며, 신제품의 아키텍처가 아니다.** 로컬 Node + better-sqlite3 + vue-zero 등은 참고 자료(어떤 패턴이 실사용에서 검증됐는지 확인하는 용도)로만 쓰고, 조만간 Cloudflare Workers/D1 기반 신제품 코드로 전면 교체·제거될 예정이다. 이 코드를 읽고 "지금 이 프로젝트의 구조"라고 오인하지 말 것 — 위 "아키텍처 확정 상태"가 실제 판단 기준이다. (`bin/`·`engine/`는 2026-07-27 이미 백업 후 제거됨 — 자율실행/맥미니 로컬운영 전용이라 원격 Cloudflare 제품과 무관.)
 
-## 자율 운영 엔진 (핵심 — 단순 코어, `docs/design/simple-core.md` 정본)
+## 정본 문서
 
-- **본질 5줄**: 루프가 깨어난다 → 지금 돌 차례인 프로젝트를 고른다(cadence) → 그 프로젝트의 지정 에이전트를 호출한다 → 결과 저장 → 다음 주기 예약.
-- **분산(distributed) 단일 경로** — 프로젝트별 지정 에이전트(`projects.lead_agent_name`)가 자기 STATUS.md/goal 을 읽고 스스로 판단한다. central(중앙 오케스트레이터) 경로는 2026-07-02 완전 제거됨(decision `f467eb52`).
-- **스폰→실행→적재**: ⚠️ **2026-07-12 엔진↔웹앱 분리 Phase 3 컷오버 完** — 실행경로가 `com.malgnai.loop`(HTTP 경유, `bin/loop.js`)에서 `com.malgnai.engine`(HTTP 미사용, `engine/run.js`, 60s)으로 이관됨(`loop`는 bootout+plist 제거). `engine/run.js`가 매 틱 같은 sqlite 파일(`data/malgnai.db`)을 직접 열어 (1) `engine/spawn.js`의 `runSpawnDue`(due 판정·락·비용게이트·`next_run_at` 갱신·`project_cycle` command INSERT, 단일 tx로 원자 처리) → (2) `engine/feature-review.js`의 `reviewFeatureRequestsOnce`(2026-07-14 신설 — `feature_requests` 큐 1건 claim→`claude -p` 완전자동 심사→승인 시 memories(FEEDBACK) 적재, 재시도 `review_attempts` 상한 도달 시 종결 반려로 큐 기아 방지) → (3) `engine/safety-poll.js`의 `safetyPollOnce`(명령 큐 1건 claim→`claude -p`→결과 반영)를 순서대로 수행. 구 HTTP 경로였던 `server/api/lead.js`의 `/spawn-due`·`/cycle-result`·`/command-failed`는 410 Gone+경고로그로 소킹 중(호출자 無 확인됨, 며칠 뒤 0건 재확인되면 물리 삭제 예정 — `docs/design/engine-webapp-separation.md` §5).
-- **집행 트랜잭션**: `server/lib/cycle-ingest.js` 가 워커 제안(proposal)마다 **최소안전 3종 게이트 + 워커 `next` 신호**로 status 를 정한다. ⚠️ **2026-07-06 통합 실행모델(`docs/plan/vscode-web-unified-execution.md` §5)**: proposal = "다음 실행단위"이고, `next='auto'`(가역·저위험)이면서 게이트를 통과하면 `approved`(+`reviewed_by='system-autonomy'`)로 **자동 발행**돼 다음 phase 가 이어진다. `next='ask'`(배포·비가역)·필드누락·게이트실패는 모두 `queued`(승인함). 이로써 지금껏 계산만 되던 `canAutoDispatch` 가 실제로 status 를 결정한다(구 "proposal 은 무조건 queued 강제"는 §5 로 폐기).
-- **최소안전 3종** (`server/lib/autonomy.js`, 2026-07-03 P3 단순화 — 규칙엔진·다층 예산게이트 제거 후 이것만 남음): ① 마스터 킬스위치 `app_settings.autonomy_enabled`='1' · ② 프로젝트별 `projects.autonomy_enabled`='1' + `cadence`!='off' + `lead_agent_name` 존재 · ③ 일일 비용 상한(`DEFAULT_BUDGET.daily_cost_limit_usd`, 기본 $100) — 초과 시 auto→approve 강등. 셋 다 통과해야 auto. **주의: 설계문서의 `autonomy_level L0~L5`는 미구현.**
-- **승인/실행 규율 (2026-07-06 통합 실행모델, `docs/plan/vscode-web-unified-execution.md`)**: **status 자체가 유일한 판별자**(별도 held 플래그 없음). `queued`=held(승인/게이트 대기)의 유일 의미 — poll `claim()`은 **`approved`만** 집는다(§3-3, `queued` 무시로 승인함 우회 봉쇄). 정기 사이클은 `claimed`로 태어나 claim 대상이 아니다. **프로젝트당 active(claimed/running) 최대 1개** 불변식(§7)을 claim·즉시디스패치·spawn-due 3곳이 지켜 phase 가 자연히 순차가 된다. 웹 "로컬 직접 명령"은 `POST /api/commands {direct:true}`로 자가승인(`approved`)돼 승인함을 건너뛴다(§3-1). 수정요청은 원본을 `rejected`+`review_status='changes_requested'`로 마감하고 note 를 `memories(FEEDBACK)`에 적재 → 다음 사이클 워커가 반영(§6, 좀비·재실행 0).
-- **승인함**: `/approvals` — 위험·비가역 작업은 commands 로 쌓여 대표 승인/반려/수정요청 대기.
-- **실시간 실행 모니터** (`server/lib/exec-monitor.js`): 인메모리 EventEmitter 싱글턴. `dispatch-worker.js`가 실행 시작·완료·stderr 청크를 emit → SSE(`/api/monitor/stream`)로 팬아웃 → `/claude` "실행 모니터" 탭에서 실시간 조회. DB 저장 없음, 서버 재시작 시 초기화. 2026-07-08 신설.
-- **직접 명령 단계 이어달리기** (`server/lib/phase-chain.js`): 워커 응답에 `NEXT_PHASE: <다음 지시>` 신호가 있으면 파싱해 다음 단계 command를 **자가승인(approved) + 즉시클레임**으로 생성. §7 active-1 불변식 준수, `MAX_PHASE_ROUNDS=20` 상한. `dispatch-worker.js`(워커 완료 후 체인 판단)·`commands.js PATCH /:id`(수동 완료 시 체인 판단) 양쪽 배선. 2026-07-08 신설(e2e 왕복은 단위 검증까지, 실다세션 미검증).
-
-## 운영 자동화 (맥미니 LaunchAgent 6개)
-
-`~/Library/LaunchAgents/com.malgnai.*.plist`. 로그: `logs/`. 2026-07-03 P4 통합(8→5): `poll`+`autoloop`을 `loop` 1개로 합치고, `scheduler`는 완전 제거. **`retro`(자동 회고)는 P4 때 scheduler와 함께 실수로 같이 삭제됐다가 같은 날 복원** — 단 별도 LaunchAgent를 새로 만들지 않고 `sync`(10분 틱) 끝에 백그라운드 호출로 편승(`bin/retro.sh`), 실제 발동은 `retro-guard.js`의 `RETRO_MIN_INTERVAL_MS`(기본 60분) 게이트로 제한. decision `4cd0383c`. ⚠️ **2026-07-12 엔진↔웹앱 분리 컷오버**: `loop`는 bootout+plist 제거되어 목록에서 빠지고 `engine`이 그 실행경로를 이어받음(5→6, 아래 항목).
-- `server` — 웹서버(:9000), RunAtLoad+KeepAlive
-- `engine`(60s) — `engine/run.js`: 엔진↔웹앱 분리 후 유일한 자율 실행경로(HTTP 미사용, `data/malgnai.db` 직접 오픈). 매 틱 (1) `engine/spawn.js`의 `runSpawnDue()`(due 스폰) → (2) `engine/safety-poll.js`의 `safetyPollOnce()`(큐 1건 claim→`claude -p`→결과 반영)를 순서대로 실행. `app_settings.engine.tick_enabled='1'`로 영구 고정됨. 되돌리기: `logs/archived/com.malgnai.loop.plist.bak` 재적용 또는 `tick_enabled='0'`.
-- `sync`(600s) — `bin/sync-all.sh`: 프로젝트/에이전트/Claude 세션 동기화 + **자동 회고**(`bin/retro.sh` 백그라운드 호출, guard 통과 시에만 실제 발동)
-- `backup`(6h) — `bin/backup-db.sh`: sqlite 온라인 백업(VACUUM INTO + 무결성 검증)
-- `cloudflared` — Named Tunnel 유지
-- `watch` — `bin/start-watch.sh` → `bin/watch-claude.js`: `.claude/projects/**/*.jsonl` 증분 파일 감시로 실시간 Claude 세션/토큰 집계 후 API 동기화(RunAtLoad+KeepAlive 상시 데몬).
-
-## Agent Skill System
-
-- `bin/skill-definitions.js` — 에이전트 역할별 필수 스킬 정의 (팀 분류: 리더십·기획·디자인·개발·품질·커뮤니케이션 등)
-- `bin/sync-agents.js` — 전역 `~/.claude/agents/*.md`(19개)를 파싱하여 서버 DB에 동기화 (스킬 수준 1~5 자동 추정)
-- **학습 실행**: `trainer` 에이전트가 스킬 진단 → knowledge 자료 수집/생성 → 에이전트 MD 보강
-
-## Knowledge Base
-
-- 위치: `~/.claude/knowledge/` (맥미니) — 에이전트별 역할 지식 중앙 저장소
-- `lessons/` : 프로젝트 회고 교훈 축적 (COO/무인 회고가 기록)
-- 학습 루프: 작업 전 lessons 확인 → 수행 → 완료 → 회고 → knowledge 업데이트
-
-## Related Projects
-
-- **mcp** (`mcp/`, 이 저장소 내부): 로컬 MCP 서버 (stdio, JS, 에이전트가 직접 사용). 옛 별도 프로젝트 `malgnai-mcp`를 2026-07-03 흡수 통합. `workspace_scan` 도구로 로컬 폴더 스캔. (아카이브: `~/workspace/malgnai-mcp.archived-20260703`)
-- **Global agents** (`~/.claude/agents/`): 19개 전문가 에이전트 MD 파일.
+- **`docs/idea.md`** — 원본 개념 문서(조직/사용자/프로젝트 모델, 이벤트소싱, MCP 도구 7종, D1 스키마 초안, 1~4단계 로드맵 등). **주의**: 이후 세션에서 여러 항목이 뒤집혔다(위 "아키텍처 확정 상태" 참고) — idea.md 자체를 그대로 정답으로 읽지 말고, 반드시 architecture.md §0(변경 사유)과 함께 볼 것.
+- **`docs/architecture.md`** — 확정 아키텍처(왜 이렇게 설계했는가). §0 핵심 결정 20개가 이 저장소의 가장 중요한 단일 참고 지점.
+- **`docs/schema.sql`** — D1 스키마 정본.
+- **`docs/mcp-tools.md`** — MCP 도구 명세 정본.
+- **`docs/api.md`** — REST API 명세 정본.
+- `STATUS.md` — **미갱신(옛 malgnai 내용 그대로). 후속 세션에서 신제품 기준으로 다시 작성 필요.**

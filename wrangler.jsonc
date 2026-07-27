@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "malgnai-hub",
+  "main": "server/index.js",
+  "compatibility_date": "2026-07-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "MCP_AGENT", "class_name": "MalgnMcpAgent" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MalgnMcpAgent"] }
+  ],
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "malgnai-hub",
+      // wrangler d1 create malgnai-hub 실행 후 반환되는 id로 교체
+      "database_id": "...",
+      "migrations_dir": "./migrations"
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  }
+}
