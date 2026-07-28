@@ -62,7 +62,7 @@
         </ul>
       </div>
 
-      <!-- ============ 개요 탭 (project_states) ============ -->
+      <!-- ============ 개요 탭 (state, project_get_context가 매 호출마다 즉석 계산 — mcp-tools.md §4.1) ============ -->
       <div v-show="tab === 'overview'">
         <div v-if="state" class="card p-4 mb-3">
           <div class="d-flex justify-content-between align-items-start mb-3 flex-wrap gap-2">
@@ -81,33 +81,24 @@
             </div>
           </div>
           <div class="row g-3">
-            <div class="col-12 col-md-6" v-if="state.current_goal">
-              <div class="small text-muted mb-1">목표</div>
-              <div>{{ state.current_goal }}</div>
-            </div>
-            <div class="col-12 col-md-6" v-if="state.current_work">
+            <div class="col-12 col-md-6" v-if="state.currentWork">
               <div class="small text-muted mb-1">현재 작업</div>
-              <div>{{ state.current_work }}</div>
+              <div>{{ state.currentWork }}</div>
             </div>
-            <div class="col-12 col-md-6" v-if="state.next_action">
+            <div class="col-12 col-md-6" v-if="state.nextAction">
               <div class="small text-muted mb-1">다음 행동</div>
-              <div>{{ state.next_action }}</div>
+              <div>{{ state.nextAction }}</div>
             </div>
-            <div class="col-12 col-md-6" v-if="state.blocker_summary">
+            <div class="col-12 col-md-6" v-if="state.blockerSummary">
               <div class="small text-danger mb-1">막힌 것</div>
-              <div>{{ state.blocker_summary }}</div>
+              <div>{{ state.blockerSummary }}</div>
             </div>
-          </div>
-          <div class="d-flex flex-wrap gap-3 mt-3 pt-3 border-top border-hairline small text-faint">
-            <span v-if="state.active_branch"><i class="bi bi-git me-1"></i>{{ state.active_branch }}</span>
-            <span v-if="state.latest_commit" class="font-monospace">{{ state.latest_commit.slice(0, 12) }}</span>
-            <span v-if="state.updated_at">갱신 {{ formatDate(state.updated_at) }}</span>
           </div>
         </div>
         <div v-else class="text-center py-5">
           <i class="bi bi-clipboard-x d-block mb-3" style="font-size:2.5rem;color:var(--color-ink-faint)"></i>
           <div class="fw-medium mb-1 text-muted">아직 기록된 상태가 없습니다</div>
-          <div class="text-faint small">MCP <code>update_project_state</code> 호출로 채워집니다.</div>
+          <div class="text-faint small">작업이력(work_record)이 쌓이면 자동으로 채워집니다.</div>
         </div>
       </div>
 

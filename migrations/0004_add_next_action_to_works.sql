@@ -1,0 +1,11 @@
+-- Migration number: 0004 	 2026-07-28T07:51:29.299Z
+--
+-- [문서 갭 보완] works.next_action 컬럼 추가 — work_record MCP 도구는 이미 nextAction 입력을
+-- 받고 있었으나(mcp/agent.js) server/lib/works.js가 그 값을 어디에도 저장하지 않고 조용히
+-- 버리고 있었다. docs/mcp-tools.md §4.1은 "state.nextAction ← works 최신 1행의 nextAction 필드"
+-- 로 명시하는데 §3.6/schema.sql에는 이를 위한 전용 컬럼이 없었다(문서 자체의 스펙 갭). 결정/이슈/
+-- 작업이력에 이미 있는 session_id 컬럼(§0 결정18)과 동일한 이유 — "기계가 다시 읽어야 하는 값은
+-- 텍스트에 파묻지 않고 전용 컬럼에 둔다"는 이 저장소 하우스 스타일을 따라 detail 텍스트에 파묻는
+-- 대신 전용 컬럼을 추가한다. SQLite(D1)는 ADD COLUMN에 IF NOT EXISTS가 없어 일반 ADD COLUMN으로
+-- 작성(마이그레이션 러너가 체크섬으로 1회만 실행 보장, migrations/README.md 참고).
+ALTER TABLE works ADD COLUMN next_action TEXT;

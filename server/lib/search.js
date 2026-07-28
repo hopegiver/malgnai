@@ -1,4 +1,4 @@
-// search_project_history / GET .../history/search 공통 구현(mcp-tools.md §4.6, api.md §5.4).
+// project_search_history / GET .../history/search 공통 구현(mcp-tools.md §4.6, api.md §5.4).
 // 단일 타입 필터는 그 테이블의 FTS5(trigram) 가상테이블 조회 1개, 복수/미지정은 3개 쿼리를
 // Promise.all로 병렬 실행 후 애플리케이션에서 병합 정렬(architecture.md §0 결정11).
 const TYPES = ['decision', 'issue', 'work']

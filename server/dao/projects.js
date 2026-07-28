@@ -2,7 +2,7 @@
 import { newId } from '../lib/ulid.js'
 
 /** (userId, repository.id)로 get-or-create — 없으면 그 사용자의 신규 project 1개를 생성(§4.1/§4.2).
- *  name은 최초 생성 시에만 사용(없으면 repository.name), 이미 존재하면 무시(bootstrap_project §4.11과 동일 원칙). */
+ *  name은 최초 생성 시에만 사용(없으면 repository.name), 이미 존재하면 무시(project_bootstrap §4.11과 동일 원칙). */
 export async function getOrCreateForUser(db, userId, repository, name) {
   const existing = await db.prepare('SELECT * FROM projects WHERE user_id = ? AND repository_id = ?')
     .bind(userId, repository.id).first()

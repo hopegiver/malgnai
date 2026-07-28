@@ -2,7 +2,7 @@
 import { Hono } from 'hono'
 import * as projectsDao from '../dao/projects.js'
 import * as repositoriesDao from '../dao/repositories.js'
-import * as projectStateLib from '../lib/project-state.js'
+import { computeProjectState } from '../lib/context.js'
 import { requireAdmin } from '../middleware/jwt-auth.js'
 
 const projects = new Hono()
@@ -14,6 +14,10 @@ projects.get('/', async (c) => {
 })
 
 // GET /api/projects/:id — 본인 소유만. 타인 소유는 403 대신 404로 위장(IDOR 방지).
+// state는 더 이상 project_states 조인이 아니라 mcp-tools.md §4.1과 동일 로직으로 즉석 계산
+// (works 최신행+wbs 롤업+open issues, computeProjectState는 server/lib/context.js 재사용 —
+// 2026-07-28 project_states 폐기, api.md §5.3). 키는 phase/health/progress/currentWork/
+// nextAction/blockerSummary — activeBranch/latestCommit은 v1에서 두지 않는다.
 projects.get('/:id', async (c) => {
   const id = c.req.param('id')
   const isAdmin = c.get('userRole') === 'administrator'
@@ -21,7 +25,7 @@ projects.get('/:id', async (c) => {
   if (!project) return c.json({ error: { code: 'NOT_FOUND', message: 'project not found' } }, 404)
 
   const repository = await repositoriesDao.findById(c.env.DB, project.repository_id)
-  const state = await projectStateLib.getState(c.env.DB, id)
+  const { state } = await computeProjectState(c.env.DB, id)
   return c.json({
     id: project.id,
     repository_id: project.repository_id,
@@ -30,7 +34,7 @@ projects.get('/:id', async (c) => {
     name: project.name,
     status: project.status,
     classification: project.classification,
-    state: state || null,
+    state,
     created_at: project.created_at,
     updated_at: project.updated_at
   })

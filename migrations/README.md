@@ -32,3 +32,10 @@ D1 스키마 변경 이력. **wrangler 표준 마이그레이션 체계를 그�
 - `0002_add_refresh_token_revoke_reason.sql` — `refresh_tokens.revoke_reason` 컬럼 추가. 회전
   직후 grace window(10초, `REUSE_GRACE_MS`) 이내 stale 토큰 재사용을 탈취로 오판하지 않기 위함
   (사내 private 프로젝트 ~/workspace/malgnai에서 검증된 패턴 이식, `server/api/auth.js` 참고).
+- `0003_drop_project_states.sql` — `project_states` 테이블 폐기(2026-07-28 전면 개명 + state
+  즉석계산 전환, `docs/mcp-tools.md` §4.1/§5, `docs/schema.sql` §3.7). `update_project_state`
+  MCP 도구도 함께 제거됐다(`mcp/agent.js`).
+- `0004_add_next_action_to_works.sql` — `works.next_action` 컬럼 추가([문서 갭 보완] `work_record`가
+  이미 받고 있던 `nextAction` 입력을 저장할 전용 컬럼이 최초 스키마에 없었다 — `docs/schema.sql`
+  §3.6 참고). `project_get_context`/`project_bootstrap`의 `state.nextAction` 즉석계산이 이 컬럼을
+  읽는다(`server/lib/context.js`).

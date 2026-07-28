@@ -1,4 +1,4 @@
-// decisions(record_decision) 공통 구현 — 불변 이력, 매번 새 행 INSERT(architecture.md §0-11).
+// decisions(decision_record) 공통 구현 — 불변 이력, 매번 새 행 INSERT(architecture.md §0-11).
 // alternatives/reversalCondition은 별도 컬럼이 없어 reason 텍스트에 서술로 흡수하고,
 // impact(string[])는 스키마의 impact TEXT 컬럼에 그대로 저장한다(§3.4 — "구조화 배열은 두지 않는다"
 // 원칙과 impact 컬럼이 이미 존재한다는 사실을 함께 반영한 판단).
@@ -51,7 +51,7 @@ export async function recordDecision(db, { userId, projectId, title, decision, r
   return { decisionId: id, createdAt: now }
 }
 
-/** get_project_context용 — importance 내림차순, 최근순(§4.1). */
+/** project_get_context용 — importance 내림차순, 최근순(§4.1). */
 export async function listTopForContext(db, projectId, limit = 10) {
   const { results } = await db.prepare(
     'SELECT * FROM decisions WHERE project_id = ? ORDER BY importance DESC, created_at DESC LIMIT ?'

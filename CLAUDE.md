@@ -32,7 +32,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `docs/idea.md` §25의 4단계 로드맵 중, 대표 요청 원문("공통 MCP + 사용자별 작업이력·토큰사용량 조회 웹사이트")에 정확히 대응하는 **1단계 + 2단계까지만 v1**으로 확정한다.
 
-- **1단계 — 프로젝트 메모리 MCP**: 사용자 인증, MCP 10개 도구(`get_project_context`/`record_work`/`record_decision`/`record_issue`/`update_project_state`/`search_project_history`/`wbs_list`/`wbs_add`/`wbs_bulk_add`/`wbs_update` — `get_my_guidance`는 등록조차 안 함), 직원 웹 조회 화면. 프로젝트는 **사용자 1명이 소유**하는 개인 작업기록이다(팀 공유 아님) — 조직/멤버 개념 자체가 없다(아래 "확정 아키텍처" 참고). **WBS(`wbs_items`)는 2026-07-27 토론 후 v1에 포함 확정** — 여러 사람이 같이 보는 협업 도구가 아니라 `project_id` 단일소유 스코핑의 작업 계획(AI 세션 연속성 + 사람의 진행률 파악용, architecture.md §0 결정20).
+- **1단계 — 프로젝트 메모리 MCP**: 사용자 인증, MCP 11개 도구(`project_get_context`/`work_record`/`decision_record`/`issue_record`/`issue_resolve`/`project_search_history`/`wbs_list`/`wbs_add`/`wbs_bulk_add`/`wbs_update`/`project_bootstrap` — `get_my_guidance`는 등록조차 안 함, `update_project_state`는 2026-07-28 폐기), 직원 웹 조회 화면. 프로젝트는 **사용자 1명이 소유**하는 개인 작업기록이다(팀 공유 아님) — 조직/멤버 개념 자체가 없다(아래 "확정 아키텍처" 참고). **WBS(`wbs_items`)는 2026-07-27 토론 후 v1에 포함 확정** — 여러 사람이 같이 보는 협업 도구가 아니라 `project_id` 단일소유 스코핑의 작업 계획(AI 세션 연속성 + 사람의 진행률 파악용, architecture.md §0 결정20).
 - **2단계 — 세션/토큰 통계**: 외부 설치·운영되는 OTel Collector(이 저장소 구현범위 밖)가 Claude Code native OTel 출력을 세션 요약으로 만들어 `POST /api/sessions`로 전송 → `sessions`/`usage_daily` 저장 → 사용량 웹 대시보드.
 
 **후속 단계로 명확히 분리(지금 손대지 않음):**
@@ -46,7 +46,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `docs/idea.md`(원본 개념)를 기반으로 **아키텍처 설계는 이미 완료됐다.** 구현 착수 시 다음 4개 문서가 정본이다:
 
 - **`docs/architecture.md`** — 시스템 컨텍스트, Worker 구성(단일 Worker+라우트 분리), 핵심 결정 20개와 트레이드오프(§0 — 왜 idea.md 원안에서 이렇게 바뀌었는지 전부 여기), 인증/인가, 텔레메트리 수집 경로, 장애대응, 배포 토폴로지, 데이터 보존정책.
-- **`docs/schema.sql`** — D1 CREATE TABLE/INDEX 정의 정본(users/repositories/projects/decisions/issues/works/project_states/device_tokens/device_pairings/sessions/session_agent_usage/usage_daily/audit_logs/wbs_items + 3~4단계 예정 초안).
+- **`docs/schema.sql`** — D1 CREATE TABLE/INDEX 정의 정본(users/repositories/projects/decisions/issues/works/device_tokens/device_pairings/sessions/session_agent_usage/usage_daily/audit_logs/wbs_items + 3~4단계 예정 초안. `project_states`는 2026-07-28 폐기).
 - **`docs/mcp-tools.md`** — MCP 10개 도구 입출력 명세 정본.
 - **`docs/api.md`** — 웹 REST API 라우트 명세 정본.
 

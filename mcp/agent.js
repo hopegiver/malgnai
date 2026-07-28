@@ -2,6 +2,12 @@
 // 인증 컨텍스트는 this.props(deviceAuthMiddleware가 주입, architecture.md §6.2)에서 얻는다 —
 // 클라이언트가 보내는 userId는 절대 신뢰하지 않는다(idea.md §12.3). 매 호출마다 D1을 직접 조회하고
 // state/storage에 업무데이터를 이중 저장하지 않는다(architecture.md §0 결정2).
+//
+// 2026-07-28 전면 개명 + project_states 폐기(mcp-tools.md §5): 모든 도구를 `엔티티_동사` 패턴으로
+// 재명명하고, update_project_state 도구/project_states 테이블을 완전히 없앴다 — state는 이제
+// project_get_context/project_bootstrap이 매 호출마다 즉석 계산한다(server/lib/context.js
+// computeProjectState). record_issue(opened/updated/resolved 3분기)는 issue_record(opened 전용)/
+// issue_resolve(resolved 전용) 2개로 분리됐다(issue_update는 만들지 않음, §4.4).
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { McpAgent } from 'agents/mcp'
 import { z } from 'zod'
@@ -10,8 +16,7 @@ import * as projectsDao from '../server/dao/projects.js'
 import { getProjectContext } from '../server/lib/context.js'
 import { recordWork } from '../server/lib/works.js'
 import { recordDecision } from '../server/lib/decisions.js'
-import { recordIssue } from '../server/lib/issues.js'
-import { updateState } from '../server/lib/project-state.js'
+import { recordIssue, resolveIssue } from '../server/lib/issues.js'
 import { searchProjectHistory } from '../server/lib/search.js'
 import * as wbsLib from '../server/lib/wbs.js'
 import { bootstrapProject } from '../server/lib/bootstrap.js'
@@ -43,12 +48,13 @@ export class MalgnMcpAgent extends McpAgent {
 
   async init() {
     this.server.registerTool(
-      'get_project_context',
+      'project_get_context',
       {
-        description: '프로젝트의 현재 상태·중요 결정·열린 이슈·최근 작업이력을 조합해 조회한다.',
+        description: '프로젝트의 현재 상태(즉석 계산)·중요 결정·열린 이슈·최근 작업이력·WBS를 조합해 조회한다.',
         inputSchema: {
           repositoryKey: z.string().min(1),
-          sections: z.array(z.enum(['state', 'decisions', 'issues', 'recentWork'])).optional(),
+          projectKey: z.string().optional(),
+          sections: z.array(z.enum(['state', 'decisions', 'issues', 'recentWork', 'wbs'])).optional(),
           limit: z.number().int().min(1).max(50).optional()
         }
       },
@@ -64,11 +70,12 @@ export class MalgnMcpAgent extends McpAgent {
     )
 
     this.server.registerTool(
-      'record_work',
+      'work_record',
       {
-        description: '진행 중이거나 완료된 작업을 기록한다(started/progress/completed/blocked).',
+        description: '진행 중이거나 완료된 작업을 기록한다(started/progress/completed/blocked). nextAction을 채우면 project_get_context의 state.nextAction에 그대로 이어진다.',
         inputSchema: {
           repositoryKey: z.string().min(1),
+          projectKey: z.string().optional(),
           status: z.enum(['started', 'progress', 'completed', 'blocked']),
           title: z.string().min(1).max(200),
           summary: z.string().max(2000).optional(),
@@ -91,7 +98,7 @@ export class MalgnMcpAgent extends McpAgent {
     )
 
     this.server.registerTool(
-      'record_decision',
+      'decision_record',
       {
         description: '중요한 의사결정을 불변 이력으로 기록한다(매번 새 행).',
         inputSchema: {
@@ -118,19 +125,15 @@ export class MalgnMcpAgent extends McpAgent {
     )
 
     this.server.registerTool(
-      'record_issue',
+      'issue_record',
       {
-        description: '이슈를 열거나(opened)/갱신(updated)/해결(resolved)한다. opened 응답의 issueId를 보관해야 이후 resolve가 가능하다.',
+        description: '이슈를 새로 연다(opened 전용). 응답의 issueId를 보관해야 이후 issue_resolve가 가능하다. 열린 이슈를 나중에 갱신하는 기능은 없다(issue_update 미제공, §4.4).',
         inputSchema: {
           repositoryKey: z.string().min(1),
-          issueId: z.string().optional(),
-          status: z.enum(['opened', 'updated', 'resolved']),
-          title: z.string().max(200).optional(),
-          summary: z.string().optional(),
+          title: z.string().min(1).max(200),
+          summary: z.string().min(1),
           severity: z.enum(['low', 'medium', 'high', 'critical']).optional(),
           suspectedCause: z.string().optional(),
-          result: z.string().optional(),
-          nextAction: z.string().optional(),
           idempotencyKey: z.string().min(1)
         }
       },
@@ -146,39 +149,28 @@ export class MalgnMcpAgent extends McpAgent {
     )
 
     this.server.registerTool(
-      'update_project_state',
+      'issue_resolve',
       {
-        description: '프로젝트 진행 상태를 낙관적 동시성(expectedVersion)으로 갱신한다.',
+        description: 'issue_record로 연 이슈를 해결 처리한다(resolved 전용). issueId가 없거나 본인 프로젝트의 이슈가 아니면 NOT_FOUND.',
         inputSchema: {
           repositoryKey: z.string().min(1),
-          expectedVersion: z.number().int().min(1),
-          patch: z.object({
-            progress: z.number().int().min(0).max(100).optional(),
-            currentWork: z.string().optional(),
-            nextAction: z.string().optional(),
-            health: z.enum(['normal', 'warning', 'critical']).optional(),
-            phase: z.string().optional(),
-            blockerSummary: z.string().optional(),
-            activeBranch: z.string().optional(),
-            latestCommit: z.string().optional(),
-            currentGoal: z.string().optional()
-          })
+          issueId: z.string().min(1),
+          result: z.string().min(1)
         }
       },
-      async ({ repositoryKey, expectedVersion, patch }) => {
+      async ({ repositoryKey, issueId, result }) => {
         try {
-          const { userId, project } = await this.resolveProject(repositoryKey)
-          const state = await updateState(this.env.DB, { projectId: project.id, userId, expectedVersion, patch })
-          return textResult({ version: state.version })
+          const { project } = await this.resolveProject(repositoryKey)
+          const out = await resolveIssue(this.env.DB, { projectId: project.id, issueId, result })
+          return textResult(out)
         } catch (e) {
-          if (e.name === 'ConflictError') return textResult({ error: 'VERSION_CONFLICT', current: e.current })
           return errorResult(e)
         }
       }
     )
 
     this.server.registerTool(
-      'search_project_history',
+      'project_search_history',
       {
         description: '결정/이슈/작업이력을 전문검색(trigram FTS5)한다. repositoryKey 필수(본인 프로젝트만).',
         inputSchema: {
@@ -315,7 +307,7 @@ export class MalgnMcpAgent extends McpAgent {
     )
 
     this.server.registerTool(
-      'bootstrap_project',
+      'project_bootstrap',
       {
         description: '이 레포지토리를 malgnai-hub에 최초 등록(get-or-create)하고, 프로젝트 루트에 그대로 쓸 수 있는 파일 3종의 마크다운과 폴더 스캐폴드 목록을 반환한다. statusMarkdown은 현재 컨텍스트(상태/결정/이슈/최근작업)를 조합한 STATUS.md(YAML frontmatter 포함, 매번 새로 조립). claudeMarkdown/docsReadmeMarkdown은 CLAUDE.md/docs/README.md용 고정 템플릿(D1 조회와 무관하게 항상 동일, repositoryKey만 치환), scaffoldFolders는 고정 배열 ["docs","src","output"] — 이미 로컬에 내용이 채워진 파일이 있으면 덮어쓰지 않도록 판단하는 것은 클라이언트 몫이다. 이미 등록된 프로젝트에 재호출해도 아무것도 덮어쓰지 않고 조회만 한다(멱등).',
         inputSchema: {
