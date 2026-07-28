@@ -1,5 +1,5 @@
 # STATUS — malgnai-hub
-_최종 갱신: 2026-07-27 — MCP 11번째 도구 bootstrap_project 추가 배포, https://malgnai-hub.malgnsoft.workers.dev 실배포 유지 중._
+_최종 갱신: 2026-07-28 — bootstrap_project가 CLAUDE.md/docs/README.md/폴더 스캐폴드까지 반환하도록 확장 배포, https://malgnai-hub.malgnsoft.workers.dev 실배포 유지 중._
 <!-- malgnai-mcp project_id: 693caed1-0d3d-4819-b787-75baa829bb80 -->
 
 > **malgnai-hub** = **"맑은소프트 공통 프로젝트 메모리 MCP + 대시보드"** — 프로젝트 운영 이벤트 허브이자 Claude Code 플러그인의 조직 학습 시스템. 회사 전 직원이 공유하는 공통 MCP로 프로젝트별 작업이력·결정·이슈·상태를 Cloudflare D1에 축적하고, 웹 대시보드로 본인 작업이력·토큰/세션 사용량을 조회한다.
@@ -18,6 +18,7 @@ _최종 갱신: 2026-07-27 — MCP 11번째 도구 bootstrap_project 추가 배�
 
 ## ✅ 최근 완료 (상세=MCP decision id)
 
+- **[07-28] `bootstrap_project` 출력 확장** — claudeMarkdown(MCP 사용규칙+STATUS.md 작성규칙 내장)/docsReadmeMarkdown/scaffoldFolders(고정 `["docs","src","output"]`) 추가. 실제 파일쓰기는 여전히 플러그인(보류) 몫 — commit `4a35923`, decision `e901d168`.
 - **[07-27] MCP 11번째 도구 `bootstrap_project` 추가** — repositories/projects get-or-create(멱등) + 서버가 조립하는 STATUS.md(YAML frontmatter `malgnai_hub:` 블록, 사내 malgnai-mcp 관례와 이름·형식 분리). 플러그인 연동은 범위 밖(보류) — commit `6675537`, decision `ee32e109`.
 - **[07-27] 계정관리 라운드 배포** — 프로필/비밀번호변경/관리자 사용자관리(GET·POST·PATCH /api/admin/users, 마지막관리자 보호)/인증키(디바이스) 관리+.mcp.json 복사·다운로드. 실 URL 스모크 테스트 통과, commit `9870af9`. MCP 인증 OAuth 도입은 이번엔 보류 — decision `bfc11390`.
 - **[07-27] v1 실배포 + 스모크 테스트 통과** — 위 "현재 라이브 상태" 참고. 전체 WBS는 `wbs_list`로 조회.
