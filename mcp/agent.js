@@ -317,7 +317,7 @@ export class MalgnMcpAgent extends McpAgent {
     this.server.registerTool(
       'bootstrap_project',
       {
-        description: '이 레포지토리를 malgnai-hub에 최초 등록(get-or-create)하고, 현재 컨텍스트(상태/결정/이슈/최근작업)를 조합해 프로젝트 루트 STATUS.md에 그대로 쓸 수 있는 마크다운(YAML frontmatter 포함)을 반환한다. 이미 등록된 프로젝트에 재호출해도 아무것도 덮어쓰지 않고 조회만 한다(멱등).',
+        description: '이 레포지토리를 malgnai-hub에 최초 등록(get-or-create)하고, 프로젝트 루트에 그대로 쓸 수 있는 파일 3종의 마크다운과 폴더 스캐폴드 목록을 반환한다. statusMarkdown은 현재 컨텍스트(상태/결정/이슈/최근작업)를 조합한 STATUS.md(YAML frontmatter 포함, 매번 새로 조립). claudeMarkdown/docsReadmeMarkdown은 CLAUDE.md/docs/README.md용 고정 템플릿(D1 조회와 무관하게 항상 동일, repositoryKey만 치환), scaffoldFolders는 고정 배열 ["docs","src","output"] — 이미 로컬에 내용이 채워진 파일이 있으면 덮어쓰지 않도록 판단하는 것은 클라이언트 몫이다. 이미 등록된 프로젝트에 재호출해도 아무것도 덮어쓰지 않고 조회만 한다(멱등).',
         inputSchema: {
           repositoryKey: z.string().min(1),
           repositoryName: z.string().optional(),

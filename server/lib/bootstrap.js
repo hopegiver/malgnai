@@ -2,6 +2,8 @@
 // get_project_context와 동일한 조합 로직(server/lib/context.js)으로 state/decisions/issues/recentWork를
 // 모아 STATUS.md 마크다운 문자열 하나로 조립해 반환한다. 포맷을 서버가 소유 — 클라이언트는 그대로
 // 파일에 쓰기만 하면 된다. 이미 존재하는 프로젝트 재호출은 아무것도 덮어쓰지 않고 조회만(멱등).
+// claudeMarkdown/docsReadmeMarkdown/scaffoldFolders는 D1 조회에 의존하지 않는 고정 템플릿이라
+// isNew나 컨텍스트 조회 성공 여부와 무관하게 항상 같은 값을 반환한다(§4.11 "비정상 케이스").
 import * as repositoriesDao from '../dao/repositories.js'
 import * as projectsDao from '../dao/projects.js'
 import { getProjectContext } from './context.js'
@@ -23,6 +25,46 @@ function esc(v) {
 function today() {
   return new Date().toISOString().slice(0, 10)
 }
+
+// CLAUDE.md 템플릿(mcp-tools.md §4.11) — isNew/D1 조회 결과와 무관하게 항상 같은 고정 내용,
+// repositoryKey 자리만 실제 입력값으로 치환한다.
+function renderClaudeMarkdown(repositoryKey) {
+  return `# CLAUDE.md
+
+이 프로젝트는 malgnai-hub(맑은소프트 공통 프로젝트 메모리 MCP)로 작업 이력을 추적한다.
+
+## 새 세션 부트스트랩
+- **L0(항상):** 이 파일 + \`STATUS.md\`. \`STATUS.md\` 상단 YAML frontmatter의 \`malgnai_hub.project_id\`가 이 프로젝트의 malgnai-hub 식별자다.
+- **L1(필요 시):** 텍스트 검색이 필요하면 \`search_project_history\` MCP 도구 호출.
+- **상황 파악하려고 코드/문서 통독 금지** — STATUS.md + 이 파일이면 대부분 충분.
+
+## malgnai-hub MCP 사용 규칙
+- **작업 시작 전**: \`get_project_context\`로 현재 상태·최근 결정·열린 이슈를 먼저 확인한다.
+- **의미 있는 작업을 마쳤을 때**: \`record_work\`(started/progress/completed/blocked 상태와 요약).
+- **중요한 결정을 내렸을 때**: \`record_decision\`(결정+이유, \`importance\`는 매번 실제로 판단해서 1~5 지정 — 기본값 3 습관적 사용 금지).
+- **막힌 것/장애물을 발견했을 때**: \`record_issue\`(status='opened'), 해결되면 같은 \`issueId\`로 \`record_issue\`(status='resolved').
+- **진행률/현재 작업을 갱신할 때**: \`update_project_state\`(\`expectedVersion\`으로 낙관적 동시성 — 충돌 시 도구가 최신 state를 함께 돌려주니 병합 후 재시도).
+- **여러 단계로 나뉘는 작업**: \`wbs_add\`/\`wbs_bulk_add\`로 계획을 등록하고, 단계가 끝날 때마다 \`wbs_update\`로 갱신.
+- **모든 도구는 \`repositoryKey\` 필수** — 이 프로젝트의 repositoryKey는 \`${repositoryKey}\`.
+
+## STATUS.md 작성 규칙
+- 진행 상태의 단일 소스. 착수 전 읽고, 상태가 바뀌면 끝내기 전 갱신한다.
+- 완료 항목은 1줄 요약만, 완료 섹션은 최근 5~7개만 유지한다.
+- 헤더(\`_최종 갱신: ..._\` 줄)는 매번 통째로 교체한다 — "직전:" 체이닝 금지.
+- 상세 이력은 STATUS.md에 쓰지 않고 malgnai-hub MCP(\`record_decision\`/\`record_issue\`/\`record_work\`)에 남긴다 — STATUS.md는 "지금 돌아가는 것·다음 것·열린 이슈"만 남긴다.
+`
+}
+
+// docs/README.md 템플릿(mcp-tools.md §4.11) — 완전 고정 스텁, 치환 값 없음.
+const DOCS_README_MARKDOWN = `# 문서 지도
+
+이 파일은 \`docs/\` 아래 문서들의 지도다. 새 문서를 추가하면 여기 한 줄로 링크를 남긴다.
+
+- (아직 문서 없음)
+`
+
+// 폴더 스캐폴드(mcp-tools.md §4.11) — 고정 배열, D1 조회와 무관.
+const SCAFFOLD_FOLDERS = ['docs', 'src', 'output']
 
 function renderState(state) {
   if (!state) return '- 아직 기록된 상태 없음(update_project_state로 기록 시작)'
@@ -65,7 +107,7 @@ function renderIssues(issues) {
 
 /**
  * bootstrapProject(db, userId, { repositoryKey, repositoryName?, projectName? })
- * → { projectId, repositoryId, isNew, webUrl, statusMarkdown }
+ * → { projectId, repositoryId, isNew, webUrl, statusMarkdown, claudeMarkdown, docsReadmeMarkdown, scaffoldFolders }
  */
 export async function bootstrapProject(db, userId, { repositoryKey, repositoryName, projectName } = {}) {
   if (!repositoryKey || typeof repositoryKey !== 'string') {
@@ -114,6 +156,9 @@ ${renderIssues(ctx.issues)}
     repositoryId: repository.id,
     isNew,
     webUrl,
-    statusMarkdown
+    statusMarkdown,
+    claudeMarkdown: renderClaudeMarkdown(repository.repository_key),
+    docsReadmeMarkdown: DOCS_README_MARKDOWN,
+    scaffoldFolders: SCAFFOLD_FOLDERS
   }
 }
