@@ -17,12 +17,16 @@ export async function findByHash(db, tokenHash) {
   return db.prepare('SELECT * FROM refresh_tokens WHERE token_hash = ?').bind(tokenHash).first()
 }
 
-/** 정상 회전(최초 사용) — revoke_reason='rotated'로 마킹해 grace window 판정의 기준을 남긴다. */
+/** 정상 회전(최초 사용) — revoke_reason='rotated'로 마킹해 grace window 판정의 기준을 남긴다.
+ *  status='active' 조건부 UPDATE라 동시 회전 요청 중 하나만 실제로 행을 바꾼다 — 그 성패를
+ *  호출자(server/lib/rotating-token.js)가 판단할 수 있도록 changes>0 여부를 반환한다
+ *  (security 리뷰 H1 — 예전엔 이 성패를 확인하지 않아 동시 재사용이 탐지 없이 통과했다). */
 export async function markRotated(db, id) {
   const now = new Date().toISOString()
-  await db.prepare(
+  const res = await db.prepare(
     "UPDATE refresh_tokens SET status='rotated', revoke_reason='rotated', revoked_at=? WHERE id = ? AND status='active'"
   ).bind(now, id).run()
+  return res.meta.changes > 0
 }
 
 /** 해당 유저의 모든 refresh token을 일괄 폐기. reason 기본값은 재사용 탐지(grace window 밖 재사용,

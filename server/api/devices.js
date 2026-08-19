@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 import * as devicePairingsDao from '../dao/device-pairings.js'
 import * as deviceTokensDao from '../dao/device-tokens.js'
 import * as auditLogsDao from '../dao/audit-logs.js'
+import * as oauthRefreshTokensDao from '../dao/oauth-refresh-tokens.js'
 import { generateOpaqueToken, sha256Hex } from '../lib/tokens.js'
 
 const devices = new Hono()
@@ -103,6 +104,9 @@ devices.delete('/:id', async (c) => {
 
   const revoked = await deviceTokensDao.revoke(c.env.DB, id)
   if (revoked) {
+    // 이 디바이스 토큰이 OAuth로 발급된 것이었다면 연결된 refresh token도 함께 폐기한다(레거시
+    // pair-approve 발급분은 애초에 oauth_refresh_tokens 행이 없으므로 그냥 0건 UPDATE로 끝난다).
+    await oauthRefreshTokensDao.revokeAllForDeviceToken(c.env.DB, id, 'device_revoked')
     await auditLogsDao.record(c.env.DB, {
       actorUserId: userId, action: 'device_token.revoked', targetType: 'device_token', targetId: id,
       metadata: isAdmin && !isOwner ? { cross_user: true, owner_user_id: token.user_id } : undefined

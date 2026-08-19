@@ -116,6 +116,28 @@ export async function verifyAccessToken(token, secret) {
 }
 
 // ---------------------------------------------------------------------------
+// OAuth 2.1(PKCE) — device_token(MCP) 발급 축의 신규 경로. 발급되는 access/refresh token은
+// 여전히 opaque token이고 device_tokens.token_hash에 SHA-256 해시로 저장되는 기존 구조를
+// 그대로 재사용한다(mcp/device-auth.js는 변경 없음 — 이 Bearer 값이 OAuth로 발급됐는지
+// pair-approve로 발급됐는지는 /mcp 인증 시점에 구분할 필요가 없다).
+// ---------------------------------------------------------------------------
+export const OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60 // 1시간
+export const OAUTH_REFRESH_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 90 // 90일
+
+// PKCE code_verifier 형식(RFC 7636 §4.1): unreserved 문자 43~128자.
+const PKCE_VERIFIER_RE = /^[A-Za-z0-9\-._~]{43,128}$/
+
+export function isValidPkceVerifierFormat(codeVerifier) {
+  return typeof codeVerifier === 'string' && PKCE_VERIFIER_RE.test(codeVerifier)
+}
+
+/** S256 방식: BASE64URL(SHA256(code_verifier)) === code_challenge 검증. */
+export async function verifyPkceS256(codeVerifier, codeChallenge) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(codeVerifier))
+  return base64UrlEncode(new Uint8Array(digest)) === codeChallenge
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 function timingSafeEqualBytes(a, b) {

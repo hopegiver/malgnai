@@ -319,6 +319,120 @@ function deviceStatusMeta(status) {
     : { label: '활성', cls: 'bg-success' }
 }
 
+/** catalog_items.item_type(schema.sql §3.17): agent/skill/knowledge. */
+function catalogItemTypeMeta(itemType) {
+  const M = {
+    agent: { label: '에이전트', cls: 'bg-primary', icon: 'bi-robot' },
+    skill: { label: '스킬', cls: 'bg-info', icon: 'bi-lightning-charge' },
+    knowledge: { label: '지식', cls: 'bg-secondary', icon: 'bi-book' },
+  }
+  return M[itemType] || { label: itemType || '-', cls: 'bg-secondary', icon: 'bi-question-circle' }
+}
+
+/** catalog_promotions.status(schema.sql §3.17): draft/review/promoted/deprecated.
+ * v1엔 승격 파이프라인이 아직 없어 값이 없는(null) 경우가 대부분 — 그 경우 "평가 전"으로 표시. */
+function catalogPromotionStatusMeta(status) {
+  const M = {
+    draft: { label: '초안', cls: 'bg-secondary' },
+    review: { label: '검토중', cls: 'bg-warning' },
+    promoted: { label: '승격됨', cls: 'bg-success' },
+    deprecated: { label: '폐기됨', cls: 'bg-danger' },
+  }
+  return M[status] || { label: '평가 전', cls: 'bg-light text-dark' }
+}
+
+/**
+ * 카탈로그 조직도화 — 카테고리 정적 lookup (docs/ux/catalog-information-architecture.md §4~5 정본).
+ * schema.sql의 catalog_items에는 category 컬럼이 없어(마이그레이션 불필요, IA 문서 §확인 완료)
+ * DB 변경 없이 프론트 정적 매핑으로만 그룹핑한다. 3개 탭(agent/skill/knowledge)은 서로 다른 신뢰
+ * 가능한 원천 데이터를 쓴다: agent는 slug 확정 매핑(IA §4, 21개 전수 조사), skill은 slug 접두사
+ * (IA §2.2 — 접두사 없는 24개까지 8분류로 재태깅하는 건 이번 범위 밖, 추측 금지), knowledge는
+ * source_path의 폴더 세그먼트(이미 있는 데이터, 태깅 불필요).
+ */
+
+/** agent 카테고리 표시 순서(IA §4 — "위임 흐름" 순서 그대로 조직도 의미를 갖게 배치). '기타'는
+ * lookup에 없는 신규 agent용 폴백 섹션으로 항상 맨 끝에 고정한다(IA §7 — 사라짐 방지). */
+const CATALOG_AGENT_CATEGORY_ORDER = ['총괄', '리서치·기획', '설계', '개발·구축', '품질·검증', '제안·사업성', '콘텐츠·커뮤니케이션', '조직 학습·평가', '기타']
+
+/** agents.slug → 카테고리(IA §4 표, 21개 확정 매핑 그대로). */
+const CATALOG_AGENT_CATEGORY_MAP = {
+  pm: '총괄',
+  researcher: '리서치·기획',
+  planner: '리서치·기획',
+  architect: '설계',
+  'ux-designer': '설계',
+  'visual-designer': '설계',
+  'backend-dev': '개발·구축',
+  'frontend-dev': '개발·구축',
+  devops: '개발·구축',
+  'qa-engineer': '품질·검증',
+  security: '품질·검증',
+  reviewer: '품질·검증',
+  'capture-strategist': '제안·사업성',
+  'rfp-analyst': '제안·사업성',
+  finance: '제안·사업성',
+  writer: '콘텐츠·커뮤니케이션',
+  presenter: '콘텐츠·커뮤니케이션',
+  marketer: '콘텐츠·커뮤니케이션',
+  localizer: '콘텐츠·커뮤니케이션',
+  trainer: '조직 학습·평가',
+  evaluator: '조직 학습·평가',
+}
+
+/** agent slug → 카테고리 라벨. lookup에 없으면(신규 agent 동기화 지연) '기타'로 폴백. */
+function catalogAgentCategory(slug) {
+  return CATALOG_AGENT_CATEGORY_MAP[slug] || '기타'
+}
+
+/** skill 카테고리 표시 순서. IA §2.2: 접두사 없는 24개까지 8분류로 확정 태깅하진 않았으므로
+ * 이 이상 세분화하지 않는다(추측 금지) — slug 접두사 3종 + 기타로만 단순 그룹핑. */
+const CATALOG_SKILL_CATEGORY_ORDER = ['공통', '도메인', '주제학습', '기타']
+
+/** skill slug 접두사 → 카테고리 라벨. common-/domain-/topic- 3종 접두사만 신뢰하고, 그 외
+ * (접두사 없는 24개 포함)는 전부 '기타'로 묶는다(IA §2.2 결론). */
+function catalogSkillCategory(slug) {
+  if (!slug) return '기타'
+  if (slug.startsWith('common-')) return '공통'
+  if (slug.startsWith('domain-')) return '도메인'
+  if (slug.startsWith('topic-')) return '주제학습'
+  return '기타'
+}
+
+/** knowledge slug(예: 'backend/api-implementation-patterns')의 폴더 세그먼트를 추출한다.
+ * 주의: source_path(schema.sql, 'malgn-dev/knowledge/backend/....md')는 상세 조회
+ * (GET /api/catalog/:id) 응답에만 있고, 목록 조회(GET /api/catalog) 응답에는 내려오지 않는다
+ * (server/api/catalog.js 목록 직렬화 확인, 2026-08-06) — 실측 없이 IA 문서의 source_path 가정을
+ * 그대로 구현했다면 전량 '기타'로 깨졌을 것(실측 결과 실제로 재현됨). 대신 목록 응답에 이미 있는
+ * slug가 'folder/name' 형식으로 동일한 폴더 정보를 담고 있어 이걸 쓴다. slug에 '/'가 없으면(예:
+ * 'README', 카테고리 아님) '기타'로 폴백. */
+function catalogKnowledgeCategory(slug) {
+  if (!slug) return '기타'
+  const idx = slug.indexOf('/')
+  if (idx <= 0) return '기타'
+  return slug.slice(0, idx)
+}
+
+/**
+ * 신뢰 소스(회사 GitHub 플러그인 repo의 content_md, work_record 자유서술 텍스트 등)를 안전한
+ * HTML로 변환한다. marked로 파싱 후 DOMPurify로 살균 — v-html 주입 전 항상 이 함수를 거친다(raw
+ * marked.parse() 직접 v-html 금지). marked/DOMPurify는 index.html에서 CDN으로 로드(전역
+ * marked/DOMPurify 사용, 카탈로그 상세 전용 아님 — 프로젝트 상세 등 v-html 렌더 화면 전반에서 공용).
+ * @param {string} md
+ * @param {object} [opts] - marked.parse()로 그대로 전달되는 옵션(예: { breaks: true }로 단일
+ *   개행도 <br> 처리). 기존 호출부(카탈로그 상세)는 인자를 넘기지 않으므로 기본값 {}으로 하위호환 유지.
+ */
+function renderMarkdown(md, opts = {}) {
+  if (!md) return ''
+  try {
+    // agent/skill 원본 md 최상단의 YAML frontmatter(--- name/description ... ---)는
+    // 카탈로그 화면에 이미 display_name/description으로 표시되므로 본문 렌더링에서는 제거한다.
+    const stripped = md.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '')
+    return DOMPurify.sanitize(marked.parse(stripped, opts))
+  } catch {
+    return '<p class="text-danger">마크다운 렌더링에 실패했습니다.</p>'
+  }
+}
+
 /**
  * 문자열 콘텐츠를 파일로 즉시 다운로드시킨다(Blob URL 패턴 — 트리거 즉시 해제해 누수 방지).
  * @param {string} filename

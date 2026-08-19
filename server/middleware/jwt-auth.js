@@ -8,7 +8,16 @@ export const PUBLIC_PATHS = new Set([
   '/api/auth/login',
   '/api/auth/refresh',
   '/api/devices/pair-init',
-  '/api/devices/pair-status'
+  '/api/devices/pair-status',
+  // OAuth 2.1(PKCE) 표준 프로토콜 엔드포인트 — 클라이언트 등록/토큰 교환은 세션 없이 호출된다.
+  // /api/oauth/authorize-context, /api/oauth/consent는 여기에 넣지 않는다(JWT 게이트 유지).
+  '/api/oauth/token',
+  '/api/oauth/register',
+  // POST /api/sessions — JWT가 아니라 device_token 인증(architecture.md §7.2, §0 결정10).
+  // 여기서는 전역 JWT 게이트만 우회시키고, 실제 인증은 server/api/sessions.js의
+  // requireDeviceToken 미들웨어(mcp/device-auth.js 재사용)가 무조건 강제한다 — "무인증 통과"가
+  // 아니라 "인증 방식이 다를 뿐"이다.
+  '/api/sessions'
 ])
 
 export async function jwtAuthMiddleware(c, next) {

@@ -1,0 +1,12 @@
+-- Migration number: 0008 	 2026-08-11T00:00:01.000Z
+--
+-- device_tokens에 OAuth 발급 출처 태그 컬럼 추가. NULL=기존 pair-approve 발급분(레거시).
+-- 값 있음=OAuth 발급분(사전등록 트러스트 client_id 또는 DCR로 등록된 client_id 그대로 저장 —
+-- "OAuth 경유임을 표시하는 태그" 겸 어떤 client가 발급했는지 추적용).
+--
+-- MySQL과 달리 SQLite(D1)의 ADD COLUMN은 IF NOT EXISTS를 지원하지 않지만, 마이그레이션 러너가
+-- 체크섬으로 1회만 실행함을 보장하므로 재실행 시 별도 조치는 불필요하다(0002와 동일 관례).
+--
+-- expires_at 컬럼은 이미 0001_init_v1_schema.sql에 존재하므로(레거시 pair-approve 발급분은
+-- NULL로 무기한) 이 마이그레이션에서 다시 추가하지 않는다.
+ALTER TABLE device_tokens ADD COLUMN oauth_client_id TEXT;

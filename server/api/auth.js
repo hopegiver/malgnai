@@ -2,7 +2,8 @@
 import { Hono } from 'hono'
 import * as usersDao from '../dao/users.js'
 import * as refreshTokensDao from '../dao/refresh-tokens.js'
-import { verifyPassword, hashPassword, signAccessToken, generateOpaqueToken, sha256Hex, REFRESH_TOKEN_TTL_SECONDS, REUSE_GRACE_MS } from '../lib/tokens.js'
+import { verifyPassword, hashPassword, signAccessToken, generateOpaqueToken, sha256Hex, REFRESH_TOKEN_TTL_SECONDS } from '../lib/tokens.js'
+import { rotateOrDetectReuse } from '../lib/rotating-token.js'
 
 const NAME_MAX_LENGTH = 100
 const NEW_PASSWORD_MIN_LENGTH = 12
@@ -36,14 +37,13 @@ auth.post('/login', async (c) => {
   return c.json(pair)
 })
 
-// [재사용 탐지 + grace window] 회전형 refresh token. 매 호출마다 기존 토큰을 revoke(reason='rotated')
-// 하고 새 쌍을 발급한다. 이미 revoke된 토큰이 다시 들어오면 원칙적으로 탈취 신호지만, 그 revoke가
-// "정상 회전"(revoke_reason='rotated')이었고 REUSE_GRACE_MS(10초) 이내라면 두 탭 동시 갱신·재시도
-// 중복 도달 같은 흔한 레이스일 뿐이다 — 이 경우 탈취로 취급하지 않고 이 요청 몫의 새 쌍만 추가
-// 발급한다(다른 세션은 건드리지 않음). logout으로 revoke됐거나 이미 reuse_detected로 폐기된
-// 토큰의 재사용, 또는 grace window를 넘긴 재사용만 진짜 탈취로 간주해 유저 전체를 폐기한다
-// (사내 private 프로젝트 ~/workspace/malgnai/server/api/auth.js — 2026-07-13 reviewer 리뷰로
-// 재현·수정된 회귀 — 검증된 패턴을 이 저장소 하우스 스타일로 이식, server/lib/tokens.js 참고).
+// [재사용 탐지 + grace window + 동시회전 레이스 방어] 회전형 refresh token. 판정 로직 자체는
+// server/lib/rotating-token.js의 rotateOrDetectReuse()에 위임한다(OAuth refresh 경로와 공용 —
+// security 리뷰 H1을 계기로 통합: 예전엔 회전 UPDATE의 성패를 확인하지 않아, 유출된 토큰을 정상
+// 요청과 동시에 재사용해도 재사용탐지가 트리거되지 않는 레이스가 있었다). logout으로 revoke됐거나
+// 이미 reuse_detected로 폐기된 토큰의 재사용, 또는 grace window(10초)를 넘긴 재사용만 진짜 탈취로
+// 간주해 유저 전체를 폐기한다(사내 private 프로젝트 ~/workspace/malgnai/server/api/auth.js —
+// 2026-07-13 reviewer 리뷰로 재현·수정된 회귀 — 검증된 패턴을 이 저장소 하우스 스타일로 이식).
 auth.post('/refresh', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const rawToken = typeof body.refresh_token === 'string' ? body.refresh_token : ''
@@ -52,29 +52,21 @@ auth.post('/refresh', async (c) => {
   }
 
   const tokenHash = await sha256Hex(rawToken)
-  const stored = await refreshTokensDao.findByHash(c.env.DB, tokenHash)
-  if (!stored) {
-    return c.json({ error: { code: 'UNAUTHORIZED', message: 'invalid refresh token' } }, 401)
+  const result = await rotateOrDetectReuse(c.env.DB, tokenHash, {
+    findByHash: refreshTokensDao.findByHash,
+    markRotated: refreshTokensDao.markRotated,
+    revokeAll: (db, stored, reason) => refreshTokensDao.revokeAllForUser(db, stored.user_id, reason)
+  })
+
+  if (!result.ok && result.reason === 'invalid') {
+    const message = result.detail === 'expired' ? 'refresh token expired' : 'invalid refresh token'
+    return c.json({ error: { code: 'UNAUTHORIZED', message } }, 401)
+  }
+  if (!result.ok && result.reason === 'reuse_detected') {
+    return c.json({ error: { code: 'TOKEN_REUSED', message: 'refresh token reuse detected, all sessions revoked' } }, 401)
   }
 
-  if (stored.status !== 'active') {
-    const elapsedMs = stored.revoked_at ? Date.now() - new Date(stored.revoked_at).getTime() : Number.POSITIVE_INFINITY
-    const withinGrace = stored.revoke_reason === 'rotated' && elapsedMs <= REUSE_GRACE_MS
-    if (!withinGrace) {
-      // grace 대상이 아니거나(logout/이미 reuse_detected) grace window 밖의 재사용 — 진짜 탈취 신호.
-      await refreshTokensDao.revokeAllForUser(c.env.DB, stored.user_id)
-      return c.json({ error: { code: 'TOKEN_REUSED', message: 'refresh token reuse detected, all sessions revoked' } }, 401)
-    }
-    // grace window 이내, 정상 회전분의 재사용 — 이 토큰은 이미 revoke되어 있으니 다시 revoke하지
-    // 않고 다른 세션을 건드리지 않은 채 이 요청 몫의 새 쌍만 발급한다(아래로 그대로 진행).
-  } else {
-    if (new Date(stored.expires_at).getTime() < Date.now()) {
-      return c.json({ error: { code: 'UNAUTHORIZED', message: 'refresh token expired' } }, 401)
-    }
-    // 회전(rotation): 최초 사용이므로 이번에 쓴 토큰을 즉시 revoke한다.
-    await refreshTokensDao.markRotated(c.env.DB, stored.id)
-  }
-
+  const stored = result.stored
   const user = await usersDao.findById(c.env.DB, stored.user_id)
   if (!user || user.status !== 'active') {
     return c.json({ error: { code: 'UNAUTHORIZED', message: 'account is not active' } }, 401)

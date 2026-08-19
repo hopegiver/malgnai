@@ -83,15 +83,15 @@
           <div class="row g-3">
             <div class="col-12 col-md-6" v-if="state.currentWork">
               <div class="small text-muted mb-1">현재 작업</div>
-              <div>{{ state.currentWork }}</div>
+              <div class="pd-state-text markdown-body" v-html="renderMarkdown(state.currentWork, { breaks: true })"></div>
             </div>
             <div class="col-12 col-md-6" v-if="state.nextAction">
               <div class="small text-muted mb-1">다음 행동</div>
-              <div>{{ state.nextAction }}</div>
+              <div class="pd-state-text markdown-body" v-html="renderMarkdown(state.nextAction, { breaks: true })"></div>
             </div>
             <div class="col-12 col-md-6" v-if="state.blockerSummary">
               <div class="small text-danger mb-1">막힌 것</div>
-              <div>{{ state.blockerSummary }}</div>
+              <div class="pd-state-text markdown-body" v-html="renderMarkdown(state.blockerSummary, { breaks: true })"></div>
             </div>
           </div>
         </div>
@@ -107,35 +107,63 @@
         <div v-if="wbs.loading" class="text-muted text-center py-4"><span class="spinner-border spinner-border-sm me-2"></span>불러오는 중...</div>
         <div v-else-if="wbs.error" class="alert alert-warning py-2 px-3 small">{{ wbs.error }}</div>
         <template v-else>
-          <div v-if="wbs.summary" class="d-flex flex-wrap gap-3 mb-3 small">
-            <span>전체 {{ wbs.summary.total }}</span>
-            <span class="text-muted">계획 {{ wbs.summary.planned }}</span>
-            <span class="text-primary">진행중 {{ wbs.summary.inProgress ?? wbs.summary.in_progress }}</span>
-            <span class="text-success">완료 {{ wbs.summary.done }}</span>
-            <span v-if="wbs.summary.delayed" class="text-danger fw-semibold">지연 {{ wbs.summary.delayed }}</span>
+          <div v-if="wbs.summary" class="d-flex flex-wrap gap-2 mb-3">
+            <button type="button" class="pd-wbs-chip" :class="{ active: wbsFilter === 'all' }" @click="wbsFilter = 'all'">
+              전체 <b>{{ wbs.summary.total }}</b>
+            </button>
+            <button type="button" class="pd-wbs-chip" :class="{ active: wbsFilter === 'planned' }" @click="wbsFilter = 'planned'">
+              계획 <b>{{ wbs.summary.planned }}</b>
+            </button>
+            <button type="button" class="pd-wbs-chip" :class="{ active: wbsFilter === 'in_progress' }" @click="wbsFilter = 'in_progress'">
+              진행중 <b>{{ wbs.summary.inProgress ?? wbs.summary.in_progress }}</b>
+            </button>
+            <button type="button" class="pd-wbs-chip" :class="{ active: wbsFilter === 'done' }" @click="wbsFilter = 'done'">
+              완료 <b>{{ wbs.summary.done }}</b>
+            </button>
+            <button v-if="wbs.summary.delayed" type="button" class="pd-wbs-chip pd-wbs-chip--danger" :class="{ active: wbsFilter === 'delayed' }" @click="wbsFilter = 'delayed'">
+              지연 <b>{{ wbs.summary.delayed }}</b>
+            </button>
           </div>
-          <div v-if="wbsTree.length" class="card">
-            <div v-for="item in wbsTree" :key="item.id" class="wbs-row d-flex align-items-center gap-2 px-3 py-2 border-bottom border-hairline"
-              :style="{ paddingLeft: (12 + item.depth * 20) + 'px' }">
-              <i class="bi" :class="item.depth === 0 ? 'bi-flag' : 'bi-dash-lg'" style="opacity:.5"></i>
-              <div class="flex-grow-1 min-w-0">
-                <div class="d-flex align-items-center gap-2">
-                  <span class="text-truncate" :class="item.depth === 0 ? 'fw-semibold' : ''">{{ item.title }}</span>
-                  <span class="badge" :class="wbsStatusMeta(item.bucket).cls">{{ wbsStatusMeta(item.bucket).label }}</span>
-                </div>
-                <div class="small text-faint d-flex flex-wrap gap-2 mt-1">
-                  <span v-if="item.responsible_team"><i class="bi bi-people me-1"></i>{{ item.responsible_team }}</span>
-                  <span v-if="item.assignee_agent_name"><i class="bi bi-robot me-1"></i>{{ item.assignee_agent_name }}</span>
-                  <span v-if="item.end_date">~{{ item.end_date }}</span>
-                </div>
-              </div>
-              <div class="wbs-progress flex-shrink-0 d-flex align-items-center gap-2" style="width:120px">
-                <div class="pd-progress-track flex-grow-1" style="height:6px">
-                  <div class="pd-progress-fill" :style="{ width: (item.progress ?? 0) + '%' }"></div>
-                </div>
-                <small class="text-faint" style="width:2.5rem;text-align:right">{{ item.progress ?? 0 }}%</small>
-              </div>
+          <div v-if="wbsTree.length" class="card pd-wbs">
+            <div class="pd-wbs-header">
+              <div>작업명</div>
+              <div>책임</div>
+              <div>담당</div>
+              <div>시작~종료</div>
+              <div>완료일</div>
+              <div>진행률</div>
             </div>
+            <template v-if="filteredWbsGroups.length">
+              <div v-for="group in filteredWbsGroups" :key="group.step.id" class="pd-wbs-group">
+                <div class="pd-wbs-step" role="button" tabindex="0" @click="toggleStep(group.step.id)" @keydown.enter="toggleStep(group.step.id)">
+                  <i class="bi pd-wbs-step-chevron" :class="isStepExpanded(group.step.id) ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+                  <span class="pd-wbs-step-badge">Step</span>
+                  <span class="pd-wbs-step-title text-truncate">{{ group.step.title }}</span>
+                  <span v-if="group.count" class="pd-wbs-step-summary">({{ group.count }}개 · {{ group.avgProgress }}%)</span>
+                  <span class="badge ms-auto flex-shrink-0" :class="wbsStatusMeta(group.step.bucket).cls">{{ wbsStatusMeta(group.step.bucket).label }}</span>
+                </div>
+                <div v-show="isStepExpanded(group.step.id)">
+                  <div v-for="item in group.children" :key="item.id" class="pd-wbs-item">
+                    <div class="pd-wbs-cell pd-wbs-cell--title" :style="{ paddingLeft: ((item.depth - 1) * 16) + 'px' }">
+                      <i class="bi bi-dash-lg pd-wbs-dash"></i>
+                      <span class="text-truncate">{{ item.title }}</span>
+                      <span class="badge flex-shrink-0" :class="wbsStatusMeta(item.bucket).cls">{{ wbsStatusMeta(item.bucket).label }}</span>
+                    </div>
+                    <div class="pd-wbs-cell pd-wbs-cell--resp"><i class="bi bi-people"></i>{{ item.responsible_team || '-' }}</div>
+                    <div class="pd-wbs-cell pd-wbs-cell--assignee"><i class="bi bi-robot"></i>{{ item.assignee_agent_name || '-' }}</div>
+                    <div class="pd-wbs-cell pd-wbs-cell--dates">{{ item.start_date || '-' }} ~ {{ item.end_date || '-' }}</div>
+                    <div class="pd-wbs-cell pd-wbs-cell--completed">{{ item.completed_date || '-' }}</div>
+                    <div class="pd-wbs-cell pd-wbs-cell--progress">
+                      <div class="pd-progress-track flex-grow-1" style="height:6px">
+                        <div class="pd-progress-fill" :style="{ width: (item.progress ?? 0) + '%' }"></div>
+                      </div>
+                      <small class="text-faint">{{ item.progress ?? 0 }}%</small>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+            <div v-else class="text-center py-4 text-faint small">선택한 상태의 항목이 없습니다.</div>
           </div>
           <div v-else class="text-center py-5">
             <i class="bi bi-list-check d-block mb-3" style="font-size:2.5rem;color:var(--color-ink-faint)"></i>
@@ -161,6 +189,9 @@
             </div>
             <div class="pd-item-right"><small class="text-faint text-nowrap">{{ formatDate(d.created_at) }}</small></div>
           </div>
+          <div ref="decisionsSentinel" class="pd-load-sentinel">
+            <div v-if="decisions.loadingMore" class="text-muted text-center py-3 small"><span class="spinner-border spinner-border-sm me-2"></span>더 불러오는 중...</div>
+          </div>
         </div>
         <div v-else class="text-center py-5">
           <i class="bi bi-signpost-split d-block mb-3" style="font-size:2.5rem;color:var(--color-ink-faint)"></i>
@@ -172,7 +203,7 @@
       <div v-show="tab === 'issues'">
         <div class="d-flex justify-content-end mb-2">
           <div class="form-check form-switch mb-0">
-            <input class="form-check-input" type="checkbox" id="issueOpenOnly" v-model="issues.openOnly" @change="loadIssues">
+            <input class="form-check-input" type="checkbox" id="issueOpenOnly" v-model="issues.openOnly" @change="loadIssues()">
             <label class="form-check-label small text-muted" for="issueOpenOnly">열림만</label>
           </div>
         </div>
@@ -191,6 +222,9 @@
               <div v-if="i.status === 'resolved' && i.resolution_note" class="small text-success mt-1">해결: {{ i.resolution_note }}</div>
             </div>
             <div class="pd-item-right"><small class="text-faint text-nowrap">{{ formatDate(i.created_at) }}</small></div>
+          </div>
+          <div ref="issuesSentinel" class="pd-load-sentinel">
+            <div v-if="issues.loadingMore" class="text-muted text-center py-3 small"><span class="spinner-border spinner-border-sm me-2"></span>더 불러오는 중...</div>
           </div>
         </div>
         <div v-else class="text-center py-5">
@@ -216,6 +250,9 @@
             </div>
             <div class="pd-item-right"><small class="text-faint text-nowrap">{{ formatDate(w.created_at) }}</small></div>
           </div>
+          <div ref="worksSentinel" class="pd-load-sentinel">
+            <div v-if="works.loadingMore" class="text-muted text-center py-3 small"><span class="spinner-border spinner-border-sm me-2"></span>더 불러오는 중...</div>
+          </div>
         </div>
         <div v-else class="text-center py-5">
           <i class="bi bi-journal-text d-block mb-3" style="font-size:2.5rem;color:var(--color-ink-faint)"></i>
@@ -230,16 +267,20 @@
 export default {
   title: '프로젝트 상세 · malgnai-hub',
   data() {
+    const validTabs = ['overview', 'wbs', 'decisions', 'issues', 'works']
+    const initialTab = validTabs.includes(this.$route.query.tab) ? this.$route.query.tab : 'overview'
     return {
       loading: true,
       error: false,
       errorMessage: '',
       project: null,
-      tab: 'overview',
-      decisions: { items: [], loading: false, error: '', loaded: false },
-      issues: { items: [], loading: false, error: '', loaded: false, openOnly: true },
-      works: { items: [], loading: false, error: '', loaded: false },
+      tab: initialTab,
+      decisions: { items: [], loading: false, error: '', loaded: false, nextCursor: null, loadingMore: false },
+      issues: { items: [], loading: false, error: '', loaded: false, openOnly: true, nextCursor: null, loadingMore: false },
+      works: { items: [], loading: false, error: '', loaded: false, nextCursor: null, loadingMore: false },
       wbs: { items: [], summary: null, loading: false, error: '', loaded: false },
+      wbsFilter: 'all',
+      wbsCollapsedSteps: {},
     }
   },
   computed: {
@@ -274,10 +315,51 @@ export default {
       walk('__root__')
       return out
     },
+    // wbsTree(depth-first 평탄화)를 depth===0(Step) 경계로 다시 묶어 그룹 헤더+하위 항목 렌더에 쓴다.
+    // wbsTree 자체(트리 조립·정렬)는 건드리지 않고, 이미 완성된 배열을 순서 그대로 순회만 한다.
+    wbsGroups() {
+      const tree = this.wbsTree
+      const groups = []
+      let current = null
+      for (const item of tree) {
+        if (item.depth === 0 || !current) {
+          current = { step: item, children: [] }
+          groups.push(current)
+        } else {
+          current.children.push(item)
+        }
+      }
+      return groups.map((g) => {
+        const progresses = g.children.length ? g.children.map((c) => c.progress ?? 0) : [g.step.progress ?? 0]
+        const avgProgress = Math.round(progresses.reduce((a, b) => a + b, 0) / progresses.length)
+        return { step: g.step, children: g.children, count: g.children.length, avgProgress }
+      })
+    },
+    // 상단 필터 칩의 로컬 필터링(REST /wbs 라우트가 상태 필터 파라미터를 지원하는지 문서상
+    // 확인되지 않아 프론트에서 처리). Step 자체가 필터에 맞으면 그룹 전체를, 아니면 필터에
+    // 맞는 하위 항목만 남기고 둘 다 없으면 그룹을 통째로 숨긴다.
+    filteredWbsGroups() {
+      if (this.wbsFilter === 'all') return this.wbsGroups
+      const matches = (it) => it.bucket === this.wbsFilter
+      return this.wbsGroups
+        .map((g) => (matches(g.step) ? g : { ...g, children: g.children.filter(matches) }))
+        .filter((g) => matches(g.step) || g.children.length)
+    },
   },
   async mounted() {
     await this.loadProject()
     if (this.project) await this.loadWbs() // 탭 카운트 배지 표시를 위해 개요와 함께 선로딩
+    if (this.tab === 'decisions') await this.loadDecisions()
+    if (this.tab === 'issues') await this.loadIssues()
+    if (this.tab === 'works') await this.loadWorks()
+  },
+  beforeUnmount() {
+    // catalog/index.vue의 _sectionObserver 정리 패턴과 동일 — 탭별 무한스크롤 옵저버를 인스턴스
+    // 프로퍼티(this._loadMoreObservers)로 들고 있다가 컴포넌트 해제 시 전부 disconnect한다.
+    if (this._loadMoreObservers) {
+      Object.values(this._loadMoreObservers).forEach((o) => o.disconnect())
+      this._loadMoreObservers = {}
+    }
   },
   methods: {
     async loadProject() {
@@ -295,52 +377,86 @@ export default {
     },
     selectTab(name) {
       this.tab = name
+      this.$router.replace({ query: name === 'overview' ? {} : { tab: name } })
       if (name === 'decisions' && !this.decisions.loaded) this.loadDecisions()
       if (name === 'issues' && !this.issues.loaded) this.loadIssues()
       if (name === 'works' && !this.works.loaded) this.loadWorks()
       if (name === 'wbs' && !this.wbs.loaded) this.loadWbs()
     },
-    async loadDecisions() {
-      this.decisions.loading = true
-      this.decisions.error = ''
-      const id = this.$route.params.id
-      const { data, error } = await useApi(`/api/projects/${id}/decisions?limit=30`)
-      this.decisions.loading = false
-      this.decisions.loaded = true
-      if (error) { this.decisions.error = error?.message || '결정 목록을 불러오지 못했습니다.'; return }
-      this.decisions.items = data?.data || []
+    // 결정/이슈/작업이력 3개 탭 공통 무한스크롤 로더. `more=false`(기본, 최초 로드/필터 변경)면
+    // 기존 배열·커서를 비우고 처음부터 다시 받고, `more=true`(sentinel이 트리거)면 저장된
+    // nextCursor로 이어붙인다. 이미 로딩 중이거나(loadingMore) 더 없으면(nextCursor null) more
+    // 요청은 조용히 무시한다 — server/api/events.js의 { data, next_cursor } 커서 페이지네이션
+    // 계약(next_cursor는 ULID, null이면 끝) 공통 사용.
+    async loadEventPage(state, endpoint, baseParams, more) {
+      if (more) {
+        if (state.loadingMore || !state.nextCursor) return
+        state.loadingMore = true
+      } else {
+        state.loading = true
+        state.error = ''
+        state.items = []
+        state.nextCursor = null
+      }
+      const params = new URLSearchParams(baseParams)
+      params.set('limit', '10')
+      if (more && state.nextCursor) params.set('cursor', state.nextCursor)
+      const { data, error } = await useApi(`${endpoint}?${params.toString()}`)
+      state.loading = false
+      state.loadingMore = false
+      state.loaded = true
+      if (error) { state.error = error?.message || '목록을 불러오지 못했습니다.'; return }
+      const page = data?.data || []
+      state.items = more ? [...state.items, ...page] : page
+      state.nextCursor = data?.next_cursor ?? null
     },
-    async loadIssues() {
-      this.issues.loading = true
-      this.issues.error = ''
+    async loadDecisions(more = false) {
+      const id = this.$route.params.id
+      await this.loadEventPage(this.decisions, `/api/projects/${id}/decisions`, {}, more)
+      this.$nextTick(() => this.setupLoadMoreObserver('decisions', 'decisionsSentinel', this.decisions, () => this.loadDecisions(true)))
+    },
+    async loadIssues(more = false) {
       const id = this.$route.params.id
       const statusParam = this.issues.openOnly ? 'open' : 'all'
-      const { data, error } = await useApi(`/api/projects/${id}/issues?status=${statusParam}&limit=30`)
-      this.issues.loading = false
-      this.issues.loaded = true
-      if (error) { this.issues.error = error?.message || '이슈 목록을 불러오지 못했습니다.'; return }
-      this.issues.items = data?.data || []
+      await this.loadEventPage(this.issues, `/api/projects/${id}/issues`, { status: statusParam }, more)
+      this.$nextTick(() => this.setupLoadMoreObserver('issues', 'issuesSentinel', this.issues, () => this.loadIssues(true)))
     },
-    async loadWorks() {
-      this.works.loading = true
-      this.works.error = ''
+    async loadWorks(more = false) {
       const id = this.$route.params.id
-      const { data, error } = await useApi(`/api/projects/${id}/activities?limit=30`)
-      this.works.loading = false
-      this.works.loaded = true
-      if (error) { this.works.error = error?.message || '작업이력을 불러오지 못했습니다.'; return }
-      this.works.items = data?.data || []
+      await this.loadEventPage(this.works, `/api/projects/${id}/activities`, {}, more)
+      this.$nextTick(() => this.setupLoadMoreObserver('works', 'worksSentinel', this.works, () => this.loadWorks(true)))
+    },
+    // catalog/index.vue의 IntersectionObserver 패턴(this._sectionObserver) 재사용 — 탭별로 별도
+    // 인스턴스(this._loadMoreObservers[key])를 두고, sentinel이 뷰포트에 들어오면 loadFn()을 호출한다.
+    // 더 없으면(nextCursor null) 아예 옵저버를 설치하지 않아 트리거 자체가 발생하지 않게 한다.
+    setupLoadMoreObserver(key, refName, state, loadFn) {
+      if (!this._loadMoreObservers) this._loadMoreObservers = {}
+      if (this._loadMoreObservers[key]) {
+        this._loadMoreObservers[key].disconnect()
+        delete this._loadMoreObservers[key]
+      }
+      if (!state.nextCursor) return
+      const el = this.$refs[refName]
+      const target = Array.isArray(el) ? el[0] : el
+      if (!target) return
+      const observer = new IntersectionObserver(
+        (entries) => { if (entries.some((e) => e.isIntersecting)) loadFn() },
+        { rootMargin: '200px 0px', threshold: 0 }
+      )
+      observer.observe(target)
+      this._loadMoreObservers[key] = observer
     },
     async loadWbs() {
-      // 참고: docs/api.md §5.4에는 WBS 전용 REST 라우트가 명시되어 있지 않다(WBS 4종 MCP 도구 중
-      // wbs_list만 존재하고 REST는 문서화 안 됨). decisions/issues/activities와 동일한 라우팅
-      // 패턴(/api/projects/:id/*)을 그대로 따른다고 가정해 /wbs 를 호출한다 — 백엔드가 이 경로로
-      // 노출하지 않으면 아래 에러 상태로 안전하게 표시된다(devops 통합 단계에서 확정 필요, 완료
-      // 보고에 명시).
+      // GET /api/projects/:id/wbs 실존 확인(server/api/events.js:72, server/lib/wbs.js wbsList
+      // 재사용). 기본 호출(파라미터 없음)은 완료(bucket='done') 항목을 응답에서 제외한다
+      // (server/lib/wbs.js: status 미지정 && !includeDone 이면 done 필터링) — 반면 summary는
+      // 항상 전체 카운트를 포함해 계산되므로, include_done=true 없이 부르면 "완료" 필터 칩의
+      // summary 카운트와 실제 표시 목록이 어긋난다. 상단 필터 칩은 서버 재호출 없이 프론트에서
+      // wbs.items를 로컬 필터링(filteredWbsGroups)하므로, 최초 로드 시 항상 전체 트리를 받아둔다.
       this.wbs.loading = true
       this.wbs.error = ''
       const id = this.$route.params.id
-      const { data, error } = await useApi(`/api/projects/${id}/wbs`)
+      const { data, error } = await useApi(`/api/projects/${id}/wbs?include_done=true`)
       this.wbs.loading = false
       this.wbs.loaded = true
       if (error) { this.wbs.error = error?.message || 'WBS 목록을 불러오지 못했습니다.'; return }
@@ -361,9 +477,18 @@ export default {
         progress: it.progress ?? it.computed_progress ?? it.computedProgress ?? 0,
         responsible_team: it.responsible_team ?? it.responsibleTeam ?? '',
         assignee_agent_name: it.assignee_agent_name ?? it.assigneeAgentName ?? '',
+        start_date: it.start_date ?? it.startDate ?? '',
         end_date: it.end_date ?? it.endDate ?? '',
+        completed_date: it.completed_date ?? it.completedDate ?? '',
         created_at: it.created_at ?? it.createdAt ?? '',
       }
+    },
+    // Step(depth===0) 그룹 접기/펼치기. 미기록 상태는 기본 펼침으로 취급한다.
+    isStepExpanded(stepId) {
+      return this.wbsCollapsedSteps[stepId] !== true
+    },
+    toggleStep(stepId) {
+      this.wbsCollapsedSteps = { ...this.wbsCollapsedSteps, [stepId]: this.isStepExpanded(stepId) }
     },
     healthMeta(h) {
       const M = {
@@ -379,6 +504,7 @@ export default {
     issueStatusMeta,
     wbsStatusMeta,
     formatDate,
+    renderMarkdown,
   },
 }
 </script>
@@ -402,6 +528,20 @@ export default {
 .pd-tabs .nav-link.active { color: var(--color-primary); font-weight: 600; background: none; }
 .pd-tabs .nav-link.active::after { transform: scaleX(1); background-color: var(--color-primary); }
 .pd-tab-icon { font-size: 1rem; opacity: 0.85; }
+.pd-state-text { white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
+/* 카드 안의 작은 값 필드라 base.css의 기본 .markdown-body 헤딩 크기(h1 1.5rem 등)는 과하다 —
+   여기서만 축소하고 상하 여백도 좁힌다. 마지막 <p>는 카드 padding과 이중 여백이 안 생기게 0으로. */
+.pd-state-text.markdown-body { white-space: normal; }
+.pd-state-text.markdown-body h1,
+.pd-state-text.markdown-body h2,
+.pd-state-text.markdown-body h3 { font-size: 1rem; margin-top: 0.75em; margin-bottom: 0.35em; }
+.pd-state-text.markdown-body h1:first-child,
+.pd-state-text.markdown-body h2:first-child,
+.pd-state-text.markdown-body h3:first-child { margin-top: 0; }
+.pd-state-text.markdown-body p:last-child { margin-bottom: 0; }
+/* 결정/이슈/작업이력 무한스크롤 sentinel — 데이터가 없을 때(로딩중 아님)는 내용 없이 옵저버
+   대상으로만 존재하므로 최소 높이를 둬 레이아웃에서 항상 관측 가능하게 한다. */
+.pd-load-sentinel { min-height: 1px; }
 .pd-tab-count {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 1.25rem; height: 1.25rem; padding: 0 0.375rem; margin-left: 2px;
@@ -409,9 +549,81 @@ export default {
   color: var(--color-ink-muted); background-color: var(--color-canvas-soft);
   border: 1px solid var(--color-hairline); border-radius: var(--rounded-full);
 }
-.wbs-row:last-child { border-bottom: none !important; }
+
+/* ============ WBS 탭: 필터 칩 ============ */
+.pd-wbs-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 12px; font-size: var(--font-size-sm); line-height: 1.4;
+  color: var(--color-ink-muted); background-color: var(--color-surface);
+  border: 1px solid var(--color-hairline); border-radius: var(--rounded-full);
+  cursor: pointer; transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.pd-wbs-chip b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.pd-wbs-chip:hover { background-color: var(--color-surface-hover); color: var(--color-ink); }
+.pd-wbs-chip.active { color: var(--color-brand); background-color: var(--color-brand-soft); border-color: var(--color-brand); font-weight: 600; }
+.pd-wbs-chip--danger.active { color: var(--color-danger-text); background-color: var(--color-danger-soft); border-color: var(--color-danger); }
+
+/* ============ WBS 탭: Step 그룹 + 하위 항목 테이블 ============ */
+.pd-wbs { overflow: hidden; }
+.pd-wbs-header {
+  display: none;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-xs); font-weight: 600; color: var(--color-ink-faint);
+  border-bottom: 1px solid var(--color-hairline);
+  text-transform: uppercase; letter-spacing: 0.02em;
+}
+.pd-wbs-group + .pd-wbs-group { border-top: 1px solid var(--color-hairline); }
+.pd-wbs-step {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-3); cursor: pointer; user-select: none;
+  background-color: var(--color-canvas-soft);
+  border-bottom: 1px solid var(--color-hairline);
+  transition: background-color 0.15s ease;
+}
+.pd-wbs-step:hover { background-color: var(--color-surface-hover); }
+.pd-wbs-step-chevron { color: var(--color-ink-faint); font-size: 0.8125rem; flex-shrink: 0; }
+.pd-wbs-step-badge {
+  flex-shrink: 0; display: inline-flex; align-items: center;
+  padding: 2px 10px; font-size: var(--font-size-xs); font-weight: 700;
+  color: var(--color-brand); background-color: var(--color-brand-soft);
+  border-radius: var(--rounded-full);
+}
+.pd-wbs-step-title { font-weight: 600; color: var(--color-ink); min-width: 0; }
+.pd-wbs-step-summary { flex-shrink: 0; font-size: var(--font-size-sm); font-weight: 400; color: var(--color-ink-muted); }
+.pd-wbs-item {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-hairline);
+}
+.pd-wbs-group > div > .pd-wbs-item:last-child { border-bottom: none; }
+.pd-wbs-cell { display: flex; align-items: center; gap: 4px; font-size: var(--font-size-xs); color: var(--color-ink-faint); min-width: 0; }
+.pd-wbs-cell--title { font-size: var(--font-size-base); color: var(--color-ink); gap: 8px; min-width: 0; }
+.pd-wbs-cell--title .text-truncate { min-width: 0; flex: 1 1 auto; }
+.pd-wbs-dash { color: var(--color-ink-faint); flex-shrink: 0; }
+.pd-wbs-cell--progress { flex-direction: row; }
+.pd-wbs-cell--progress .pd-progress-track { max-width: 120px; }
+.pd-wbs-cell--progress small { flex-shrink: 0; width: 2.5rem; text-align: right; }
+
+@media (min-width: 768px) {
+  /* 고정 px 컬럼은 768px 근방(태블릿)에서 title 칸을 거의 0으로 짓눌러 제목이 사실상
+     안 보이는 문제가 실측(768 스크린샷)에서 확인됐다 — minmax()로 각 컬럼에 최소폭만
+     보장하고 남는 폭은 비례 배분해 좁은 화면에서도 title이 절대 으스러지지 않게 한다. */
+  .pd-wbs-header {
+    display: grid;
+    grid-template-columns: minmax(140px, 2.2fr) minmax(64px, 0.8fr) minmax(64px, 0.8fr) minmax(110px, 1.1fr) minmax(76px, 0.7fr) minmax(96px, 1fr);
+    column-gap: var(--space-3);
+  }
+  .pd-wbs-item {
+    display: grid;
+    grid-template-columns: minmax(140px, 2.2fr) minmax(64px, 0.8fr) minmax(64px, 0.8fr) minmax(110px, 1.1fr) minmax(76px, 0.7fr) minmax(96px, 1fr);
+    align-items: center;
+    column-gap: var(--space-3);
+  }
+  .pd-wbs-cell--resp, .pd-wbs-cell--assignee, .pd-wbs-cell--dates, .pd-wbs-cell--completed { font-size: var(--font-size-sm); }
+}
 @media (max-width: 575.98px) {
   .pd-tabs .nav-link { padding: 0.625rem 0.625rem; font-size: 0.875rem; }
-  .wbs-progress { width: 80px !important; }
+  .pd-wbs-step-summary { display: none; }
+  .pd-wbs-chip { padding: 3px 10px; font-size: var(--font-size-xs); }
 }
 </style>

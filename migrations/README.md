@@ -39,3 +39,8 @@ D1 스키마 변경 이력. **wrangler 표준 마이그레이션 체계를 그�
   이미 받고 있던 `nextAction` 입력을 저장할 전용 컬럼이 최초 스키마에 없었다 — `docs/schema.sql`
   §3.6 참고). `project_get_context`/`project_bootstrap`의 `state.nextAction` 즉석계산이 이 컬럼을
   읽는다(`server/lib/context.js`).
+- `0011_slim_sessions_usage_daily.sql` — `sessions`(`result` 컬럼 삭제, `summary` 500자→120자 캡)/
+  `session_agent_usage`(테이블 폐기, 대체 없음)/`usage_daily`(PK `(user_id,project_id,day_at,model)`
+  → `(user_id,day_at)`로 축소, `project_id`/`model` 컬럼 제거) 슬리밍(2026-08-19, `docs/schema.sql`
+  §3.10~3.12, `docs/architecture.md` §0 결정24·25). `POST /api/sessions` 미구현으로 로컬 D1 기준
+  세 테이블 전부 0행임을 `COUNT(*)`로 확인한 뒤 DROP+CREATE로 처리(0010과 동일 관례).

@@ -38,10 +38,17 @@
     "directory": "./app",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/mcp*"]
+    "run_worker_first": ["/api/*", "/mcp*", "/.well-known/oauth-*"]
   },
 
   "observability": {
     "enabled": true
+  },
+
+  // malgn-dev 카탈로그(agents/skills/knowledge) 1일 1회 자동 동기화 — server/index.js의
+  // scheduled 핸들러가 server/lib/catalog-sync.js의 syncCatalog()를 호출한다. 매일 18:00 UTC
+  // (KST 03:00) — 트래픽 낮은 새벽 시간대, GitHub 미인증 60req/h 한도와도 무관(하루 1회뿐).
+  "triggers": {
+    "crons": ["0 18 * * *"]
   }
 }

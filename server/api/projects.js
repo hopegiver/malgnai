@@ -1,9 +1,9 @@
 // 프로젝트 조회 라우트 — api.md §5.3. 프로젝트는 사용자 1명 소유(project_members 없음, §0-9).
 import { Hono } from 'hono'
 import * as projectsDao from '../dao/projects.js'
-import * as repositoriesDao from '../dao/repositories.js'
 import { computeProjectState } from '../lib/context.js'
 import { requireAdmin } from '../middleware/jwt-auth.js'
+import { normalizeRepositoryKey } from '../lib/repository-key.js'
 
 const projects = new Hono()
 
@@ -24,12 +24,11 @@ projects.get('/:id', async (c) => {
   const project = isAdmin ? await projectsDao.findByIdAny(c.env.DB, id) : await projectsDao.findOwnedById(c.env.DB, c.get('userId'), id)
   if (!project) return c.json({ error: { code: 'NOT_FOUND', message: 'project not found' } }, 404)
 
-  const repository = await repositoriesDao.findById(c.env.DB, project.repository_id)
   const { state } = await computeProjectState(c.env.DB, id)
   return c.json({
     id: project.id,
-    repository_id: project.repository_id,
-    repository: repository ? { name: repository.name, classification: repository.classification } : null,
+    repository_key: project.repository_key,
+    repository_name: project.repository_name,
     project_key: project.project_key,
     name: project.name,
     status: project.status,
@@ -40,11 +39,12 @@ projects.get('/:id', async (c) => {
   })
 })
 
-// GET /api/repositories/:id/projects — administrator만(같은 레포에 대한 여러 사용자 작업 열람).
+// GET /api/repositories/:key/projects — administrator만(같은 repository_key의 여러 사용자 작업 열람).
+// repositories 테이블 폐기(2026-08-11) 이후 :key는 projects.repository_key 문자열 그대로.
 export const repositories = new Hono()
-repositories.get('/:id/projects', requireAdmin, async (c) => {
-  const repositoryId = c.req.param('id')
-  const list = await projectsDao.listByRepository(c.env.DB, repositoryId)
+repositories.get('/:key/projects', requireAdmin, async (c) => {
+  const repositoryKey = normalizeRepositoryKey(c.req.param('key'))
+  const list = await projectsDao.listByRepositoryKey(c.env.DB, repositoryKey)
   return c.json({ data: list })
 })
 

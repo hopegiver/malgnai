@@ -265,6 +265,12 @@ a:hover {
   color: var(--color-brand-hover);
 }
 
+/* Bootstrap Icons(.bi)를 텍스트와 나란히 쓸 때 글리프가 baseline보다 위로 들려 보이는
+   문제 보정 — 아이콘+텍스트 조합이 앱 전역(카드 제목, 메타 정보, 배지)에 반복되므로
+   컴포넌트마다 개별 보정하지 않고 여기서 한 번에 정렬한다. flex 컨테이너 안에서는
+   vertical-align이 무시되므로(align-items로 대체) 기존 flex 아이콘 정렬에는 영향 없음. */
+.bi { vertical-align: -0.125em; }
+
 /* Eyebrow — 상위 레이블 (섹션명, 페이지 카테고리) */
 .text-eyebrow {
   font-size: var(--font-size-xs);
@@ -775,10 +781,15 @@ textarea.form-control {
 .badge.bg-secondary {
   background-color: var(--color-surface-hover) !important;
   color: var(--color-ink-muted) !important;
+  /* 배경이 카드 흰 배경(--color-canvas-warm)과 거의 구분되지 않아(surface-hover는 백색 대비
+     명도차 2% 수준) 보더로 형태를 잡아준다 — "평가 전" 등 중립 상태 배지가 카드에서
+     실질적으로 안 보이던 문제(2026-08-06 카탈로그 화면 시각 검수). */
+  border: 1px solid var(--color-border);
 }
 .badge.bg-light {
   background-color: var(--color-surface-hover) !important;
   color: var(--color-ink-muted) !important;
+  border: 1px solid var(--color-border);
 }
 .badge.rounded-pill { border-radius: var(--rounded-full); }
 
@@ -1586,6 +1597,29 @@ textarea.form-control {
   from { opacity: 0; transform: translateY(-12px) scale(0.98); }
   to   { opacity: 1; transform: none; }
 }
+
+/* ── 마크다운 렌더링(content_md, work_record 자유서술 텍스트 등 v-html 공용) ──
+   별도 마크다운 CSS 라이브러리 없이 위 토큰만으로 최소 스타일. 카탈로그 상세 화면 전용이 아니라
+   utils.js renderMarkdown()으로 v-html 렌더링하는 화면 전반(카탈로그 상세, 프로젝트 상세 등)의
+   공용 클래스이므로 vue-zero 페이지 스코프 <style>이 아닌 진짜 전역 스타일시트에 둔다. */
+.markdown-body { line-height: 1.7; color: var(--color-ink); word-break: break-word; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 { font-weight: 600; margin-top: 1.5em; margin-bottom: 0.6em; line-height: 1.35; }
+.markdown-body h1:first-child, .markdown-body h2:first-child, .markdown-body h3:first-child { margin-top: 0; }
+.markdown-body h1 { font-size: 1.5rem; }
+.markdown-body h2 { font-size: 1.25rem; padding-bottom: 0.3em; border-bottom: 1px solid var(--color-hairline); }
+.markdown-body h3 { font-size: 1.0625rem; }
+.markdown-body p { margin-bottom: 1em; }
+.markdown-body ul, .markdown-body ol { margin-bottom: 1em; padding-left: 1.5em; }
+.markdown-body li { margin-bottom: 0.25em; }
+.markdown-body code { background-color: var(--color-canvas-soft, var(--color-surface-hover)); padding: 0.15em 0.4em; border-radius: var(--rounded-sm); font-size: 0.875em; }
+.markdown-body pre { background-color: var(--color-canvas-soft, var(--color-surface-hover)); padding: 1em; border-radius: var(--rounded-md); overflow-x: auto; margin-bottom: 1em; }
+.markdown-body pre code { background: none; padding: 0; }
+.markdown-body blockquote { border-left: 3px solid var(--color-hairline); padding-left: 1em; color: var(--color-ink-muted); margin: 0 0 1em; }
+.markdown-body table { width: 100%; border-collapse: collapse; margin-bottom: 1em; display: block; overflow-x: auto; }
+.markdown-body th, .markdown-body td { border: 1px solid var(--color-hairline); padding: 0.4em 0.6em; text-align: left; }
+.markdown-body th { background-color: var(--color-canvas-soft, var(--color-surface-hover)); }
+.markdown-body img { max-width: 100%; }
+.markdown-body hr { border: none; border-top: 1px solid var(--color-hairline); margin: 1.5em 0; }
 
 /* 접근성 */
 @media (prefers-reduced-motion: reduce) {

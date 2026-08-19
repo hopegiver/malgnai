@@ -21,3 +21,6 @@ docs/
 
 # Workflow 도구가 만드는 임시 git worktree (자동정리 안 되면 잔존 → vitest 오염 원인)
 .claude/worktrees/
+
+# 마이그레이션 전 수동 D1 백업(스키마 변경 시 안전망, 사내 데이터 포함 — git 추적 제외)
+.backups/

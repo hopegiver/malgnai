@@ -15,6 +15,11 @@
   <link href="/assets/css/base.css" rel="stylesheet">
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
   <script src="https://unpkg.com/vue-router@4/dist/vue-router.global.prod.js"></script>
+  <!-- 마크다운 파서+살균기. 카탈로그 상세(content_md)뿐 아니라 프로젝트 상세(state 자유서술 텍스트)
+       등 utils.js renderMarkdown()으로 v-html 렌더링하는 화면 전반에서 공용으로 쓴다. 신뢰 소스
+       (회사 GitHub 플러그인 repo / MCP work_record)이지만 v-html로 주입하므로 DOMPurify로 한 번 거른다. -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
   <script src="/assets/js/vue-zero.js"></script>
   <script src="/assets/js/utils.js"></script>
 </head>

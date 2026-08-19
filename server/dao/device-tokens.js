@@ -1,14 +1,28 @@
 // device_tokens 테이블 DAO — MCP 인증 축(architecture.md §6.1). "허용 프로젝트" 컬럼 없음(§0 결정6).
 import { newId } from '../lib/ulid.js'
 
-export async function insert(db, { userId, deviceId, deviceName, tokenHash }) {
+// oauthClientId/expiresAt은 OAuth 발급 경로(server/api/oauth.js)에서만 넘긴다 — 기존 pair-approve
+// 호출부(server/api/devices.js)는 이 인자들을 넘기지 않으므로 undefined로 들어와 그대로 NULL
+// 바인딩된다(레거시 하위호환, 기존 호출 코드 수정 불필요).
+export async function insert(db, { userId, deviceId, deviceName, tokenHash, oauthClientId, expiresAt }) {
   const id = newId()
   const now = new Date().toISOString()
   await db.prepare(
-    `INSERT INTO device_tokens (id, user_id, device_id, device_name, token_hash, status, created_at)
-     VALUES (?, ?, ?, ?, ?, 'active', ?)`
-  ).bind(id, userId, deviceId, deviceName || null, tokenHash, now).run()
-  return { id, user_id: userId, device_id: deviceId, device_name: deviceName || null, status: 'active', created_at: now }
+    `INSERT INTO device_tokens (id, user_id, device_id, device_name, token_hash, status, oauth_client_id, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`
+  ).bind(id, userId, deviceId, deviceName || null, tokenHash, oauthClientId || null, expiresAt || null, now).run()
+  return {
+    id, user_id: userId, device_id: deviceId, device_name: deviceName || null, status: 'active',
+    oauth_client_id: oauthClientId || null, expires_at: expiresAt || null, created_at: now
+  }
+}
+
+/** OAuth refresh 성공 시 같은 device_tokens 행의 token_hash/expires_at을 갱신한다(새 행을
+ *  만들지 않는다 — "하나의 그랜트 = 하나의 device_tokens 행"을 유지). */
+export async function rotateToken(db, id, { tokenHash, expiresAt }) {
+  await db.prepare(
+    "UPDATE device_tokens SET token_hash = ?, expires_at = ? WHERE id = ? AND status = 'active'"
+  ).bind(tokenHash, expiresAt || null, id).run()
 }
 
 export async function findActiveByHash(db, tokenHash) {
