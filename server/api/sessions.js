@@ -107,6 +107,8 @@ sessions.post('/', requireDeviceToken, async (c) => {
     filesRead: toNonNegativeInt(body.files_read),
     filesChanged: toNonNegativeInt(body.files_changed),
     commits: toNonNegativeInt(body.commits),
+    turns: toNonNegativeInt(body.turns),
+    apiCalls: toNonNegativeInt(body.api_calls),
     summary
   })
 

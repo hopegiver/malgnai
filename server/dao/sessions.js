@@ -13,8 +13,8 @@ export async function upsertFinal(db, s) {
        started_at, ended_at, duration_seconds, model,
        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
        tool_calls, tool_errors, retries, files_read, files_changed, commits,
-       summary, created_at
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       turns, api_calls, summary, created_at
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(id) DO UPDATE SET
        project_id = excluded.project_id,
        plugin_version = excluded.plugin_version,
@@ -32,13 +32,15 @@ export async function upsertFinal(db, s) {
        files_read = excluded.files_read,
        files_changed = excluded.files_changed,
        commits = excluded.commits,
+       turns = excluded.turns,
+       api_calls = excluded.api_calls,
        summary = excluded.summary`
   ).bind(
     s.id, s.projectId, s.userId, s.deviceId, s.pluginVersion, s.claudeSessionId,
     s.startedAt, s.endedAt, s.durationSeconds, s.model,
     s.inputTokens, s.outputTokens, s.cacheReadTokens, s.cacheWriteTokens,
     s.toolCalls, s.toolErrors, s.retries, s.filesRead, s.filesChanged, s.commits,
-    s.summary, new Date().toISOString()
+    s.turns, s.apiCalls, s.summary, new Date().toISOString()
   ).run()
 }
 
@@ -56,7 +58,9 @@ export async function sumForUserDay(db, userId, dayAt) {
        COALESCE(SUM(cache_write_tokens),0) as cache_write_tokens,
        COALESCE(SUM(tool_calls),0) as tool_calls,
        COALESCE(SUM(tool_errors),0) as tool_errors,
-       COALESCE(SUM(retries),0) as retries
+       COALESCE(SUM(retries),0) as retries,
+       COALESCE(SUM(turns),0) as turns,
+       COALESCE(SUM(api_calls),0) as api_calls
      FROM sessions WHERE user_id = ? AND substr(started_at,1,10) = ?`
   ).bind(userId, dayAt).first()
 }
@@ -73,7 +77,9 @@ export async function sumByProjectDay(db, projectId, userId, { from, to } = {}) 
        COALESCE(SUM(cache_write_tokens),0) as cache_write_tokens,
        COALESCE(SUM(tool_calls),0) as tool_calls,
        COALESCE(SUM(tool_errors),0) as tool_errors,
-       COALESCE(SUM(retries),0) as retries
+       COALESCE(SUM(retries),0) as retries,
+       COALESCE(SUM(turns),0) as turns,
+       COALESCE(SUM(api_calls),0) as api_calls
      FROM sessions WHERE project_id = ? AND user_id = ? AND started_at IS NOT NULL`
   if (from) {
     sql += ' AND substr(started_at,1,10) >= ?'

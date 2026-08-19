@@ -44,3 +44,6 @@ D1 스키마 변경 이력. **wrangler 표준 마이그레이션 체계를 그�
   → `(user_id,day_at)`로 축소, `project_id`/`model` 컬럼 제거) 슬리밍(2026-08-19, `docs/schema.sql`
   §3.10~3.12, `docs/architecture.md` §0 결정24·25). `POST /api/sessions` 미구현으로 로컬 D1 기준
   세 테이블 전부 0행임을 `COUNT(*)`로 확인한 뒤 DROP+CREATE로 처리(0010과 동일 관례).
+- `0012_add_turns_api_calls.sql` — `sessions`/`usage_daily`에 `turns`(사용자 프롬프트 수)·
+  `api_calls`(assistant API 호출 수) 컬럼 추가(2026-08-19, `docs/architecture.md` §0 결정26,
+  claude-plugins 세션 요청). 순수 `ADD COLUMN`이라 기존 데이터에 영향 없음.

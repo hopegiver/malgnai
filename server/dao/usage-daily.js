@@ -11,8 +11,9 @@ export async function findForUserDay(db, userId, dayAt) {
 export async function insertInitialIfMissing(db, userId, dayAt, now) {
   await db.prepare(
     `INSERT INTO usage_daily (user_id, day_at, session_count, input_tokens, output_tokens,
-       cache_read_tokens, cache_write_tokens, tool_calls, tool_errors, retries, updated_at)
-     VALUES (?, ?, 0, 0, 0, 0, 0, 0, 0, 0, ?)
+       cache_read_tokens, cache_write_tokens, tool_calls, tool_errors, retries,
+       turns, api_calls, updated_at)
+     VALUES (?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ?)
      ON CONFLICT(user_id, day_at) DO NOTHING`
   ).bind(userId, dayAt, now).run()
 }
@@ -24,12 +25,14 @@ export async function casUpdate(db, userId, dayAt, agg, prevUpdatedAt, newUpdate
     `UPDATE usage_daily SET
        session_count = ?, input_tokens = ?, output_tokens = ?,
        cache_read_tokens = ?, cache_write_tokens = ?,
-       tool_calls = ?, tool_errors = ?, retries = ?, updated_at = ?
+       tool_calls = ?, tool_errors = ?, retries = ?,
+       turns = ?, api_calls = ?, updated_at = ?
      WHERE user_id = ? AND day_at = ? AND updated_at = ?`
   ).bind(
     agg.session_count, agg.input_tokens, agg.output_tokens,
     agg.cache_read_tokens, agg.cache_write_tokens,
-    agg.tool_calls, agg.tool_errors, agg.retries, newUpdatedAt,
+    agg.tool_calls, agg.tool_errors, agg.retries,
+    agg.turns, agg.api_calls, newUpdatedAt,
     userId, dayAt, prevUpdatedAt
   ).run()
   return res.meta.changes > 0
@@ -64,7 +67,9 @@ export async function sumAllByDay(db, { from, to } = {}) {
        SUM(cache_write_tokens) as cache_write_tokens,
        SUM(tool_calls) as tool_calls,
        SUM(tool_errors) as tool_errors,
-       SUM(retries) as retries
+       SUM(retries) as retries,
+       SUM(turns) as turns,
+       SUM(api_calls) as api_calls
      FROM usage_daily WHERE 1=1`
   if (from) {
     sql += ' AND day_at >= ?'
