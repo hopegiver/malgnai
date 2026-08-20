@@ -19,6 +19,10 @@ playwright-report/
 # 문서 창고 (git 추적 제외 — 디스크엔 유지, 이력만 안 쌓음)
 docs/
 
+# 진행 상태 단일 소스 — 세션마다 갱신되는 라이브 파일이라 git 추적 시 동시편집 merge conflict가 잦음
+# (전역 CLAUDE.md 프로젝트 운영 표준). 디스크엔 유지, 커밋만 제외.
+STATUS.md
+
 # Workflow 도구가 만드는 임시 git worktree (자동정리 안 되면 잔존 → vitest 오염 원인)
 .claude/worktrees/
 
