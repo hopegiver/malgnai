@@ -14,12 +14,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 새 세션 부트스트랩 (읽기 순서 = 토큰 예산)
 
 - **L0 (자동 주입, 항상 지불):** `STATUS.md` + 이 `CLAUDE.md` — 라이브 배포 상태·최근 작업의 단일 소스는 `STATUS.md`.
-- **L1 (선택적 호출):** 텍스트 검색이나 다중프로젝트 범위 필터링이 필요할 때만 malgnai-mcp `get_current_context` 호출.
+- **L1 (선택적 호출):** 텍스트 검색이나 다중프로젝트 범위 필터링이 필요할 때만 malgnai-hub 플러그인(`plugin_malgn-agent_malgnai-hub`) `project_get_context` 호출(projectId는 `STATUS.md` 헤더).
 - **L2 (깊은 작업일 때만):** 아래 "정본 문서" 표에서 필요한 것만 집어 읽기 — v1 범위(1·2단계) 안에서는 배포된 코드가 실제 동작의 진실이고, 설계 근거(왜 이렇게 짰는가)와 아직 구현 안 된 3·4단계는 문서가 정본이다.
 
 **필수 규율 (비협상, 전역 관례 유지):**
 1. **진행 상태 = `STATUS.md` 단일 소스.**
-2. **맥락 기록 = malgnai-mcp.** 주요 결정→`decision_add`, 막힌 것→`issue_add`(해결 시 `issue_resolve`), 재사용 교훈·요약→`memory_add`, 의미 있는 활동→`activity_log`.
+2. **맥락 기록 = malgnai-hub 자체(도그푸딩).** 이 저장소는 malgnai-hub를 만드는 프로젝트이자 malgnai-hub의 사용자이기도 하다 — 회사 공통(다른 프로젝트용) `malgnai-mcp`가 아니라 malgnai-hub 플러그인 MCP(`plugin_malgn-agent_malgnai-hub`, projectId는 `STATUS.md` 헤더)로 기록한다: 주요 결정→`decision_record`, 막힌 것→`issue_record`(해결 시 `issue_resolve`), 작업이력→`work_record`. 재사용 교훈(`memory_add`)·세부 활동로그(`activity_log`)에 대응하는 도구는 malgnai-hub v1에 아직 없음(3단계 이후 재검토) — 그 두 종류만 당분간 생략.
 3. **패키지 매니저는 pnpm만 사용**(npm/yarn 금지, 전역 `~/.claude/CLAUDE.md` 공통 규칙).
 
 ## Project Overview
@@ -50,5 +50,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ⚠️ **`docs/`는 `.gitignore` 대상**(의도된 설계)이라 원격 저장소엔 없다 — 다른 환경(다른 macOS 사용자·CI)에서 이어받으려면 로컬 디스크의 `docs/`를 별도로 전달해야 한다.
 
-<!-- malgn-agent:pm-orchestration:installed:v3 -->
-@~/.claude/plugins/marketplaces/malgnsoft-plugins/malgn-agent/hooks/pm-orchestration-block.md
+## PM 행동 규율
+
+<!-- 출처: malgn-agent 플러그인 hooks/pm-orchestration-block.md v3을 inline 반영(공유 CLAUDE.md에 홈 디렉터리 절대경로 import는 금지 — claude-md-architecture §3 오용②). 플러그인이 이 블록을 업데이트하면 아래 내용도 수동으로 맞춰야 한다. -->
+
+Standard 이상 등급(설계·코드·문서·분석 등)은 Agent 도구로 전문 에이전트에 위임한다 — 도구에 접근 가능하다는 이유로 스스로 처리하지 않는다. Micro(오탈자·단순조회·1줄 수정)만 예외다.
+
+5등급(Micro/Standard/Sensitive/Exploration/Refactor, 기준: Skill `common-task-grading-and-verification-depth`)으로 판정하고, 다단계 작업은 WBS를 등록한다. 완료는 실물 대조 후에만 인정하며(claimed≠verified), 근거 없이 단정하지 않는다(Skill `common-verifiable-output-and-honesty`).
+
+Sensitive·Exploration·Refactor이거나 Standard 이상인데 위임 후보가 3종 이상 또는 0종이면(위험도·불확실성에 비례해 쓴다) `malgn-agent:pm`에 오케스트레이션을 위임하고, Standard이고 후보가 1~2종이면 직접 위임한다. 이미 `malgn-agent:pm`으로 실행 중이면 자신을 다시 부르지 않는다. 위임한 pm이 사람 승인 지점에서 멈춰 돌아오면(정본: `agents/pm.md`의 "`AskUserQuestion`을 쓸 수 없는 실행" 규약), 그 승인은 사람과 대화하는 이 세션이 직접 받아 그 행위를 마무리한다 — pm에게 승인 결과를 되돌려주지 않는다.
+
+판단이 갈리는 중요한 결정(설계 방향·기술 선택 등)은 단독판단 대신 관련 에이전트의 다각 평가와 합의를 거친 뒤 결정한다.
+
+**추측 대신 확인한다** — 현황 파악은 3층 부트스트랩(Skill `project-standards`)을 따르되, 저장소의 현재 상태(git·브랜치·최근 커밋)는 기록이 대신 주지 못하니 직접 확인하고, 멈췄던 작업의 재개는 그 확인 뒤에 위임한다.
+
+**되돌리기 어려운 행동(merge·대량 삭제·force·다수 커밋 일괄) 전에 되돌릴 지점을 확보한다** — 대상을 열거하고 그 프로젝트가 쓰는 수단(브랜치·백업·스냅샷)으로 격리한다. 리뷰·평가는 변경 이후에 오므로 이를 대신하지 못한다.
+
+상세 절차(팀 구성·위임 모델·WBS 리스크·에스컬레이션)는 Skill `project-orchestration`을 호출해 따른다.
