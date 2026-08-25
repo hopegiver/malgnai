@@ -1,4 +1,5 @@
-// 회사 Claude Code 플러그인(GitHub `hopegiver/claude-plugins`, public repo, malgn-dev만 v1 범위)
+// 회사 Claude Code 플러그인(GitHub `malgnsoft/claude-plugins`, public repo, malgn-agent만 v1 범위 —
+// 2026-08-25 저장소 소유자 hopegiver→malgnsoft 이전 + 플러그인 디렉터리명 malgn-dev→malgn-agent 개명)
 // agents/skills/knowledge 카탈로그 동기화. GitHub REST(Git Trees API, recursive)로 파일 목록+blob
 // sha를 가져오고 raw.githubusercontent.com으로 각 파일 content를 fetch한다. public repo라 인증
 // 토큰 없이 호출한다(호출 빈도가 관리자 수동 트리거 + 1일 1회 cron뿐이라 60req/h 미인증 한도로
@@ -9,13 +10,13 @@
 // 둘 다 이 syncCatalog() 하나를 그대로 호출한다 — 동기화 로직을 두 곳에 중복 구현하지 않는다.
 import * as catalogDao from '../dao/catalog.js'
 
-const REPO = 'hopegiver/claude-plugins'
+const REPO = 'malgnsoft/claude-plugins'
 const BRANCH = 'main'
-const PLUGIN_NAME = 'malgn-dev'
+const PLUGIN_NAME = 'malgn-agent'
 
-const AGENT_PATH_RE = /^malgn-dev\/agents\/([^/]+)\.md$/
-const SKILL_PATH_RE = /^malgn-dev\/skills\/([^/]+)\/SKILL\.md$/
-const KNOWLEDGE_PATH_RE = /^malgn-dev\/knowledge\/(.+)\.md$/
+const AGENT_PATH_RE = /^malgn-agent\/agents\/([^/]+)\.md$/
+const SKILL_PATH_RE = /^malgn-agent\/skills\/([^/]+)\/SKILL\.md$/
+const KNOWLEDGE_PATH_RE = /^malgn-agent\/knowledge\/(.+)\.md$/
 
 function fetchError(message) {
   const e = new Error(message)
@@ -37,7 +38,7 @@ async function fetchTree() {
   const json = await res.json()
   if (json.truncated) {
     // recursive tree가 GitHub 응답 한도를 넘으면 일부 파일이 누락될 수 있다 — 조용히 넘어가지
-    // 않고 로그로 남긴다(malgn-dev 규모에서는 정상적으로 발생하지 않을 것으로 예상되는 비정상 케이스).
+    // 않고 로그로 남긴다(malgn-agent 규모에서는 정상적으로 발생하지 않을 것으로 예상되는 비정상 케이스).
     console.error('[catalog-sync] GitHub tree response truncated — some files may be missing')
   }
   return Array.isArray(json.tree) ? json.tree : []
@@ -96,7 +97,7 @@ function assertNoDuplicateSlugs(entries) {
   }
 }
 
-/** malgn-dev agents/skills/knowledge를 GitHub에서 읽어 catalog_items/catalog_item_versions에
+/** malgn-agent agents/skills/knowledge를 GitHub에서 읽어 catalog_items/catalog_item_versions에
  *  반영한다. 파싱 실패(frontmatter 깨짐 등)는 항목을 빼지 않고 display_name=null로 포함하며
  *  parseFailures에 기록한다(조용히 누락 금지). 반환값은 관리자 트리거 응답/cron 로그 양쪽에서 쓴다. */
 export async function syncCatalog(db) {

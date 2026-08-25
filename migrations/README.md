@@ -47,3 +47,8 @@ D1 스키마 변경 이력. **wrangler 표준 마이그레이션 체계를 그�
 - `0012_add_turns_api_calls.sql` — `sessions`/`usage_daily`에 `turns`(사용자 프롬프트 수)·
   `api_calls`(assistant API 호출 수) 컬럼 추가(2026-08-19, `docs/architecture.md` §0 결정26,
   claude-plugins 세션 요청). 순수 `ADD COLUMN`이라 기존 데이터에 영향 없음.
+- `0014_rename_catalog_plugin_malgn_agent.sql` — GitHub 저장소 이전(`hopegiver/claude-plugins`→
+  `malgnsoft/claude-plugins`)과 함께 플러그인 디렉터리명도 `malgn-dev`→`malgn-agent`로 개명됨에 따라
+  기존 `catalog_items` 행의 `plugin_name`/`source_path` 접두사를 정정(2026-08-25). `plugin_name`이
+  유니크 인덱스의 일부라 코드(`server/lib/catalog-sync.js`)만 바꾸면 다음 sync가 기존 행을 못 찾고
+  전부 새 행으로 중복 삽입하므로, 기존 행을 그대로 재사용하도록 먼저 적용해야 한다.
