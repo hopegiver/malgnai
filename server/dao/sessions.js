@@ -112,16 +112,19 @@ function decodeCursor(cursor) {
 }
 
 /** GET /api/usage/sessions — 커서 페이지네이션(api.md §5.5). sessions.id는 sha256 해시라 ULID처럼
- *  시간정렬이 아니므로(works.js와 달리) (started_at DESC, id DESC) 복합 커서를 쓴다. */
+ *  시간정렬이 아니므로(works.js와 달리) (started_at DESC, id DESC) 복합 커서를 쓴다. 프로젝트 무관
+ *  전체 세션 목록(세션이력 화면)이라 어느 프로젝트인지 구분할 수 있게 projects.name을 조인한다. */
 export async function listForUser(db, userId, { cursor, limit = 20 } = {}) {
   const params = [userId]
-  let sql = 'SELECT * FROM sessions WHERE user_id = ?'
+  let sql = `SELECT s.*, p.name as project_name FROM sessions s
+             LEFT JOIN projects p ON p.id = s.project_id
+             WHERE s.user_id = ?`
   const decoded = cursor ? decodeCursor(cursor) : null
   if (decoded) {
-    sql += ' AND (started_at < ? OR (started_at = ? AND id < ?))'
+    sql += ' AND (s.started_at < ? OR (s.started_at = ? AND s.id < ?))'
     params.push(decoded.startedAt, decoded.startedAt, decoded.id)
   }
-  sql += ' ORDER BY started_at DESC, id DESC LIMIT ?'
+  sql += ' ORDER BY s.started_at DESC, s.id DESC LIMIT ?'
   params.push(limit + 1)
   const { results } = await db.prepare(sql).bind(...params).all()
   const hasMore = results.length > limit

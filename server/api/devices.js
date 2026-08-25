@@ -19,7 +19,7 @@ devices.post('/pair-init', async (c) => {
   const webOrigin = c.env.WEB_APP_URL || new URL(c.req.url).origin
   return c.json({
     pairing_code: pairingCode,
-    pairing_url: `${webOrigin}/devices/pair?code=${encodeURIComponent(pairingCode)}`,
+    pairing_url: `${webOrigin}/pair?code=${encodeURIComponent(pairingCode)}`,
     expires_in: expiresIn
   })
 })

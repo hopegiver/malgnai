@@ -54,7 +54,7 @@ adminUsers.post('/', async (c) => {
 
   const tempPassword = generateTempPassword()
   const passwordHash = await hashPassword(tempPassword)
-  const created = await usersDao.insert(c.env.DB, { email, name, passwordHash, role })
+  const created = await usersDao.insert(c.env.DB, { email, name, passwordHash, role, mustChangePassword: true })
 
   return c.json({ ...toPublicUser(created), temporary_password: tempPassword }, 201)
 })

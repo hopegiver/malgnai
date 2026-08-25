@@ -42,18 +42,18 @@ function renderClaudeMarkdown() {
 이 프로젝트는 malgnai-hub(맑은소프트 공통 프로젝트 메모리 MCP)로 작업 이력을 추적한다.
 
 ## 새 세션 부트스트랩
-- **L0(항상):** 이 파일 + \`STATUS.md\`. \`STATUS.md\`가 없거나 상단 YAML frontmatter에 \`malgnai_hub.project_id\`가 없으면 **아직 malgnai-hub에 등록되지 않은 프로젝트**다 — 아래 "최초 등록" 절차를 먼저 따른다.
+- **L0(항상):** 이 파일 + \`STATUS.md\`. \`STATUS.md\`가 없거나 상단 YAML frontmatter에 \`project_id\`가 없으면 **아직 malgnai-hub에 등록되지 않은 프로젝트**다 — 아래 "최초 등록" 절차를 먼저 따른다.
 - **L1(필요 시):** 텍스트 검색이 필요하면 \`project_search_history\` MCP 도구 호출.
 - **상황 파악하려고 코드/문서 통독 금지** — STATUS.md + 이 파일이면 대부분 충분.
 
-## 최초 등록(STATUS.md에 malgnai_hub.project_id가 없을 때만)
+## 최초 등록(STATUS.md에 provider/project_id가 없을 때만)
 1. 이 프로젝트가 속한 워크스페이스 폴더명을 \`repositoryKey\`로 삼아 \`project_bootstrap\`을 호출한다(예: \`~/workspace/foo/\`이면 \`repositoryKey="foo"\`). \`repositoryKey\`는 이 프로젝트를 가리키는 단순 정보값일 뿐 전역에서 유일할 필요가 없다 — 나중에 GitHub 리포지토리와 연동되면 그 owner/repo 값으로 바꿔도 된다.
 2. 응답의 \`isNew\`가 \`true\`면 그대로 진행: \`statusMarkdown\`/\`claudeMarkdown\`/\`docsReadmeMarkdown\`을 각각 STATUS.md/CLAUDE.md/docs/README.md에 쓰고 \`scaffoldFolders\`의 폴더를 만든다(이미 내용이 채워진 파일이 있으면 덮어쓰지 않는다).
 3. 응답의 \`isNew\`가 \`false\`면 같은 이름의 프로젝트가 이미 등록돼 있었다는 뜻이다(다른 실제 프로젝트와 폴더명이 우연히 겹쳤을 수 있음) — **대화형 세션이면 사용자에게 이 프로젝트를 재사용할지 확인한 뒤** 채택하고, 확인이 어려운 상황(예: 비대화형 자동화)이면 그대로 채택해 진행한다.
-4. 이렇게 확정된 \`projectId\`를 STATUS.md 상단 frontmatter(\`malgnai_hub.project_id\`)에 기록해두면, 이후 세션은 이 값을 읽어 바로 4번 규칙으로 넘어간다.
+4. 이렇게 확정된 \`projectId\`를 STATUS.md 상단 frontmatter(\`provider\`/\`project_id\`)에 기록해두면, 이후 세션은 이 값을 읽어 바로 4번 규칙으로 넘어간다.
 
 ## malgnai-hub MCP 사용 규칙
-- **모든 도구(project_bootstrap 제외)는 \`projectId\` 필수** — STATUS.md의 \`malgnai_hub.project_id\`를 그대로 넘긴다. \`repositoryKey\`는 최초 등록(project_bootstrap) 1회만 쓰고 이후에는 다시 보낼 필요가 없다.
+- **모든 도구(project_bootstrap 제외)는 \`projectId\` 필수** — STATUS.md의 \`project_id\`를 그대로 넘긴다. \`repositoryKey\`는 최초 등록(project_bootstrap) 1회만 쓰고 이후에는 다시 보낼 필요가 없다.
 - **작업 시작 전**: \`project_get_context\`로 현재 상태·최근 결정·열린 이슈를 먼저 확인한다.
 - **의미 있는 작업을 마쳤을 때**: \`work_record\`(started/progress/completed/blocked 상태와 요약, \`nextAction\`을 채워두면 다음 세션의 현재상태에 그대로 이어짐).
 - **중요한 결정을 내렸을 때**: \`decision_record\`(결정+이유, \`importance\`는 매번 실제로 판단해서 1~5 지정 — 기본값 3 습관적 사용 금지).
@@ -150,10 +150,9 @@ export async function bootstrapProject(db, userId, { repositoryKey, repositoryNa
 
   const webUrl = `${WEB_ORIGIN}/projects/${project.id}`
   const statusMarkdown = `---
-malgnai_hub:
-  project_id: "${esc(project.id)}"
-  repository_key: "${esc(project.repository_key)}"
-  web_url: "${esc(webUrl)}"
+provider: malgnai-hub
+project_id: ${esc(project.id)}
+repository_key: ${esc(project.repository_key)}
 ---
 
 # STATUS — ${project.name}
@@ -169,7 +168,7 @@ ${renderRecentCompleted(ctx.decisions, ctx.recentWork)}
 ${renderIssues(ctx.issues)}
 
 ## 📌 핵심 메모
-- 이 프로젝트의 malgnai-hub project_id는 \`${project.id}\`. malgnai-mcp(사내 별도 시스템) project_id와 다른 값이니 혼동 금지 — 이 파일 상단 YAML frontmatter의 \`malgnai_hub.project_id\`가 정본.
+- 이 프로젝트의 malgnai-hub project_id는 \`${project.id}\`. malgnai-mcp(사내 별도 시스템) project_id와 다른 값이니 혼동 금지 — 이 파일 상단 YAML frontmatter의 \`project_id\`가 정본.
 - **이 project_id를 project_bootstrap 이후의 모든 malgnai-hub MCP 도구 호출에 그대로 쓴다** — repositoryKey는 이 등록 1회로 끝, 다시 보낼 필요 없다.
 - 상세 이력은 \`${webUrl}\`에서 조회하거나 \`project_search_history\`/\`project_get_context\` MCP 도구로 조회.
 `

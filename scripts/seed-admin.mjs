@@ -48,8 +48,8 @@ async function main() {
     console.error('오류: 유효한 --email 이 필요합니다.')
     process.exit(1)
   }
-  if (!password || password.length < 12) {
-    console.error('오류: --password 는 최소 12자 이상이어야 합니다.')
+  if (!password || password.length < 10) {
+    console.error('오류: --password 는 최소 10자 이상이어야 합니다.')
     process.exit(1)
   }
 

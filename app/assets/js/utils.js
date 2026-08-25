@@ -399,7 +399,7 @@ function catalogSkillCategory(slug) {
 }
 
 /** knowledge slug(예: 'backend/api-implementation-patterns')의 폴더 세그먼트를 추출한다.
- * 주의: source_path(schema.sql, 'malgn-dev/knowledge/backend/....md')는 상세 조회
+ * 주의: source_path(schema.sql, 'malgn-agent/knowledge/backend/....md')는 상세 조회
  * (GET /api/catalog/:id) 응답에만 있고, 목록 조회(GET /api/catalog) 응답에는 내려오지 않는다
  * (server/api/catalog.js 목록 직렬화 확인, 2026-08-06) — 실측 없이 IA 문서의 source_path 가정을
  * 그대로 구현했다면 전량 '기타'로 깨졌을 것(실측 결과 실제로 재현됨). 대신 목록 응답에 이미 있는

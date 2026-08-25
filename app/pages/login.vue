@@ -131,6 +131,11 @@ export default {
       if (data?.token) {
         localStorage.setItem('token', data.token)
         if (data.refresh_token) localStorage.setItem('refresh_token', data.refresh_token)
+        if (data.must_change_password) {
+          alert('임시/초기 비밀번호로 로그인했습니다. 계속 사용하려면 비밀번호를 변경해주세요.')
+          this.$router.replace('/profile')
+          return
+        }
         this.$router.replace(this.redirectTarget())
         return
       }

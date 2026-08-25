@@ -25,6 +25,10 @@
           <i class="bi bi-bar-chart"></i>
           사용량
         </router-link>
+        <router-link to="/sessions" class="admin-nav-item" :class="{ 'is-active': $route.path.startsWith('/sessions') }" @click="closeSidebarOnMobile">
+          <i class="bi bi-clock-history"></i>
+          세션이력
+        </router-link>
         <router-link to="/catalog" class="admin-nav-item" :class="{ 'is-active': $route.path.startsWith('/catalog') }" @click="closeSidebarOnMobile">
           <i class="bi bi-collection"></i>
           카탈로그
@@ -124,6 +128,7 @@ export default {
       if (p === '/') return [{ label: '프로젝트' }]
       if (p.match(/^\/projects\/[^/]+/)) return [{ label: '프로젝트', to: '/' }, { label: this.$route.params?.id || '프로젝트 상세' }]
       if (p.startsWith('/usage')) return [{ label: '사용량' }]
+      if (p.startsWith('/sessions')) return [{ label: '세션이력' }]
       if (p.match(/^\/catalog\/[^/]+/)) return [{ label: '카탈로그', to: '/catalog' }, { label: '상세' }]
       if (p.startsWith('/catalog')) return [{ label: '카탈로그' }]
       if (p.startsWith('/pair')) return [{ label: '기기 연결' }]

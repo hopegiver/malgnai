@@ -9,14 +9,14 @@ export async function findById(db, id) {
   return db.prepare('SELECT * FROM users WHERE id = ?').bind(id).first()
 }
 
-export async function insert(db, { email, name, passwordHash, role = 'employee' }) {
+export async function insert(db, { email, name, passwordHash, role = 'employee', mustChangePassword = false }) {
   const id = newId()
   const now = new Date().toISOString()
   await db.prepare(
-    `INSERT INTO users (id, email, name, password_hash, role, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`
-  ).bind(id, email, name || null, passwordHash, role, now, now).run()
-  return { id, email, name: name || null, role, status: 'active', created_at: now, updated_at: now }
+    `INSERT INTO users (id, email, name, password_hash, role, status, must_change_password, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`
+  ).bind(id, email, name || null, passwordHash, role, mustChangePassword ? 1 : 0, now, now).run()
+  return { id, email, name: name || null, role, status: 'active', must_change_password: mustChangePassword ? 1 : 0, created_at: now, updated_at: now }
 }
 
 /** 시드 스크립트 전용 — 이미 있으면 비밀번호/이름/role을 갱신(UPSERT), 없으면 새로 만든다. */
@@ -56,9 +56,9 @@ export async function updateName(db, id, name) {
     .bind(name, new Date().toISOString(), id).run()
 }
 
-/** 비밀번호 변경(server/api/auth.js POST /change-password) — password_hash만 갱신. */
+/** 비밀번호 변경(server/api/auth.js POST /change-password) — password_hash 갱신 + must_change_password 해제. */
 export async function updatePasswordHash(db, id, passwordHash) {
-  await db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?')
+  await db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = ? WHERE id = ?')
     .bind(passwordHash, new Date().toISOString(), id).run()
 }
 

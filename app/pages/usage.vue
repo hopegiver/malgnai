@@ -64,12 +64,36 @@
           </div>
         </div>
 
+        <!-- 일별 토큰 사용량 바 그래프 -->
+        <div class="card p-4 mb-3" v-if="chartData.length">
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <h2 class="h6 mb-0">일별 토큰 사용량</h2>
+            <span class="text-faint small">최근 {{ chartData.length }}일</span>
+          </div>
+          <div class="usage-chart">
+            <div class="usage-chart-bars">
+              <div
+                v-for="d in chartData"
+                :key="d.day"
+                class="usage-chart-col"
+                :title="`${d.day} · ${formatTokens(d.tokens)} 토큰`"
+              >
+                <span class="usage-chart-value">{{ formatTokens(d.tokens) }}</span>
+                <div class="usage-chart-bar" :style="{ height: d.barPx + 'px' }"></div>
+              </div>
+            </div>
+            <div class="usage-chart-axis">
+              <span v-for="d in chartData" :key="d.day" class="usage-chart-label">{{ d.shortDay }}</span>
+            </div>
+          </div>
+        </div>
+
         <!-- 모델별 일별 집계 -->
         <div class="card p-4 mb-3" v-if="dailyRows.length">
           <h2 class="h6 mb-3">일별·모델별 사용량</h2>
           <div class="table-responsive">
             <table class="table table-sm mb-0">
-              <thead><tr><th>날짜</th><th>모델</th><th class="text-end">세션</th><th class="text-end">입력</th><th class="text-end">출력</th><th class="text-end">캐시읽기</th><th class="text-end">도구</th></tr></thead>
+              <thead><tr><th>날짜</th><th>모델</th><th class="text-end">세션</th><th class="text-end">입력</th><th class="text-end">출력</th><th class="text-end">캐시읽기</th><th class="text-end">도구</th><th class="text-end">턴</th><th class="text-end">API호출</th></tr></thead>
               <tbody>
                 <tr v-for="row in dailyRows" :key="row.day_at + row.model">
                   <td>{{ row.day_at }}</td>
@@ -79,6 +103,8 @@
                   <td class="text-end">{{ formatTokens(row.output_tokens) }}</td>
                   <td class="text-end">{{ formatTokens(row.cache_read_tokens) }}</td>
                   <td class="text-end">{{ row.tool_calls }}</td>
+                  <td class="text-end">{{ row.turns }}</td>
+                  <td class="text-end">{{ row.api_calls }}</td>
                 </tr>
               </tbody>
             </table>
@@ -145,6 +171,19 @@ export default {
         if (r.model) models.add(r.model)
       }
       return { ...t, modelCount: models.size || 1 }
+    },
+    chartData() {
+      const rows = this.dailyRows.map((r) => ({
+        day: r.day_at,
+        tokens: (r.input_tokens || 0) + (r.output_tokens || 0) + (r.cache_read_tokens || 0) + (r.cache_write_tokens || 0),
+      }))
+      const max = Math.max(1, ...rows.map((r) => r.tokens))
+      const maxBarPx = 140
+      return rows.map((r) => ({
+        ...r,
+        barPx: Math.max(2, Math.round((r.tokens / max) * maxBarPx)),
+        shortDay: r.day.slice(5),
+      }))
     },
   },
   async mounted() {

@@ -6,7 +6,7 @@ import { verifyPassword, hashPassword, signAccessToken, generateOpaqueToken, sha
 import { rotateOrDetectReuse } from '../lib/rotating-token.js'
 
 const NAME_MAX_LENGTH = 100
-const NEW_PASSWORD_MIN_LENGTH = 12
+const NEW_PASSWORD_MIN_LENGTH = 10
 
 const auth = new Hono()
 
@@ -34,7 +34,7 @@ auth.post('/login', async (c) => {
   }
 
   const pair = await issueTokenPair(c, user)
-  return c.json(pair)
+  return c.json({ ...pair, must_change_password: !!user.must_change_password })
 })
 
 // [재사용 탐지 + grace window + 동시회전 레이스 방어] 회전형 refresh token. 판정 로직 자체는

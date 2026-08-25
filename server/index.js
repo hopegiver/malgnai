@@ -92,7 +92,7 @@ export default {
     return new Response('Not found', { status: 404 })
   },
 
-  // Cloudflare Cron Trigger(wrangler.jsonc triggers.crons, 1일 1회) — malgn-dev 카탈로그
+  // Cloudflare Cron Trigger(wrangler.jsonc triggers.crons, 1일 1회) — malgn-agent 카탈로그
   // 자동 동기화. 관리자 수동 트리거(POST /api/admin/catalog/sync)와 동일한 syncCatalog()를
   // 그대로 호출한다. 실패해도 Worker 자체는 죽지 않도록 캐치해 로그만 남긴다(다음 cron 또는
   // 관리자 수동 트리거로 회복 가능 — 매일 재시도되는 배치라 알림/재시도 큐는 v1에서 두지 않는다).

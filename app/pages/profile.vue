@@ -64,7 +64,7 @@
           </div>
           <div class="mb-3">
             <label class="form-label small fw-semibold" for="pwNew">새 비밀번호</label>
-            <input id="pwNew" v-model="newPassword" type="password" class="form-control" autocomplete="new-password" :disabled="pwSaving" placeholder="12자 이상" />
+            <input id="pwNew" v-model="newPassword" type="password" class="form-control" autocomplete="new-password" :disabled="pwSaving" placeholder="10자 이상" />
           </div>
           <div class="mb-3">
             <label class="form-label small fw-semibold" for="pwConfirm">새 비밀번호 확인</label>
@@ -153,8 +153,8 @@ export default {
     async changePassword() {
       this.pwError = ''
       this.pwSuccess = false
-      if (this.newPassword.length < 12) {
-        this.pwError = '새 비밀번호는 12자 이상이어야 합니다.'
+      if (this.newPassword.length < 10) {
+        this.pwError = '새 비밀번호는 10자 이상이어야 합니다.'
         return
       }
       if (this.newPassword !== this.confirmPassword) {
