@@ -1,11 +1,24 @@
-// project_bootstrap 공통 구현(mcp-tools.md §4.11, 구 bootstrap_project) — projects get-or-create
-// 후 project_get_context와 동일한 조합 로직(server/lib/context.js)으로 state/decisions/issues/
-// recentWork를 모아 STATUS.md 마크다운 문자열 하나로 조립해 반환한다. 포맷을 서버가 소유 —
-// 클라이언트는 그대로 파일에 쓰기만 하면 된다. 이미 존재하는 프로젝트 재호출은 아무것도 덮어쓰지
-// 않고 조회만(멱등). claudeMarkdown/docsReadmeMarkdown/scaffoldFolders는 D1 조회에 의존하지 않는
-// 고정 템플릿이라 isNew나 컨텍스트 조회 성공 여부와 무관하게 항상 같은 값을 반환한다(§4.11 "비정상
-// 케이스"). state는 project_states 폐기(2026-07-28) 이후 즉석 계산 — camelCase 키(phase/health/
-// progress/currentWork/nextAction/blockerSummary)로 반환된다(§4.1).
+// project_bootstrap 공통 구현(mcp-tools.md §4.11, 구 bootstrap_project) — projects get-or-create.
+//
+// **scaffold 파라미터로 응답 범위가 갈린다(architecture.md §0 결정27)**:
+// - 기본(`scaffold` 생략 또는 'none'): 등록(get-or-create)만 수행하고 식별자
+//   `{ projectId, isNew, webUrl, provider, repositoryKey }`만 반환한다. state/decisions/issues/
+//   recentWork 조회(getProjectContext)도 이 분기에서는 수행하지 않아 불필요한 D1 쿼리를 만들지
+//   않는다. **이미 다른 스캐폴딩 표준(예: malgn-agent project-standards)이 STATUS.md/CLAUDE.md/docs
+//   구조를 소유한 클라이언트가 이 기본값의 대상**이다 — statusMarkdown 전체를 돌려주면 그 표준이
+//   이미 채워둔 STATUS.md 본문(핵심 메모·완료 이력 등)을 덮어쓸 위험이 있어, frontmatter 3키만
+//   채우도록 응답을 의도적으로 좁혔다.
+// - 'full': 기존 동작 그대로 — project_get_context와 동일한 조합 로직(server/lib/context.js)으로
+//   state/decisions/issues/recentWork를 모아 STATUS.md 마크다운 문자열까지 조립해 claudeMarkdown/
+//   docsReadmeMarkdown/scaffoldFolders와 함께 반환한다. 포맷을 서버가 소유 — 클라이언트는 그대로
+//   파일에 쓰기만 하면 된다. 파일 템플릿이 필요한 독립 클라이언트(자체 스캐폴딩 표준이 없는 신규
+//   프로젝트)만 명시적으로 이 값을 요청해야 한다.
+//
+// 두 분기 모두 이미 존재하는 프로젝트 재호출은 아무것도 덮어쓰지 않고 조회만(멱등).
+// claudeMarkdown/docsReadmeMarkdown/scaffoldFolders는 D1 조회에 의존하지 않는 고정 템플릿이라
+// isNew나 컨텍스트 조회 성공 여부와 무관하게 항상 같은 값을 반환한다(§4.11 "비정상 케이스"). state는
+// project_states 폐기(2026-07-28) 이후 즉석 계산 — camelCase 키(phase/health/progress/currentWork/
+// nextAction/blockerSummary)로 반환된다(§4.1).
 //
 // 2026-08-11 repositories 테이블 폐기(architecture.md §0 결정22) — repositoryKey는 이제 projects가
 // 직접 보유하는 단순 정보값이고 (user_id, repositoryKey)로만 유니크하다(전역 유니크 아님). 이 도구가
@@ -47,8 +60,8 @@ function renderClaudeMarkdown() {
 - **상황 파악하려고 코드/문서 통독 금지** — STATUS.md + 이 파일이면 대부분 충분.
 
 ## 최초 등록(STATUS.md에 provider/project_id가 없을 때만)
-1. 이 프로젝트가 속한 워크스페이스 폴더명을 \`repositoryKey\`로 삼아 \`project_bootstrap\`을 호출한다(예: \`~/workspace/foo/\`이면 \`repositoryKey="foo"\`). \`repositoryKey\`는 이 프로젝트를 가리키는 단순 정보값일 뿐 전역에서 유일할 필요가 없다 — 나중에 GitHub 리포지토리와 연동되면 그 owner/repo 값으로 바꿔도 된다.
-2. 응답의 \`isNew\`가 \`true\`면 그대로 진행: \`statusMarkdown\`/\`claudeMarkdown\`/\`docsReadmeMarkdown\`을 각각 STATUS.md/CLAUDE.md/docs/README.md에 쓰고 \`scaffoldFolders\`의 폴더를 만든다(이미 내용이 채워진 파일이 있으면 덮어쓰지 않는다).
+1. 이 프로젝트가 속한 워크스페이스 폴더명을 \`repositoryKey\`로 삼아 \`project_bootstrap\`을 호출한다(예: \`~/workspace/foo/\`이면 \`repositoryKey="foo"\`). \`repositoryKey\`는 이 프로젝트를 가리키는 단순 정보값일 뿐 전역에서 유일할 필요가 없다 — 나중에 GitHub 리포지토리와 연동되면 그 owner/repo 값으로 바꿔도 된다. **이미 다른 프로젝트 스캐폴딩 표준(malgn-agent의 project-standards 스킬 등)을 따르는 저장소라면 이 호출에 \`scaffold\`를 주지 않거나(기본값 \'none\') 명시적으로 \'none\'을 지정한다** — projectId/repositoryKey/provider만 받아 STATUS.md frontmatter에 채워 넣고, 아래 2번의 claudeMarkdown/docsReadmeMarkdown/scaffoldFolders는 쓰지 않는다(이미 그 표준이 STATUS.md/CLAUDE.md/docs 구조를 소유한다). 파일 템플릿이 필요한 독립 클라이언트만 \`scaffold:'full'\`을 명시적으로 요청한다.
+2. \`scaffold:'full'\`로 호출했고 응답의 \`isNew\`가 \`true\`면 그대로 진행: \`statusMarkdown\`/\`claudeMarkdown\`/\`docsReadmeMarkdown\`을 각각 STATUS.md/CLAUDE.md/docs/README.md에 쓰고 \`scaffoldFolders\`(제안일 뿐 강제 아님 — 프로젝트에 이미 맞는 구조가 있으면 따르지 않아도 된다)의 폴더를 만든다(이미 내용이 채워진 파일이 있으면 덮어쓰지 않는다).
 3. 응답의 \`isNew\`가 \`false\`면 같은 이름의 프로젝트가 이미 등록돼 있었다는 뜻이다(다른 실제 프로젝트와 폴더명이 우연히 겹쳤을 수 있음) — **대화형 세션이면 사용자에게 이 프로젝트를 재사용할지 확인한 뒤** 채택하고, 확인이 어려운 상황(예: 비대화형 자동화)이면 그대로 채택해 진행한다.
 4. 이렇게 확정된 \`projectId\`를 STATUS.md 상단 frontmatter(\`provider\`/\`project_id\`)에 기록해두면, 이후 세션은 이 값을 읽어 바로 4번 규칙으로 넘어간다.
 
@@ -76,7 +89,9 @@ const DOCS_README_MARKDOWN = `# 문서 지도
 - (아직 문서 없음)
 `
 
-// 폴더 스캐폴드(mcp-tools.md §4.11) — 고정 배열, D1 조회와 무관.
+// 폴더 스캐폴드(mcp-tools.md §4.11) — 고정 배열, D1 조회와 무관. scaffold:'full' 응답에만 포함되며
+// 어디까지나 제안일 뿐 강제가 아니다 — 클라이언트(또는 클라이언트가 따르는 다른 스캐폴딩 표준)가
+// 이미 다른 폴더 구조를 쓰고 있다면 그대로 무시해도 된다.
 const SCAFFOLD_FOLDERS = ['docs', 'src', 'output']
 
 // state는 project_states 폐기(2026-07-28) 이후 computeProjectState()가 즉석 계산해 반환하는
@@ -121,13 +136,20 @@ function renderIssues(issues) {
 }
 
 /**
- * bootstrapProject(db, userId, { repositoryKey, repositoryName?, projectName? })
- * → { projectId, isNew, webUrl, statusMarkdown, claudeMarkdown, docsReadmeMarkdown, scaffoldFolders }
+ * bootstrapProject(db, userId, { repositoryKey, repositoryName?, projectName?, scaffold? })
+ *
+ * scaffold가 'full'이 아니면(기본값, undefined/'none' 포함):
+ *   → { projectId, isNew, webUrl, provider: 'malgnai-hub', repositoryKey }
+ *   getProjectContext 조회를 하지 않는다 — 불필요한 D1 쿼리를 만들지 않기 위함(architecture.md §0 결정27).
+ *
+ * scaffold === 'full'이면(기존 동작):
+ *   → { projectId, isNew, webUrl, provider: 'malgnai-hub', repositoryKey,
+ *       statusMarkdown, claudeMarkdown, docsReadmeMarkdown, scaffoldFolders }
  *
  * 2026-08-11 repositories 테이블 폐기 이후 get-or-create는 projects 테이블 하나에서
  * (user_id, repository_key)로만 이뤄진다 — repositoryKey는 전역 유니크가 아니다.
  */
-export async function bootstrapProject(db, userId, { repositoryKey, repositoryName, projectName } = {}) {
+export async function bootstrapProject(db, userId, { repositoryKey, repositoryName, projectName, scaffold } = {}) {
   if (!repositoryKey || typeof repositoryKey !== 'string') {
     throw validationError('repositoryKey is required')
   }
@@ -137,6 +159,8 @@ export async function bootstrapProject(db, userId, { repositoryKey, repositoryNa
     throw validationError('repositoryKey is required')
   }
 
+  const wantsFull = scaffold === 'full'
+
   // isNew 판정을 위해 get-or-create 전에 먼저 존재 여부를 확인(projectsDao.getOrCreateForUser는
   // 존재/생성 여부를 알려주지 않고 row만 반환하므로 — 다른 11개 도구의 계약을 바꾸지 않기 위한 최소 변경).
   const existing = await db.prepare('SELECT * FROM projects WHERE user_id = ? AND repository_key = ?')
@@ -144,11 +168,23 @@ export async function bootstrapProject(db, userId, { repositoryKey, repositoryNa
   const isNew = !existing
   const project = existing || await projectsDao.getOrCreateForUser(db, userId, repositoryKey, repositoryName, projectName)
 
+  const webUrl = `${WEB_ORIGIN}/projects/${project.id}`
+
+  // 기본 분기(scaffold !== 'full'): 식별자만 반환 — getProjectContext 조회 자체를 하지 않는다.
+  if (!wantsFull) {
+    return {
+      projectId: project.id,
+      isNew,
+      webUrl,
+      provider: 'malgnai-hub',
+      repositoryKey: project.repository_key
+    }
+  }
+
   // §4.11: state(즉석계산)/decisions(상위5)/issues(open, 상위5)/recentWork(상위5) — wbs는 STATUS.md
   // 템플릿이 쓰지 않으므로 sections에서 제외해 불필요한 쿼리를 만들지 않는다.
   const ctx = await getProjectContext(db, project.id, { sections: ['state', 'decisions', 'issues', 'recentWork'], limit: 5 })
 
-  const webUrl = `${WEB_ORIGIN}/projects/${project.id}`
   const statusMarkdown = `---
 provider: malgnai-hub
 project_id: ${esc(project.id)}
@@ -175,6 +211,8 @@ ${renderIssues(ctx.issues)}
 
   return {
     projectId: project.id,
+    provider: 'malgnai-hub',
+    repositoryKey: project.repository_key,
     isNew,
     webUrl,
     statusMarkdown,

@@ -314,17 +314,18 @@ export class MalgnMcpAgent extends McpAgent {
     this.server.registerTool(
       'project_bootstrap',
       {
-        description: '이 레포지토리를 malgnai-hub에 최초 등록(get-or-create)하고, 프로젝트 루트에 그대로 쓸 수 있는 파일 3종의 마크다운과 폴더 스캐폴드 목록을 반환한다. statusMarkdown은 현재 컨텍스트(상태/결정/이슈/최근작업)를 조합한 STATUS.md(YAML frontmatter 포함, 매번 새로 조립). claudeMarkdown/docsReadmeMarkdown은 CLAUDE.md/docs/README.md용 고정 템플릿(D1 조회와 무관하게 항상 동일, repositoryKey만 치환), scaffoldFolders는 고정 배열 ["docs","src","output"] — 이미 로컬에 내용이 채워진 파일이 있으면 덮어쓰지 않도록 판단하는 것은 클라이언트 몫이다. 이미 등록된 프로젝트에 재호출해도 아무것도 덮어쓰지 않고 조회만 한다(멱등).',
+        description: '이 레포지토리를 malgnai-hub에 최초 등록(get-or-create)한다. 기본(`scaffold` 생략 또는 \'none\')은 프로젝트 등록(get-or-create) + 식별자(projectId/repositoryKey/provider)만 반환한다. 파일 템플릿(CLAUDE.md/docs/README.md/폴더 스캐폴드)이 필요한 독립 클라이언트만 명시적으로 scaffold:\'full\'을 요청한다 — 이때만 statusMarkdown/claudeMarkdown/docsReadmeMarkdown/scaffoldFolders를 포함해 반환한다(statusMarkdown은 현재 컨텍스트(상태/결정/이슈/최근작업)를 조합해 매번 새로 조립, claudeMarkdown/docsReadmeMarkdown/scaffoldFolders는 D1 조회와 무관한 고정 템플릿). **이미 다른 프로젝트 스캐폴딩 표준(예: malgn-agent의 project-standards 스킬)을 따르는 저장소는 반드시 \'none\'을 쓰고 응답의 provider/projectId/repositoryKey만 STATUS.md frontmatter에 채운다** — 그 표준이 이미 STATUS.md/CLAUDE.md/docs 구조를 소유하므로 이 도구의 템플릿을 그 위에 덮어쓰면 안 된다. 이미 등록된 프로젝트에 재호출해도 아무것도 덮어쓰지 않고 조회만 한다(멱등).',
         inputSchema: {
           repositoryKey: z.string().min(1),
           repositoryName: z.string().optional(),
-          projectName: z.string().optional()
+          projectName: z.string().optional(),
+          scaffold: z.enum(['none', 'full']).optional()
         }
       },
-      async ({ repositoryKey, repositoryName, projectName }) => {
+      async ({ repositoryKey, repositoryName, projectName, scaffold }) => {
         try {
           const userId = this.props.userId
-          const out = await bootstrapProject(this.env.DB, userId, { repositoryKey, repositoryName, projectName })
+          const out = await bootstrapProject(this.env.DB, userId, { repositoryKey, repositoryName, projectName, scaffold })
           return textResult(out)
         } catch (e) {
           return errorResult(e)

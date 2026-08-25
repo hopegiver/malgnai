@@ -34,6 +34,16 @@ export async function getOrCreateForUser(db, userId, repositoryKey, repositoryNa
   }
 }
 
+/** get-only 조회(2026-08-25 승인 조치B) — 없으면 생성하지 않고 null을 반환한다.
+ *  getOrCreateForUser와 달리 신규 project를 만들지 않는다. sessions.js가 세션 수신만으로
+ *  프로젝트를 자동 생성하던 문제(usage-agent 구버전 정규화가 owner-prefix 붙은 값으로
+ *  잔재 project를 만든 사례)의 재발 방지 — 신규 프로젝트 등록은 MCP project_bootstrap
+ *  경로로만 이뤄지게 유지한다(architecture.md §7.2). */
+export async function findByUserAndRepositoryKey(db, userId, repositoryKey) {
+  return db.prepare('SELECT * FROM projects WHERE user_id = ? AND repository_key = ?')
+    .bind(userId, repositoryKey).first()
+}
+
 /** 본인 소유만 — 타인 소유 project_id는 존재해도 null(404 위장, IDOR 방지, api.md §5.3). */
 export async function findOwnedById(db, userId, projectId) {
   return db.prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?').bind(projectId, userId).first()

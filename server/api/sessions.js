@@ -4,8 +4,10 @@
 // deviceAuthMiddleware를 직접 재사용해 Bearer device_token을 검증한다(그 파일 자체 주석이 이미
 // 이 재사용을 예고하고 있었다).
 //
-// 처리 단계(§7.2 그대로): 검증 → 프로젝트 바인딩(get-or-create) → sessions UPSERT(멱등) →
-// day_at 계산 → usage_daily CAS 재집계 → 200 { accepted: true } (Queue 없음, 요청 안에서 동기 처리).
+// 처리 단계(§7.2, 2026-08-25 승인 조치B로 프로젝트 바인딩을 get-only로 변경):
+// 검증 → 프로젝트 바인딩(get-only, 없으면 project_id NULL — 자동 생성하지 않음) →
+// sessions UPSERT(멱등) → day_at 계산 → usage_daily CAS 재집계 → 200 { accepted: true }
+// (Queue 없음, 요청 안에서 동기 처리).
 import { Hono } from 'hono'
 import { deviceAuthMiddleware } from '../../mcp/device-auth.js'
 import * as projectsDao from '../dao/projects.js'
@@ -65,14 +67,17 @@ sessions.post('/', requireDeviceToken, async (c) => {
   const userId = c.get('deviceUserId')
   const deviceId = c.get('deviceId')
 
-  // 프로젝트 바인딩(§7.2 2단계) — (user_id, repository_key) get-or-create, projects.js §4.1/§0 결정23과
-  // 동일 흐름. repository_key 없으면(레포 밖 세션 등) project_id NULL 허용(schema.sql §3.10).
+  // 프로젝트 바인딩(§7.2 2단계, 2026-08-25 승인 조치B로 get-only 변경) — (user_id, repository_key)
+  // 기존 프로젝트가 있을 때만 바인딩하고, 없으면 새로 만들지 않는다(신규 등록은 MCP
+  // project_bootstrap 경로 전용, projects.js findByUserAndRepositoryKey). repository_key가
+  // 없거나 매칭되는 프로젝트가 없으면 project_id NULL로 세션만 기록(schema.sql §3.10 허용,
+  // 기존 "repository_key 없음" 케이스와 동일 처리로 응답 계약도 그대로 200 { accepted: true }).
   let projectId = null
   const repositoryKeyRaw = typeof body.repository_key === 'string' ? body.repository_key : ''
   if (repositoryKeyRaw.trim()) {
     const repositoryKey = normalizeRepositoryKey(repositoryKeyRaw)
-    const project = await projectsDao.getOrCreateForUser(c.env.DB, userId, repositoryKey)
-    projectId = project.id
+    const project = await projectsDao.findByUserAndRepositoryKey(c.env.DB, userId, repositoryKey)
+    if (project) projectId = project.id
   }
 
   const id = await sha256Hex(`${deviceId}:${claudeSessionId}`)
