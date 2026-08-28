@@ -126,6 +126,18 @@ export async function findCompanyItemById(db, id) {
   return db.prepare(`SELECT * FROM catalog_items WHERE id = ? AND scope = 'company'`).bind(id).first()
 }
 
+/** agent_score_record/agent_get_context(server/lib/agent-scores.js, agent-context.js)용 —
+ *  agentName(=slug)으로 회사 카탈로그 항목을 찾는다. plugin_name으로 좁히지 않는다(정본 decision
+ *  `01m13thq2gbc0hw6tcc4yqh2sq`이 scope+item_type+slug만 명시) — v1엔 plugin_name이 'malgn-agent'
+ *  고정이라 결과가 갈리지 않지만, 나중에 플러그인이 늘어도 이 조회부만 다시 좁히면 된다.
+ *  removed_at을 의도적으로 필터하지 않는다(soft-remove된 에이전트도 slug로 여전히 찾아진다) —
+ *  읽기(agent_get_context)는 GitHub에서 사라진 에이전트의 과거 점수 이력도 계속 조회돼야
+ *  자연스럽다. 쓰기(agent_score_record)는 이 함수 호출 뒤 별도로 removed_at을 검사한다
+ *  (server/lib/agent-scores.js recordAgentScore 참고 — 이 함수 자체는 항상 무필터). */
+export async function findCompanyItemBySlug(db, itemType, slug) {
+  return db.prepare(`SELECT * FROM catalog_items WHERE scope = 'company' AND item_type = ? AND slug = ?`).bind(itemType, slug).first()
+}
+
 /** GET /api/catalog/:id 승격이력(전체, 최신순). */
 export async function listPromotionsForItem(db, catalogItemId) {
   const { results } = await db.prepare(
@@ -133,6 +145,38 @@ export async function listPromotionsForItem(db, catalogItemId) {
      JOIN catalog_item_versions civ ON civ.id = cp.catalog_item_version_id
      WHERE civ.catalog_item_id = ? ORDER BY cp.created_at DESC`
   ).bind(catalogItemId).all()
+  return results
+}
+
+/** agent_get_context(server/lib/agent-scores.js)용 — catalog_item_id에 속한 "모든 버전"을 걸친
+ *  최신 1행(항목 단위 통산 조회). MD 파일이 수정될 때마다 content_sha가 바뀌어 새
+ *  catalog_item_versions 행이 생기고(insertVersionIfChanged) 새 버전엔 점수가 0건이라, 조회를
+ *  "현재 최신 버전"으로만 좁히면 evaluator의 점수 왕복 워크플로가 MD를 고칠 때마다 끊긴다
+ *  (2026-08-28 사용자 승인, decision 정정). listCompanyItems()의 latest_evaluator_score 상관
+ *  서브쿼리와 동일한 civ JOIN 패턴을 재사용한다 — 새 방식을 발명하지 않는다. civ.synced_at을
+ *  version_synced_at으로 함께 반환해 호출자가 "몇 번째 버전, 언제 찍힌 점수인지" 구분할 수 있게
+ *  한다(cs.catalog_item_version_id는 cs.*에 이미 포함). */
+export async function getLatestScoreForItem(db, catalogItemId) {
+  return db.prepare(
+    `SELECT cs.*, civ.synced_at AS version_synced_at
+     FROM catalog_scores cs
+     JOIN catalog_item_versions civ ON civ.id = cs.catalog_item_version_id
+     WHERE civ.catalog_item_id = ?
+     ORDER BY cs.created_at DESC LIMIT 1`
+  ).bind(catalogItemId).first()
+}
+
+/** agent_get_context(scoreHistory)용 — 위와 동일한 항목 단위 통산 스코프의 최신순 N개(추이).
+ *  limit 파라미터가 없는 listScoresForItem(REST 이력 API 전용, 아래)과는 용도가 다르다. */
+export async function listScoresHistoryForItem(db, catalogItemId, limit = 10) {
+  const { results } = await db.prepare(
+    `SELECT cs.overall_score, cs.created_at, cs.rater_type, cs.verified, cs.catalog_item_version_id,
+            civ.synced_at AS version_synced_at
+     FROM catalog_scores cs
+     JOIN catalog_item_versions civ ON civ.id = cs.catalog_item_version_id
+     WHERE civ.catalog_item_id = ?
+     ORDER BY cs.created_at DESC LIMIT ?`
+  ).bind(catalogItemId, limit).all()
   return results
 }
 

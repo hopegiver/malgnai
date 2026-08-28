@@ -333,11 +333,15 @@ export class MalgnMcpAgent extends McpAgent {
       }
     )
 
-    // 2026-08 개인 에이전트 트래킹 도구 3종(mcp-tools.md §4.12~4.14, architecture.md §0 결정21).
-    // 나머지 11개와 달리 project_id가 아니라 user_id가 1차 소유권 — 에이전트는 프로젝트가 아니라
-    // 사람에게 속하고 여러 프로젝트를 넘나든다. projectId는 선택(필수 아님): 주어지면
-    // resolveProjectById()로 "계기가 된 프로젝트" 참조를 확정하고(본인 소유가 아니면 에러), 없으면
-    // projectId=null·userId=this.props.userId를 그대로 쓴다(다른 도구들의 projectId 필수 검증을 걸지 않음).
+    // 2026-08 개인 에이전트 트래킹 도구 3종(mcp-tools.md §4.12~4.14, architecture.md §0 결정21,
+    // agent_score_record/agent_get_context는 2026-08-28 catalog_scores 통합으로 재정의 —
+    // 정본 decision `01m13thq2gbc0hw6tcc4yqh2sq`). agent_learning_record는 나머지 11개와 달리
+    // project_id가 아니라 user_id가 1차 소유권 — 에이전트는 프로젝트가 아니라 사람에게 속하고
+    // 여러 프로젝트를 넘나든다. projectId는 선택(필수 아님): 주어지면 resolveProjectById()로
+    // "계기가 된 프로젝트" 참조를 확정하고(본인 소유가 아니면 에러), 없으면 projectId=null·
+    // userId=this.props.userId를 그대로 쓴다(다른 도구들의 projectId 필수 검증을 걸지 않음).
+    // agent_score_record는 반대로 projectId 입력 자체가 없다 — 채점 대상이 catalog_items(회사
+    // 공용 자산)라 애초에 프로젝트 스코프 개념이 없기 때문(아래 개별 주석 참고).
     this.server.registerTool(
       'agent_learning_record',
       {
@@ -368,29 +372,29 @@ export class MalgnMcpAgent extends McpAgent {
       }
     )
 
+    // agent_score_record — 채점 대상이 개인 소유가 아니라 catalog_items(scope='company')이므로
+    // projectId/userId 소유권 확인 자체가 없다(agentName→catalog_items→catalog_item_versions
+    // 최신행으로 대상을 확정, agent-scores.js recordAgentScore가 findCompanyItemBySlug+
+    // getLatestVersion을 직접 호출). verified는 서버가
+    // raterType==='evaluator'일 때만 1로 강제하고 클라이언트 입력을 받지 않는다. rater_id는
+    // 항상 this.props.userId — 클라이언트가 보낸 값을 신뢰하지 않는다(idea.md §12.3).
     this.server.registerTool(
       'agent_score_record',
       {
-        description: '개인 에이전트의 평가 점수(overallScore 0~100, dimensionScores JSON 가능)를 불변 이력으로 기록한다(매번 새 행). user_id+agent_name이 1차 소유권 — projectId는 선택이며 주면 계기가 된 프로젝트로 참조 저장된다.',
+        description: '회사 카탈로그 에이전트(scope=company)의 평가 점수(overallScore 0~100, dimensionScores JSON 가능)를 그 에이전트의 최신 동기화 버전(catalog_item_versions)에 불변 이력으로 기록한다(매번 새 행, catalog_scores). agentName이 카탈로그에 동기화되어 있지 않거나 GitHub에서 삭제/이름변경돼 soft-remove됐으면 NOT_FOUND(2026-08-28 추가 — removed_at IS NOT NULL이면 새 점수를 남기지 않는다). verified는 클라이언트가 지정할 수 없고 서버가 raterType===\'evaluator\'일 때만 1로 강제한다(그 외엔 항상 0). projectId 입력 없음(catalog 자산은 프로젝트 스코프 개념이 없음).',
         inputSchema: {
           agentName: z.string().min(1),
           overallScore: z.number().min(0).max(100),
           dimensionScores: z.record(z.number()).optional(),
-          improvementNote: z.string().optional(),
-          evaluatorNote: z.string().optional(),
-          projectId: z.string().optional(),
+          note: z.string().optional(),
+          raterType: z.enum(['evaluator', 'personal_aggregate', 'self_service']),
           idempotencyKey: z.string().min(1)
         }
       },
-      async ({ projectId: inputProjectId, ...rest }) => {
+      async ({ agentName, overallScore, dimensionScores, note, raterType, idempotencyKey }) => {
         try {
           const userId = this.props.userId
-          let projectId = null
-          if (inputProjectId) {
-            const { project } = await this.resolveProjectById(inputProjectId)
-            projectId = project.id
-          }
-          const out = await recordAgentScore(this.env.DB, { userId, projectId, ...rest })
+          const out = await recordAgentScore(this.env.DB, { userId, agentName, overallScore, dimensionScores, note, raterType, idempotencyKey })
           return textResult(out)
         } catch (e) {
           return errorResult(e)
@@ -401,7 +405,7 @@ export class MalgnMcpAgent extends McpAgent {
     this.server.registerTool(
       'agent_get_context',
       {
-        description: '개인 에이전트의 최신 평가 점수·점수 추이·최근 학습 이력을 조합해 조회한다. user_id+agent_name 스코프라 repositoryKey가 필요 없다(타 사용자 데이터에 닿을 경로 자체가 없음).',
+        description: '개인 에이전트의 최신 평가 점수·점수 추이·최근 학습 이력을 조합해 조회한다. recentLearnings는 user_id+agent_name 스코프(repositoryKey 불필요, 타 사용자 데이터에 닿을 경로 자체가 없음). latestScore/scoreHistory는 catalog_items(scope=company)에 속한 모든 catalog_item_versions를 걸친 통산 스코프(2026-08-28 재정정 — MD 수정마다 버전이 바뀌어도 이전 버전 점수가 계속 조회됨). 각 점수 항목에 catalogItemVersionId/versionSyncedAt이 실려 어느 버전의 점수인지 구분 가능. agentName이 카탈로그에 아직 동기화되지 않았거나 soft-remove됐어도 과거 점수는 조회되며, 전혀 동기화된 적 없으면 에러가 아니라 null/빈 배열.',
         inputSchema: {
           agentName: z.string().min(1),
           learningLimit: z.number().int().min(1).max(50).optional(),
