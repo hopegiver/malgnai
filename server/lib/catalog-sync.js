@@ -99,13 +99,19 @@ function assertNoDuplicateSlugs(entries) {
 
 /** malgn-agent agents/skills/knowledge를 GitHub에서 읽어 catalog_items/catalog_item_versions에
  *  반영한다. 파싱 실패(frontmatter 깨짐 등)는 항목을 빼지 않고 display_name=null로 포함하며
- *  parseFailures에 기록한다(조용히 누락 금지). 반환값은 관리자 트리거 응답/cron 로그 양쪽에서 쓴다. */
+ *  parseFailures에 기록한다(조용히 누락 금지). 반환값은 관리자 트리거 응답/cron 로그 양쪽에서 쓴다.
+ *
+ *  GitHub에서 파일이 삭제되거나 이름이 바뀌면 이번 스캔의 (item_type, slug) 집합에서 빠진다 —
+ *  기존 DB 행 중 그렇게 빠진 것을 찾아 catalogDao.markRemoved()로 soft-remove 표시한다(하드
+ *  삭제 금지, migrations/0015). 이 diff는 `entries`(GitHub tree 스캔 결과, raw content fetch
+ *  성공 여부와 무관)를 기준으로 계산한다 — raw fetch가 일시적으로 실패해 parseFailures에 들어간
+ *  항목까지 "삭제됨"으로 오판하지 않기 위함. */
 export async function syncCatalog(db) {
   const tree = await fetchTree()
   const entries = classifyEntries(tree)
   assertNoDuplicateSlugs(entries)
 
-  const result = { scanned: entries.length, itemsUpserted: 0, versionsCreated: 0, parseFailures: [] }
+  const result = { scanned: entries.length, itemsUpserted: 0, versionsCreated: 0, itemsRemoved: 0, parseFailures: [] }
 
   for (const entry of entries) {
     let content
@@ -147,6 +153,16 @@ export async function syncCatalog(db) {
 
     const { created } = await catalogDao.insertVersionIfChanged(db, itemId, entry.sha, content)
     if (created) result.versionsCreated++
+  }
+
+  const scannedKeys = new Set(entries.map((e) => `${e.itemType}:${e.slug}`))
+  const activeExisting = await catalogDao.listActiveCompanyItemKeys(db, PLUGIN_NAME)
+  const removedIds = activeExisting
+    .filter((row) => !scannedKeys.has(`${row.item_type}:${row.slug}`))
+    .map((row) => row.id)
+  if (removedIds.length > 0) {
+    await catalogDao.markRemoved(db, removedIds)
+    result.itemsRemoved = removedIds.length
   }
 
   return result
