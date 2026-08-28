@@ -52,3 +52,10 @@ D1 스키마 변경 이력. **wrangler 표준 마이그레이션 체계를 그�
   기존 `catalog_items` 행의 `plugin_name`/`source_path` 접두사를 정정(2026-08-25). `plugin_name`이
   유니크 인덱스의 일부라 코드(`server/lib/catalog-sync.js`)만 바꾸면 다음 sync가 기존 행을 못 찾고
   전부 새 행으로 중복 삽입하므로, 기존 행을 그대로 재사용하도록 먼저 적용해야 한다.
+- `0016_drop_agent_scores.sql` — `agent_score_record`/`agent_get_context`가 `agent_scores`(user_id+
+  agent_name 스코프) 대신 `catalog_scores`(catalog_item_version_id 스코프)만 참조하도록 전환됨에
+  따라 `agent_scores` 테이블+인덱스 2개 폐기(2026-08-28, 정본 decision `01m13thq2gbc0hw6tcc4yqh2sq`).
+  프로덕션 `agent_scores` 4행 중 트레이너 3행을 "채점 시점에 현행이던 `catalog_item_versions`"에
+  매핑해 `catalog_scores`로 백필하는 INSERT 블록을 명확한 주석 경계(BACKFILL BEGIN/END)로 감싸
+  포함 — **사용자 승인 전에는 이 블록을 통째로 삭제하고 DROP문만 적용**. 테스트 산출물
+  `__schema-probe-evaluator` 행은 대응 `catalog_item`이 없어 백필 대상에서 제외.

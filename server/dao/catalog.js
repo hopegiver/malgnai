@@ -94,6 +94,14 @@ export async function findCompanyItemById(db, id) {
   return db.prepare(`SELECT * FROM catalog_items WHERE id = ? AND scope = 'company'`).bind(id).first()
 }
 
+/** agent_score_record/agent_get_context(server/lib/agent-scores.js, agent-context.js)용 —
+ *  agentName(=slug)으로 회사 카탈로그 항목을 찾는다. plugin_name으로 좁히지 않는다(정본 decision
+ *  `01m13thq2gbc0hw6tcc4yqh2sq`이 scope+item_type+slug만 명시) — v1엔 plugin_name이 'malgn-agent'
+ *  고정이라 결과가 갈리지 않지만, 나중에 플러그인이 늘어도 이 조회부만 다시 좁히면 된다. */
+export async function findCompanyItemBySlug(db, itemType, slug) {
+  return db.prepare(`SELECT * FROM catalog_items WHERE scope = 'company' AND item_type = ? AND slug = ?`).bind(itemType, slug).first()
+}
+
 /** GET /api/catalog/:id 승격이력(전체, 최신순). */
 export async function listPromotionsForItem(db, catalogItemId) {
   const { results } = await db.prepare(
