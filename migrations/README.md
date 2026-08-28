@@ -52,6 +52,13 @@ D1 스키마 변경 이력. **wrangler 표준 마이그레이션 체계를 그�
   기존 `catalog_items` 행의 `plugin_name`/`source_path` 접두사를 정정(2026-08-25). `plugin_name`이
   유니크 인덱스의 일부라 코드(`server/lib/catalog-sync.js`)만 바꾸면 다음 sync가 기존 행을 못 찾고
   전부 새 행으로 중복 삽입하므로, 기존 행을 그대로 재사용하도록 먼저 적용해야 한다.
+- `0015_add_catalog_items_removed_at.sql` — `catalog_items.removed_at` 컬럼 추가(nullable,
+  ISO8601). GitHub(`malgnsoft/claude-plugins`) 쪽 파일이 삭제/이름변경돼 `catalog-sync.js` 스캔에서
+  더 이상 발견되지 않는 기존 항목이 `/catalog` 화면·`GET /api/catalog`에 죽은 채로 계속 노출되던
+  버그 수정(2026-08-28). `catalog_item_versions`/`catalog_promotions`/`catalog_scores`가
+  `catalog_items.id`를 FK로 참조해 하드 DELETE는 고아 레코드 위험이 있으므로 soft-remove만 한다 —
+  `syncCatalog()`가 스캔에서 못 찾은 항목을 `markRemoved()`로 마킹, 재등장하면 `upsertCompanyItem()`이
+  `removed_at`을 다시 NULL로 되돌림(`server/dao/catalog.js`). 순수 `ADD COLUMN`이라 기존 행 영향 없음.
 - `0016_drop_agent_scores.sql` — `agent_score_record`/`agent_get_context`가 `agent_scores`(user_id+
   agent_name 스코프) 대신 `catalog_scores`(catalog_item_version_id 스코프)만 참조하도록 전환됨에
   따라 `agent_scores` 테이블+인덱스 2개 폐기(2026-08-28, 정본 decision `01m13thq2gbc0hw6tcc4yqh2sq`).

@@ -8,6 +8,18 @@
 // (migrations/0006, catalog_item_version_id 스코프, rater_type/verified 기존 보유)를 재사용해
 // 새 테이블 없이 스키마 전체의 불변성 원칙(매번 새 행 INSERT)을 그대로 따른다.
 //
+// [읽기 스코프 정정, 2026-08-28 같은 날 재승인] recordAgentScore(쓰기)는 여전히 "그 시점 최신
+// catalog_item_version_id 하나"에 INSERT한다. 하지만 getLatestForAgent/listHistoryForAgent(읽기,
+// agent_get_context)는 애초 결정문대로 "현재 최신 버전 하나"로 좁혔더니 실사용 결함이 나왔다 —
+// MD 파일이 바뀔 때마다 content_sha가 달라져 새 catalog_item_versions 행이 생기고
+// (catalog.js insertVersionIfChanged) 새 버전엔 점수가 0건이라, evaluator가 채점 전
+// agent_get_context로 지난 점수를 읽어 previousScore로 쓰는 "점수 왕복 종결" 워크플로가 MD를 고칠
+// 때마다 끊겼다(trainer 실측: 2026-08-05~08-26 사이 버전 5개, 반나절~하루 간격). 그래서 읽기만
+// "같은 catalog_item_id에 속한 모든 버전을 걸친 catalog_scores"로 넓혔다(사용자 승인) — 점수 행
+// 자체는 여전히 특정 버전에 물려 있어(catalog_item_version_id 컬럼 유지) 데이터 손실은 없다.
+// listCompanyItems()의 latest_evaluator_score 상관 서브쿼리(civ JOIN catalog_item_id 스코프)와
+// 동일한 패턴을 catalogDao.getLatestScoreForItem/listScoresHistoryForItem로 재사용한다.
+//
 // [idempotencyKey 처리 방침 — PM 보고 필요] catalog_scores 테이블에는 idempotency_key 컬럼이
 // 없다(임의 컬럼 추가 금지 지시, 이번 세션 범위 밖). decisions/issues/works/agent_learnings처럼
 // "idempotency_key UNIQUE 위반 시 기존 행 반환"하는 DB 레벨 재전송 감지를 이 도구에서는 걸 수
@@ -44,12 +56,11 @@ function byteLength(str) {
   return new TextEncoder().encode(str).length
 }
 
-/** agentName → catalog_items(scope='company', item_type='agent') → 최신 catalog_item_versions.
- *  둘 중 하나라도 없으면 NOT_FOUND(카탈로그 미동기 에이전트) — record/getContext 양쪽이 공유. */
-async function resolveLatestAgentVersion(db, agentName) {
-  const item = await catalogDao.findCompanyItemBySlug(db, 'agent', agentName)
-  if (!item) return null
-  return catalogDao.getLatestVersion(db, item.id)
+/** agent_get_context(읽기) 전용 — agentName → catalog_items(scope='company', item_type='agent')
+ *  항목 자체까지만 확정한다(버전 단일화하지 않음). 카탈로그에 없으면 null(NOT_FOUND 아님 —
+ *  getLatestForAgent/listHistoryForAgent가 null/빈배열로 흡수). */
+async function resolveAgentItem(db, agentName) {
+  return catalogDao.findCompanyItemBySlug(db, 'agent', agentName)
 }
 
 /** agent_score_record. verified는 클라이언트 입력을 받지 않고 raterType==='evaluator'일 때만
@@ -77,6 +88,15 @@ export async function recordAgentScore(db, { userId, agentName, overallScore, di
 
   const item = await catalogDao.findCompanyItemBySlug(db, 'agent', agentName)
   if (!item) throw notFoundError(`agent not found in company catalog: ${agentName}`)
+  // removed_at 검사(쓰기 전용) — GitHub에서 삭제/이름변경돼 soft-remove된 에이전트에는 새 점수를
+  // 남기지 않는다. listCompanyItems()가 기본적으로 removed_at IS NULL만 카탈로그 목록에 노출하는
+  // 것과 같은 이유: 화면에 보이지도 않는 항목에 "공식 평가 점수"가 새로 쌓이면 평가자 입장에서
+  // 무엇을 채점했는지 알 수 없다. 과거에 남긴 점수 이력은 삭제하지 않고 읽기(agent_get_context)
+  // 에서는 계속 조회된다(findCompanyItemBySlug 자체는 무필터, 위 주석 참고) — 이 시점에만 쓰기를
+  // 막는다. [주의: 이 검사는 이번 세션에서 새로 추가한 동작 변경이다 — findCompanyItemBySlug는
+  // 원래 removed_at을 보지 않았으므로, 이 검사 이전에는 soft-remove된 agentName으로도 쓰기가
+  // 허용됐다.]
+  if (item.removed_at) throw notFoundError(`agent removed from company catalog: ${agentName}`)
   const version = await catalogDao.getLatestVersion(db, item.id)
   if (!version) throw notFoundError(`agent has no synced catalog version: ${agentName}`)
 
@@ -106,22 +126,27 @@ export async function recordAgentScore(db, { userId, agentName, overallScore, di
   return { id, createdAt: now, catalogItemVersionId: version.id, verified: !!verified }
 }
 
-/** agent_get_context용 — agentName의 최신 동기화 버전을 먼저 찾은 뒤 그 버전 id로 최신 1행.
+/** agent_get_context용 — agentName의 catalog_items 항목을 먼저 찾은 뒤 그 항목에 속한 "모든
+ *  버전"을 걸친 최신 1행(catalogDao.getLatestScoreForItem, 항목 단위 통산 조회). 2026-08-28
+ *  스펙 정정: 이전엔 "현재 최신 catalog_item_version_id 하나"로 스코핑했으나, MD 파일이 수정될
+ *  때마다 content_sha가 바뀌어 새 버전 행이 생기고(catalog.js insertVersionIfChanged) 새
+ *  버전에는 점수가 0건이라 evaluator의 점수 왕복 워크플로가 MD를 고칠 때마다 끊기는 실사용
+ *  결함이 확인됐다(사용자 승인, 정본 decision 정정) — 조회 범위만 넓히고 점수 행 자체는 여전히
+ *  특정 버전(catalog_item_version_id)에 물려 있으므로 데이터 손실은 없다. 쓰기 경로
+ *  (recordAgentScore)는 변경하지 않았다 — 그 시점 최신 버전에 쓰는 동작 그대로다.
  *  카탈로그에 없는 agentName은 에러가 아니라 null(agent-context.js가 latestScore=null로 흡수). */
 export async function getLatestForAgent(db, agentName) {
-  const version = await resolveLatestAgentVersion(db, agentName)
-  if (!version) return null
-  return db.prepare(
-    'SELECT * FROM catalog_scores WHERE catalog_item_version_id = ? ORDER BY created_at DESC LIMIT 1'
-  ).bind(version.id).first()
+  const item = await resolveAgentItem(db, agentName)
+  if (!item) return null
+  return catalogDao.getLatestScoreForItem(db, item.id)
 }
 
-/** agent_get_context용 — overallScore+createdAt 추이용 최신순 N개(같은 버전 스코프). */
+/** agent_get_context용 — overallScore+createdAt 추이용 최신순 N개, 위와 동일한 항목 단위 통산
+ *  스코프(catalogDao.listScoresHistoryForItem). 여러 버전의 점수가 섞이므로 각 행에
+ *  catalog_item_version_id/version_synced_at을 함께 실어(agent-context.js toScoreHistory)
+ *  호출자가 "어느 버전, 언제 찍힌 점수인지" 구분할 수 있게 한다. */
 export async function listHistoryForAgent(db, agentName, limit = 10) {
-  const version = await resolveLatestAgentVersion(db, agentName)
-  if (!version) return []
-  const { results } = await db.prepare(
-    'SELECT overall_score, created_at, rater_type, verified FROM catalog_scores WHERE catalog_item_version_id = ? ORDER BY created_at DESC LIMIT ?'
-  ).bind(version.id, limit).all()
-  return results
+  const item = await resolveAgentItem(db, agentName)
+  if (!item) return []
+  return catalogDao.listScoresHistoryForItem(db, item.id, limit)
 }
