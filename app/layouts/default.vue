@@ -45,6 +45,10 @@
           <i class="bi bi-people"></i>
           사용자 관리
         </router-link>
+        <router-link v-if="isAdmin" to="/admin/usage" class="admin-nav-item" :class="{ 'is-active': $route.path.startsWith('/admin/usage') }" @click="closeSidebarOnMobile">
+          <i class="bi bi-graph-up"></i>
+          사용량 통계
+        </router-link>
       </nav>
 
       <div class="admin-sidebar-user" style="cursor:default">
@@ -135,6 +139,8 @@ export default {
       if (p.startsWith('/profile')) return [{ label: '프로필' }]
       if (p.startsWith('/keys')) return [{ label: '인증키 관리' }]
       if (p.startsWith('/admin/users')) return [{ label: '사용자 관리' }]
+      if (p.match(/^\/admin\/usage\/[^/]+/)) return [{ label: '사용량 통계', to: '/admin/usage' }, { label: '사용자별 상세' }]
+      if (p.startsWith('/admin/usage')) return [{ label: '사용량 통계' }]
       return [{ label: '' }]
     },
     isAdmin() {

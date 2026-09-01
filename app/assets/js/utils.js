@@ -275,6 +275,42 @@ function pairingStatusMeta(status) {
   return M[status] || { label: status || '-', cls: 'bg-secondary' }
 }
 
+/**
+ * isoDaysAgo — n일 전 날짜를 'YYYY-MM-DD'로 반환. app/pages/usage.vue가 원래 자기 <script> 안에
+ * 로컬로 갖고 있던 것과 동일한 계산식(그 파일은 손대지 않고 그대로 둠 — 동작 불변). 관리자 사용량
+ * 화면들(UsagePeriodPreset 컴포넌트 포함)이 "오늘"의 정의를 어긋나지 않게 공유하려고 여기 추가.
+ * toISOString()이 항상 UTC로 직렬화하므로 docs/api.md §5.8.0의 "날짜 축은 UTC" 요구와도 맞는다.
+ */
+function isoDaysAgo(n) {
+  const d = new Date()
+  d.setDate(d.getDate() - n)
+  return d.toISOString().slice(0, 10)
+}
+
+/** 사용량 화면 공통 기간 프리셋 3종(docs/api.md §5.8.0 — 서버에 range enum을 두지 않고 프런트가
+ * from/to로 변환). UsagePeriodPreset.vue와 관리자 사용량 화면(전사/드릴다운)이 공유한다. */
+const USAGE_PERIOD_PRESETS = [
+  { key: 'today', label: '오늘', days: 0 },
+  { key: '7d', label: '최근 7일', days: 7 },
+  { key: '30d', label: '최근 30일', days: 30 },
+]
+
+/** 프리셋 key → { from, to }('YYYY-MM-DD'). 알 수 없는 key는 최근 30일로 폴백.
+ * days=0(오늘)은 from=to=오늘. days=N(N>0)은 "오늘 포함 최근 N일"이 되도록 (N-1)일 전부터
+ * 오늘까지로 계산한다(day-(N-1) ~ day-0 = 경계 포함 N일) — 그대로 isoDaysAgo(N)을 쓰면
+ * N+1일 범위가 되는 off-by-one 버그가 있었다. 서버 기본값(to-29일=30일 포함, docs/api.md §5.8.0)과
+ * 동일한 계산식이라 30d 프리셋과 서버 기본 기간이 이제 같은 날짜 범위를 가리킨다. isoDaysAgo()
+ * 자체의 "n일 전" 의미는 usage.vue 등 다른 소비자를 위해 바꾸지 않고, 여기서만 보정한다. */
+function usagePeriodRange(key) {
+  const preset = USAGE_PERIOD_PRESETS.find((p) => p.key === key) || USAGE_PERIOD_PRESETS[2]
+  const span = Math.max(0, preset.days - 1)
+  return { from: isoDaysAgo(span), to: isoDaysAgo(0) }
+}
+
+// const 배열은 이름으로는 전역에 보이지만 window 속성은 아니므로(vue-zero-architecture.md 규칙)
+// 컴포넌트에서 window.USAGE_PERIOD_PRESETS로 접근할 가능성을 대비해 명시 등록.
+window.USAGE_PERIOD_PRESETS = USAGE_PERIOD_PRESETS
+
 /** 큰 수를 1.2M / 980K 식으로 축약(토큰 사용량 등). */
 function formatTokens(n) {
   if (!n) return '0'
