@@ -4,11 +4,17 @@
 // GET /api/admin/usage/* 3개 라우트는 D1이 아니라 외부 Prometheus를 정본으로 삼는다(rev.2 하이브리드
 // — docs/design/usage-prometheus-realtime.md 정본, architecture.md §0 결정29 개정). /summary·/users는
 // 완결일=D1 롤업 캐시(usage_prom_daily, Cron 적재) + 오늘=라이브 하이브리드, /users/:id는 전 구간
-// 라이브 그대로(§0.1 C9). ⚠️ 승인결정1(2026-09-04)로 GET /api/usage/me도 같은 하이브리드로 전환됐다 —
-// getUsageOverviewHybrid(env, { email })에 요청자 본인 email(JWT 서명 검증값, c.get('userEmail'))만
-// 넘겨 좁힌다. usageDailyDao(usage_daily, 자체수집)는 이제 이 파일 어디서도 import하지 않는다 —
+// 라이브 그대로(§0.1 C9). usageDailyDao(usage_daily, 자체수집)는 이 파일 어디서도 import하지 않는다 —
 // 관리자 라우트뿐 아니라 /me도 자체수집 오염과 완전히 분리됐다(§17.2b 경계가 본인 축까지 확장됨).
 // /projects/:id(본인 축)는 sessions 테이블을 직접 재집계하므로(§0 결정25) 애초에 usageDailyDao와 무관.
+//
+// ⚠️ 식별 축 전환(docs/design/usage-employee-identity-linking.md, PM 확정 2026-09-07) — 사용량의
+// 1차 키는 employee_id(개인)이고, 그 값의 정본은 이제 D1 users.employee_id 컬럼이다(이메일 로컬파트
+// 파생은 쓰기 시점 기본값·제안값 계산 전용으로 강등됐다 — §3.1·§3.2, 읽기 경로 폴백 없음). GET /me는
+// c.get('userId') → usersDao.findById() → user.employee_id 경로로만 스코프를 도출한다(§4.1). NULL이면
+// (미연동 — 일상적 상태) 상류·D1 광역 조회를 시작하지 않고 조기 반환한다(I7). GET /users/:id는
+// target.employee_id를 그대로 매처에 넣는다(§4.6). getUsageOverviewHybrid(env, { employeeId,
+// requireEmployeeScope })가 하이브리드 조회의 유일한 스코프 인자다.
 import { Hono } from 'hono'
 import * as projectsDao from '../dao/projects.js'
 import * as sessionsDao from '../dao/sessions.js'
@@ -21,6 +27,7 @@ import { runUsageRollup, ROLLUP_REQUEST_BUDGET_MS, REQUEST_CHUNK_RESERVE_MS } fr
 // m-2 수정(리뷰 2026-09-03) — todayUTC/addDaysUTC를 이 파일에서 다시 구현하지 않고
 // server/lib/utc-day.js(정본)를 그대로 쓴다(이전에는 usage-prom.js/usage-rollup.js와 함께 3벌 복제).
 import { todayUTCString as todayUTC, addDaysUTC } from '../lib/utc-day.js'
+import { isPromSafeEmployeeId } from '../lib/usage-identity.js'
 import {
   AGG_MODE,
   getUsageOverviewHybrid,
@@ -31,6 +38,10 @@ import {
   sortUserRows,
   userDayRows,
   userTotals,
+  foldToEmployees,
+  groupAccountsOf,
+  zeroTotals,
+  aggregateCacheMeta,
   UNAVAILABLE_FIELDS
 } from '../lib/usage-prom.js'
 
@@ -119,6 +130,31 @@ function buildHybridMeta(range, hybrid) {
   }
 }
 
+// 미연동(identity_unlinked)·저장값 형식 이상(identity_invalid) — 상류 질의 자체를 하지 않는
+// 경우의 meta(usage-employee-identity-linking.md §4.2 I7·§4.5 "상류 질의를 하지 않는다"). 정상
+// 하이브리드 meta와 같은 키 집합을 유지해(값은 "질의 안 함"을 뜻하는 중립값) 프런트가 undefined
+// 분기를 만들지 않게 한다(§12.1과 동일 원칙, buildHybridMeta 주석 참고).
+function buildSkippedIdentityMeta(range, flags) {
+  return {
+    from: range.from,
+    to: range.to,
+    source: 'prometheus',
+    fetched_at: new Date().toISOString(),
+    cache: { hit: false, age_seconds: 0, ttl_seconds: 0 },
+    stale: false,
+    refresh_throttled: false,
+    data_start: null,
+    window_clamped: false,
+    unavailable_fields: UNAVAILABLE_FIELDS,
+    unknown_types: [],
+    segments: { cached: null, live: null },
+    gap_days: [],
+    rollup: { cached_through: null, last_sync_at: null, agg_mode: AGG_MODE },
+    live_unavailable: false,
+    ...flags
+  }
+}
+
 // /users/:id(전 구간 라이브) 전용 meta — segments.cached는 항상 null(캐시를 안 쓴다), rollup은
 // 참고용(§5.0 "rollup.cached_through는 참고용으로만 채운다"), gap_days·live_unavailable은 이
 // 라우트에 적용되지 않는 개념이라 항상 빈 배열/false로 고정한다(§20.4 "이 단계가 없다").
@@ -143,42 +179,77 @@ function buildDrilldownMeta(range, drilldown, overall) {
   }
 }
 
-// GET /api/usage/me?from=&to=&refresh= — 본인 스코프 하이브리드(승인결정1, 2026-09-04 개정 —
-// architecture.md §0 결정29). 관리자 /summary·/users와 완전히 같은 getUsageOverviewHybrid()를
-// email로 좁혀 재사용한다(완결일=D1 롤업 캐시 + 오늘=라이브). 날짜 범위 파싱·검증은 관리자 라우트와
-// 동일한 resolveAdminRange()를 그대로 재사용한다(이름은 "admin"이지만 로직 자체는 일반 날짜 범위
-// 파서다 — from/to 형식 검증·기본값 최근 30일이 이 라우트에도 그대로 맞는다).
+// GET /api/usage/me?from=&to=&refresh= — 본인 스코프 하이브리드
+// (docs/design/usage-employee-identity-linking.md §4). 관리자 /summary·/users와 완전히 같은
+// getUsageOverviewHybrid()를 employeeId로 좁혀 재사용한다(완결일=D1 롤업 캐시 + 오늘=라이브). 날짜
+// 범위 파싱·검증은 관리자 라우트와 동일한 resolveAdminRange()를 그대로 재사용한다(이름은 "admin"
+// 이지만 로직 자체는 일반 날짜 범위 파서다 — from/to 형식 검증·기본값 최근 30일이 이 라우트에도
+// 그대로 맞는다).
 //
-// IDOR 방지: email은 오직 c.get('userEmail')(jwtAuthMiddleware가 JWT 서명 검증 후 c.set한 값,
-// server/middleware/jwt-auth.js)에서만 가져온다 — 쿼리 파라미터·바디로 다른 사용자의 email을 받는
-// 경로 자체가 이 라우트에 없다. getUsageOverviewHybrid 내부에서도 D1 SQL 파라미터(usage-prom-daily.js
-// readHybridSnapshot의 emailFilter)와 PromQL 라벨매처(usage-prom.js resolveEmailScope) 양쪽에서
-// 이중으로 좁혀지므로, 설령 이 핸들러가 실수로 무필터 호출을 하더라도 하위 계층이 스코프를 강제한다.
+// 도출 경로(§4.1, 다른 경로 없음): c.get('userId') → usersDao.findById() → user.employee_id →
+// isPromSafeEmployeeId() 재검증 → getUsageOverviewHybrid({ employeeId, requireEmployeeScope: true }).
+// IDOR 방지: employeeId는 오직 JWT 서명 검증값(userId)으로 조회한 D1 행에서만 나온다 — 쿼리
+// 파라미터·바디로 다른 사람의 식별자를 받는 경로 자체가 이 라우트에 없다(I8).
 //
-// Prometheus에 데이터가 없는 사용자(수집 대상 아님): hybrid.byUser에 그 사용자 항목 자체가 없을 뿐
-// 에러가 아니다 — 빈 Map 엔트리로 폴백해 200 + data:[] + totals 전부 0을 정상 반환한다.
+// ⚠️ I7 비협상 — employee_id가 없으면(미연동, NULL) 여기서 조기 반환하고 getUsageOverviewHybrid를
+// 절대 호출하지 않는다. resolveEmployeeScope(null)은 scoped:false(=무필터/전사)를 뜻하므로, 이
+// 가드 없이 그대로 호출하면 일반 직원이 전사 사용량을 보게 된다. requireEmployeeScope:true가
+// 라이브러리 레벨의 안전망(2차 방어)이고, 이 조기 반환이 1차 방어다 — 둘 다 유지한다.
+//
+// 세 가지 "빈 결과"를 구분한다(§4.5): identity_unlinked(employee_id가 NULL, 미연동 — 일상적 상태) /
+// identity_invalid(저장값 형식 위반, 운영상 발생 불가) / user_not_in_metrics(축은 정상, 이 기간
+// 관측치 없음 — Prometheus에 데이터가 없는 사용자는 에러가 아니라 200 + 빈 결과). 앞의 둘은 상류
+// 질의 자체를 하지 않는다.
 usage.get('/me', async (c) => {
-  const email = c.get('userEmail')
+  const userId = c.get('userId')
   const range = resolveAdminRange(c)
   if (range.error) return c.json({ error: { code: 'VALIDATION_ERROR', message: range.error } }, 400)
   const refresh = c.req.query('refresh') === '1'
 
+  const user = await usersDao.findById(c.env.DB, userId)
+  if (!user) return c.json({ error: { code: 'NOT_FOUND', message: 'user not found' } }, 404)
+
+  const employeeId = user.employee_id || null
+
+  // I7 1차 방어(라우트 조기 반환) — 미연동이면 상류·D1 광역 조회를 시작하지 않는다. 이 분기를
+  // 지우지 말 것(비협상) — 지우면 아래 requireEmployeeScope 가드만 남는데, 그건 안전망이지 이
+  // 분기를 대체하는 것이 아니다(호출 자체를 아끼는 것도 이 분기의 목적).
+  if (!employeeId) {
+    const meta = buildSkippedIdentityMeta(range, { employee_id: null, group_accounts: [], identity_unlinked: true })
+    return c.json({ data: [], totals: zeroTotals(), meta })
+  }
+
+  // 매처 삽입 직전 재검증(I1의 실제 방어선, §4.1) — 저장값이라도 다시 본다. 운영상 발생 불가
+  // (편집 API가 이미 형식·길이를 강제한다)하지만, 직접 DB 조작 등으로 어긋난 값이 들어와도 무필터로
+  // 넓히지 않고 정직하게 빈 결과 + identity_invalid를 낸다.
+  if (!isPromSafeEmployeeId(employeeId)) {
+    console.error('[usage] stored employee_id failed safety re-check', user.id, employeeId)
+    const meta = buildSkippedIdentityMeta(range, { employee_id: employeeId, group_accounts: [], identity_invalid: true })
+    return c.json({ data: [], totals: zeroTotals(), meta })
+  }
+
   let hybrid
   try {
-    hybrid = await getUsageOverviewHybrid(c.env, { from: range.from, to: range.to, refresh, email })
+    hybrid = await getUsageOverviewHybrid(c.env, { from: range.from, to: range.to, refresh, employeeId, requireEmployeeScope: true })
   } catch (err) {
     return upstreamErrorResponse(c, err)
   }
 
-  const emailLower = email.toLowerCase()
-  const entry = hybrid.byUser.get(emailLower) || { displayEmail: email, employeeName: null, days: new Map() }
-  const data = userDayRows(entry).map((r) => ({
+  // hybrid.byUnit은 employee_id="<employeeId>" 매처/SQL 필터로 이미 좁혀져 있다 — foldToEmployees로
+  // 계정(그룹 로그인 이메일) 축을 접어 직원 1행(emp:<employeeId>)을 얻는다. 그 직원 항목이 없으면
+  // (Prometheus에 데이터가 없는 사용자, 수집 대상 아님) 에러가 아니라 200 + data:[] + totals 0을
+  // 정상 반환한다.
+  const employees = foldToEmployees(hybrid.byUnit)
+  const emp = employees.get(`emp:${employeeId}`)
+  const data = (emp ? userDayRows(emp) : []).map((r) => ({
     ...r, tool_calls: null, tool_errors: null, retries: null, turns: null, api_calls: null, updated_at: null
   }))
-  const totals = userTotals(entry)
+  const totals = emp ? userTotals(emp) : zeroTotals()
 
   const meta = buildHybridMeta(range, hybrid)
-  if (!hybrid.byUser.has(emailLower)) meta.user_not_in_metrics = true
+  meta.employee_id = employeeId
+  meta.group_accounts = emp ? groupAccountsOf(emp) : []
+  if (!emp) meta.user_not_in_metrics = true
 
   return c.json({ data, totals, meta })
 })
@@ -239,15 +310,17 @@ adminUsage.get('/summary', requireAdmin, async (c) => {
     return upstreamErrorResponse(c, err)
   }
 
-  const data = daySummaryRows(hybrid.byUser)
+  const data = daySummaryRows(hybrid.byUnit)
   const meta = buildHybridMeta(range, hybrid)
 
   return c.json({ data, meta })
 })
 
-// GET /api/admin/usage/users?from=&to=&sort=&order=&limit=&refresh= — 사용자별 기간 합계 목록
-// (docs/design/usage-prometheus-realtime.md §5.1). D1 users를 좌항으로 두고 Prometheus 사용량을
-// 이메일로 병합(§5.4) — D1에 없는 Prometheus-only 사용자도 버리지 않고 포함한다.
+// GET /api/admin/usage/users?from=&to=&sort=&order=&limit=&refresh= — 직원별 기간 합계 목록
+// (docs/design/usage-employee-identity.md §7.1). D1 users를 좌항으로 두고 Prometheus 사용량을
+// employee_id로 병합 — D1에 없는 Prometheus-only 직원, employee_id 라벨이 없는 그룹 계정 행도
+// 버리지 않고 포함한다(§5.2 폴백). 로컬파트 충돌은 usersDao.listAll() 결과 안에서만 판정해(§13
+// 쟁점3 하이브리드 결정) D1 왕복을 늘리지 않는다.
 adminUsage.get('/users', requireAdmin, async (c) => {
   const range = resolveAdminRange(c)
   if (range.error) return c.json({ error: { code: 'VALIDATION_ERROR', message: range.error } }, 400)
@@ -282,7 +355,7 @@ adminUsage.get('/users', requireAdmin, async (c) => {
     return upstreamErrorResponse(c, err)
   }
 
-  const merged = mergeD1AndPromUsers(d1Users, hybrid.byUser)
+  const merged = mergeD1AndPromUsers(d1Users, hybrid.byUnit)
   const sorted = sortUserRows(merged, sortResolution.field, order)
   const truncated = sorted.length > limit
   const data = truncated ? sorted.slice(0, limit) : sorted
@@ -327,9 +400,13 @@ adminUsage.post('/sync', requireAdmin, async (c) => {
   }
 })
 
-// GET /api/admin/usage/users/:id?from=&to=&refresh= — 특정 사용자 1명의 일별 롤업 + 기간 합계 +
-// 모델별 사용량(docs/design/usage-prometheus-realtime.md §5.3). GET /api/usage/me와의 shape 동일화
-// 전제는 이 라우트에 한해 폐기(§5.8.4 함정8 폐기) — Prometheus에 없는 5개 필드는 null.
+// GET /api/admin/usage/users/:id?from=&to=&refresh= — 특정 직원 1명의 일별 롤업 + 기간 합계 +
+// 모델별 사용량(docs/design/usage-employee-identity-linking.md §4.6). GET /api/usage/me와의 shape
+// 동일화 전제는 이 라우트에 한해 폐기(§5.8.4 함정8 폐기) — Prometheus에 없는 5개 필드는 null.
+//
+// :id는 D1 users.id(ULID) 그대로다(§4.6 — employee_id를 URL 식별자로 쓰지 않는다, 열거 표면 방지).
+// 매처 축은 target.employee_id 컬럼 그대로(이메일 로컬파트 파생 없음, §3.2 단방향 원칙). NULL이면
+// (미연동) 상류 질의를 하지 않고 200 + 빈 데이터 + identity_unlinked + user_not_in_metrics.
 adminUsage.get('/users/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const target = await usersDao.findById(c.env.DB, id)
@@ -339,16 +416,27 @@ adminUsage.get('/users/:id', requireAdmin, async (c) => {
   if (range.error) return c.json({ error: { code: 'VALIDATION_ERROR', message: range.error } }, 400)
   const refresh = c.req.query('refresh') === '1'
 
+  const employeeId = target.employee_id || null
+
   let drilldown
   let overall
   try {
-    ;[drilldown, overall] = await withRouteBudget(Promise.all([
-      getUserDrilldown(c.env, { from: range.from, to: range.to, email: target.email, refresh }),
-      // meta.data_start는 rev.2부터 D1 MIN(day_at) 한 줄로 얻는다(§4.5) — 상류 180일 프로브(rev.1,
-      // 실측 ~4초로 상류 자체 타임아웃 코앞이라 사실상 비활성이었다)는 폐기했다. 이 라우트는 전 구간
-      // 라이브라 캐시를 안 쓰지만, data_start는 "우리가 답할 수 있는 첫 날"의 참고값으로 여전히 싣는다.
-      usagePromDailyDao.readOverallCoverage(c.env.DB)
-    ]))
+    if (!employeeId) {
+      // §4.6 — 미연동(NULL)이면 상류 질의 자체를 하지 않는다. overall(coverage)은 D1 전용 조회라
+      // 계속 읽어 meta.data_start 등은 정상 채운다. getUserDrilldown은 저장값이 안전하지 않은 경우도
+      // 내부에서 이미 빈 결과로 처리하므로(isPromSafeEmployeeId 재검증) 무필터로 뒤집히지 않는다 —
+      // 그래도 NULL은 라우트에서 먼저 끊어 상류 왕복을 아끼고 identity_unlinked 플래그를 정확히 낸다.
+      drilldown = { notInMetrics: true, rows: [], totals: { ...zeroTotals(), active_time_seconds: 0 }, groupAccounts: [], byModel: [], unknownTypes: new Set(), meta: aggregateCacheMeta([]) }
+      overall = await usagePromDailyDao.readOverallCoverage(c.env.DB)
+    } else {
+      ;[drilldown, overall] = await withRouteBudget(Promise.all([
+        getUserDrilldown(c.env, { from: range.from, to: range.to, employeeId, refresh }),
+        // meta.data_start는 rev.2부터 D1 MIN(day_at) 한 줄로 얻는다(§4.5) — 상류 180일 프로브(rev.1,
+        // 실측 ~4초로 상류 자체 타임아웃 코앞이라 사실상 비활성이었다)는 폐기했다. 이 라우트는 전 구간
+        // 라이브라 캐시를 안 쓰지만, data_start는 "우리가 답할 수 있는 첫 날"의 참고값으로 여전히 싣는다.
+        usagePromDailyDao.readOverallCoverage(c.env.DB)
+      ]))
+    }
   } catch (err) {
     return upstreamErrorResponse(c, err)
   }
@@ -394,11 +482,14 @@ adminUsage.get('/users/:id', requireAdmin, async (c) => {
 
   const meta = buildDrilldownMeta(range, drilldown, overall)
   if (drilldown.notInMetrics) meta.user_not_in_metrics = true
+  if (!employeeId) meta.identity_unlinked = true
 
   return c.json({
     user: toPublicUser(target),
     data,
     totals,
+    employee_id: employeeId || null,
+    group_accounts: drilldown.groupAccounts || [],
     by_model: drilldown.byModel,
     code: null, // G2(lines_of_code 등 라벨셋) 미확인 — 확인 전까지 null(설계 §4.5 R4)
     meta

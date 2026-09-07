@@ -44,6 +44,15 @@
           <i class="bi bi-info-circle me-1"></i>사용자가 많아 상위 {{ usersMeta.limit }}명만 표시 중입니다(전체 목록은 정렬 기준을 바꿔 확인하세요).
         </div>
 
+        <!-- 미연결 관측 배너(설계 §7.3-B ①) — 어떤 허브 계정에도 걸리지 않은 employee_id 관측치가
+             몇 건인지 알리고, 아래 목록을 미연결 행만 보이도록 필터해 연결 흐름으로 들어가게 한다.
+             prometheus_only 행은 어떤 토글로도 숨기지 않는다(§6.2·§7.1 비협상) — 이 배너도 숨기는
+             쪽이 아니라 찾기 쉽게 만드는 쪽이다. -->
+        <div v-if="unlinkedCount" class="alert alert-info py-2 small mb-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span><i class="bi bi-link-45deg me-1"></i>허브 계정에 연결되지 않은 관측 {{ unlinkedCount }}건이 있습니다.</span>
+          <button type="button" class="btn btn-sm btn-outline-secondary" @click="onlyUnlinked = true">미연결 목록만 보기</button>
+        </div>
+
         <!-- 상류(Grafana/Prometheus) 장애 — 오늘(라이브 구간)만 못 가져온 것이며 과거 데이터는 정상이다.
              에러 화면으로 바꾸지 않고 경고 배너로만 알린다(§12.1). gap_days 중 라이브 구간에 속한
              날짜는 여기 개수로만 알리고, 아래 "지금 채우기" 배너에는 중복해서 넣지 않는다(M-1 —
@@ -146,9 +155,19 @@
 
         <!-- 사용자별 합계 랭킹 -->
         <div class="card p-0">
-          <div class="d-flex justify-content-between align-items-center p-3 pb-0">
+          <div class="d-flex justify-content-between align-items-center p-3 pb-0 flex-wrap gap-2">
             <h2 class="h6 mb-0">사용자별 사용량</h2>
-            <small class="text-faint" v-if="usersMeta">{{ usersMeta.returned }}명 표시</small>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span v-if="onlyUnlinked" class="badge bg-info text-dark d-flex align-items-center gap-1">
+                미연결만 표시 중
+                <button type="button" class="btn-close" style="font-size:0.55rem" @click="onlyUnlinked = false" aria-label="필터 해제"></button>
+              </span>
+              <!-- §6.2 비활성+무사용 접기 — 0인 행만 접으므로 표 합계는 산술적으로 불변이다. -->
+              <button v-if="hiddenDisabledCount" type="button" class="btn btn-sm btn-outline-secondary" @click="showHiddenDisabled = !showHiddenDisabled">
+                {{ showHiddenDisabled ? `숨기기(비활성·무사용 ${hiddenDisabledCount}건)` : `비활성·무사용 계정 ${hiddenDisabledCount}건 숨김 · 모두 보기` }}
+              </button>
+              <small class="text-faint" v-if="usersMeta">{{ usersMeta.returned }}명 표시</small>
+            </div>
           </div>
           <div class="px-3 pt-2">
             <small class="text-faint">도구 호출/턴/API 호출 지표는 Prometheus가 아직 제공하지 않아 표에서 제외했습니다(0건이 아니라 측정 불가).</small>
@@ -163,21 +182,45 @@
                   <th class="text-end sortable" role="button" @click="setSort('tokens')">총 토큰<i class="bi ms-1" :class="sortIcon('tokens')"></i></th>
                   <th class="text-end sortable" role="button" @click="setSort('cost')">비용<i class="bi ms-1" :class="sortIcon('cost')"></i></th>
                   <th class="text-end sortable" role="button" @click="setSort('last_active')">마지막 활동<i class="bi ms-1" :class="sortIcon('last_active')"></i></th>
+                  <th class="text-end">작업</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-if="usersLoading"><td colspan="6" class="text-center text-faint py-4"><span class="spinner-border spinner-border-sm me-2"></span>불러오는 중...</td></tr>
+                <tr v-if="usersLoading"><td colspan="7" class="text-center text-faint py-4"><span class="spinner-border spinner-border-sm me-2"></span>불러오는 중...</td></tr>
                 <tr
-                  v-for="u in users"
+                  v-for="u in visibleUsers"
                   v-else
-                  :key="u.user_id || u.email"
+                  :key="u.row_key"
                   :role="u.source === 'prometheus_only' ? undefined : 'button'"
                   @click="goToUser(u)"
                   :class="{ 'table-secondary': u.session_count === 0, 'usage-row--unlinked': u.source === 'prometheus_only' }"
                 >
                   <td>
-                    <div class="fw-medium">{{ u.name || u.email }}</div>
-                    <div class="small text-faint">{{ u.email }}</div>
+                    <template v-if="u.source === 'prometheus_only'">
+                      <!-- 미연결 관측 행(§7.1·§7.2) — email이 null이라 employee_id·관측 이름·그룹계정으로
+                           대체 표시한다. -->
+                      <div class="fw-medium">{{ u.name || u.employee_id || '(이름 없음)' }}</div>
+                      <div class="small text-faint">
+                        <span v-if="u.employee_id">employee_id: <code>{{ u.employee_id }}</code></span>
+                        <span v-else-if="u.group_accounts.length">{{ u.group_accounts.map((g) => g.user_email).join(', ') }}</span>
+                      </div>
+                    </template>
+                    <template v-else>
+                      <div class="fw-medium d-flex align-items-center gap-1 flex-wrap">
+                        {{ u.name || u.email }}
+                        <!-- 관측 이름 불일치 경고(§4.4 S4) — 오연결 탐지 신호. -->
+                        <span
+                          v-if="u.observed_name_mismatch"
+                          class="badge bg-warning text-dark"
+                          :title="`관측 이름: ${u.observed_employee_name} / 계정 이름: ${u.name} — 연동 아이디를 확인하세요`"
+                        ><i class="bi bi-exclamation-triangle me-1"></i>이름 불일치</span>
+                      </div>
+                      <div class="small text-faint">{{ u.email }}</div>
+                      <div class="small text-faint">
+                        <span v-if="u.employee_id">연동: <code>{{ u.employee_id }}</code></span>
+                        <span v-else class="badge bg-light text-dark">미연동</span>
+                      </div>
+                    </template>
                   </td>
                   <td>
                     <template v-if="u.source === 'prometheus_only'">
@@ -192,15 +235,76 @@
                   <td class="text-end">{{ formatTokens(u.total_tokens) }}</td>
                   <td class="text-end">{{ formatCost(u.cost_usd) }}</td>
                   <td class="text-end text-nowrap">{{ u.last_active_day || '-' }}</td>
+                  <td class="text-end" @click.stop>
+                    <button v-if="u.source === 'prometheus_only'" type="button" class="btn btn-sm btn-outline-primary" @click="openConnect(u)">연결</button>
+                  </td>
                 </tr>
-                <tr v-if="!usersLoading && !users.length && usersFailed"><td colspan="6" class="text-center text-muted py-4">사용자별 목록을 불러오지 못했습니다(위 배너 참고).</td></tr>
-                <tr v-else-if="!usersLoading && !users.length"><td colspan="6" class="text-center text-muted py-4">등록된 사용자가 없습니다.</td></tr>
+                <tr v-if="!usersLoading && !visibleUsers.length && usersFailed"><td colspan="7" class="text-center text-muted py-4">사용자별 목록을 불러오지 못했습니다(위 배너 참고).</td></tr>
+                <tr v-else-if="!usersLoading && !visibleUsers.length"><td colspan="7" class="text-center text-muted py-4">표시할 사용자가 없습니다.</td></tr>
               </tbody>
             </table>
           </div>
         </div>
       </template>
     </template>
+
+    <!-- 미연결 관측치 연결 모달(§7.3-B ②) — 사용자 선택 → PUT /api/admin/users/<선택 user.id>/employee-id
+         { employee_id: row.employee_id }. 실제 API 왕복이며, 성공 후 load()로 목록을 반드시 재조회한다
+         (귀속이 바뀌면 다른 행의 수치도 함께 변하므로). -->
+    <div v-if="connectModal.open" class="modal-backdrop-custom" @click.self="closeConnect">
+      <div class="modal-dialog-custom" style="width:520px;max-width:92vw;">
+        <div class="modal-content">
+          <div class="modal-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">관측치를 허브 계정에 연결</h5>
+            <button type="button" class="btn-close" aria-label="닫기" @click="closeConnect"></button>
+          </div>
+          <div class="modal-body">
+            <div class="card p-2 mb-3 bg-canvas">
+              <div class="small text-faint">employee_id</div>
+              <div class="fw-medium">{{ connectModal.row.employee_id || '(라벨 없음)' }}</div>
+              <div class="small text-faint mt-2">관측 이름</div>
+              <div>{{ connectModal.row.observed_employee_name || '-' }}</div>
+              <div class="small text-faint mt-2">선택 기간 사용량</div>
+              <div class="small">세션 {{ connectModal.row.session_count }} · 토큰 {{ formatTokens(connectModal.row.total_tokens) }} · {{ formatCost(connectModal.row.cost_usd) }}</div>
+            </div>
+
+            <label class="form-label small fw-semibold" for="connectSearch">연결할 사용자 검색</label>
+            <input id="connectSearch" v-model="connectModal.query" type="text" class="form-control mb-2" placeholder="이름 또는 이메일" :disabled="connectModal.submitting" />
+
+            <div class="border border-hairline rounded" style="max-height:220px; overflow-y:auto;">
+              <div
+                v-for="u in connectCandidates"
+                :key="u.user_id"
+                class="p-2 d-flex justify-content-between align-items-center connect-candidate"
+                :class="{ 'connect-candidate--selected': connectModal.selectedUserId === u.user_id }"
+                role="button"
+                @click="connectModal.selectedUserId = u.user_id"
+              >
+                <div>
+                  <div class="fw-medium">{{ u.name }}</div>
+                  <div class="small text-faint">{{ u.email }}</div>
+                </div>
+                <span class="small text-faint">{{ u.employee_id ? `현재: ${u.employee_id}` : '미연동' }}</span>
+              </div>
+              <div v-if="!connectCandidates.length" class="p-3 text-center text-faint small">일치하는 사용자가 없습니다.</div>
+            </div>
+
+            <div v-if="connectModal.error" class="alert alert-danger py-2 small mt-3 mb-0">
+              {{ connectModal.error }}
+              <div v-if="connectModal.conflict" class="mt-1">
+                이미 <strong>{{ connectModal.conflict.conflict_email }}</strong> 사용자가 이 값을 쓰고 있습니다. 먼저 그 사용자의 연동을 해제해야 합니다(자동 이전은 지원하지 않습니다).
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer d-flex justify-content-end gap-2">
+            <button type="button" class="btn btn-outline-secondary" :disabled="connectModal.submitting" @click="closeConnect">취소</button>
+            <button type="button" class="btn btn-primary" :disabled="connectModal.submitting || !connectModal.selectedUserId" @click="confirmConnect">
+              <span v-if="connectModal.submitting" class="spinner-border spinner-border-sm me-2"></span>연결
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -208,12 +312,12 @@
 export default {
   title: '사용량 통계 · malgnai-hub',
   data() {
-    const initial = usagePeriodRange('30d')
+    const initial = usagePeriodRange('today')
     return {
       guardReady: false,
       allowed: false,
 
-      presetKey: '30d',
+      presetKey: 'today',
       from: initial.from,
       to: initial.to,
 
@@ -238,6 +342,14 @@ export default {
 
       sort: 'tokens',
       order: 'desc',
+
+      // §6.2 비활성+무사용 접기 토글, §7.3-B ① 미연결 전용 필터. prometheus_only 행은 어느 쪽
+      // 필터에도 걸리지 않는다(status는 절대 'disabled'가 아니므로 showHiddenDisabled와 무관).
+      showHiddenDisabled: false,
+      onlyUnlinked: false,
+
+      // §7.3-B ② 미연결 관측치 연결 모달 상태.
+      connectModal: { open: false, row: null, query: '', selectedUserId: null, submitting: false, error: '', conflict: null },
     }
   },
   computed: {
@@ -307,6 +419,33 @@ export default {
         rollup.push(day)
       }
       return { before, live, rollup }
+    },
+    // §7.1 비협상 — 삭제·숨김 금지. 어떤 users 행에도 걸리지 않은 employee_id 관측치.
+    unlinkedRows() {
+      return this.users.filter((u) => u.source === 'prometheus_only')
+    },
+    unlinkedCount() {
+      return this.unlinkedRows.length
+    },
+    // §6.2 — status='disabled' 이고 해당 기간 사용량이 전부 0인 행만 숨김 대상. 0만 접으므로
+    // 표 합계는 산술적으로 불변이다.
+    hiddenDisabledCount() {
+      return this.users.filter((u) => u.status === 'disabled' && u.session_count === 0 && u.total_tokens === 0 && u.cost_usd === 0).length
+    },
+    visibleUsers() {
+      let list = this.users
+      if (this.onlyUnlinked) list = list.filter((u) => u.source === 'prometheus_only')
+      if (!this.showHiddenDisabled) {
+        list = list.filter((u) => !(u.status === 'disabled' && u.session_count === 0 && u.total_tokens === 0 && u.cost_usd === 0))
+      }
+      return list
+    },
+    // 연결 모달의 사용자 검색 후보 — 허브 계정(d1_user)만, 이름/이메일 부분일치.
+    connectCandidates() {
+      const q = this.connectModal.query.trim().toLowerCase()
+      const list = this.users.filter((u) => u.source === 'd1_user')
+      if (!q) return list
+      return list.filter((u) => (u.name || '').toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q))
     },
   },
   async mounted() {
@@ -454,6 +593,38 @@ export default {
       if (u.source === 'prometheus_only' || !u.user_id) return
       this.$router.push(`/admin/usage/${u.user_id}`)
     },
+    // §7.3-B ② 미연결 관측치 연결 흐름.
+    openConnect(row) {
+      this.connectModal = { open: true, row, query: '', selectedUserId: null, submitting: false, error: '', conflict: null }
+    },
+    closeConnect() {
+      this.connectModal.open = false
+    },
+    async confirmConnect() {
+      const { row, selectedUserId } = this.connectModal
+      if (!selectedUserId) return
+      const target = this.users.find((u) => u.user_id === selectedUserId && u.source === 'd1_user')
+      // 선택한 사용자에게 이미 다른 값이 있으면 대체를 확인받는다(§7.3-B ② — 조용한 덮어쓰기 금지).
+      if (target?.employee_id && target.employee_id !== row.employee_id) {
+        if (!window.confirm(`선택한 사용자에게는 이미 연동 아이디 "${target.employee_id}"가 있습니다. "${row.employee_id}"로 대체할까요?`)) return
+      }
+      this.connectModal.submitting = true
+      this.connectModal.error = ''
+      this.connectModal.conflict = null
+      const { data, error } = await useApi(`/api/admin/users/${selectedUserId}/employee-id`, {
+        method: 'PUT',
+        body: { employee_id: row.employee_id },
+      })
+      this.connectModal.submitting = false
+      if (error) {
+        this.connectModal.error = (error && error.message) || '연결에 실패했습니다.'
+        if (error && error.details && error.details.conflict_email) this.connectModal.conflict = error.details
+        return
+      }
+      this.closeConnect()
+      // 귀속이 바뀌면 다른 행의 수치도 함께 변하므로 반드시 재조회한다(§7.3-B ②).
+      await this.load()
+    },
     formatTokens,
     formatCost,
     formatDate,
@@ -467,4 +638,8 @@ export default {
 .sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 .sortable:hover { color: var(--color-brand); }
 .usage-row--unlinked { cursor: default; opacity: 0.75; }
+.connect-candidate { cursor: pointer; border-bottom: 1px solid var(--color-hairline); }
+.connect-candidate:last-child { border-bottom: none; }
+.connect-candidate:hover { background: var(--color-brand-tint); }
+.connect-candidate--selected { background: var(--color-brand-soft); }
 </style>

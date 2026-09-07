@@ -9,35 +9,38 @@
 /** 하이브리드 읽기(설계 §19.4)용 — [from, cacheTo] 구간을 한 번의 db.batch()로 4가지를 함께 읽는다
  *  (설계 §17.5 "①~④는 Promise.all이 아니라 db.batch() 한 번으로" — 같은 시점의 스냅샷을 보장).
  *
- *  validRows: day_at×user_email 그레인의 원본 행(설계 §17.5 SQL①②처럼 SUM+GROUP BY로 기간 집계하지
- *  않고, day_at·user_email당 이미 1행뿐인 PK 특성을 살려 원본을 그대로 반환한다) — 이래야
- *  usage-prom.js의 getUsageOverviewHybrid가 라이브 병합과 동일한 Map<email,Map<day,values>> 구조로
+ *  validRows: day_at×employee_id×user_email 그레인의 원본 행(설계 §17.5 SQL①②처럼 SUM+GROUP BY로
+ *  기간 집계하지 않고, PK 그레인당 이미 1행뿐인 특성을 살려 원본을 그대로 반환한다) — 이래야
+ *  usage-prom.js의 getUsageOverviewHybrid가 라이브 병합과 동일한 Map<unitKey,Map<day,values>> 구조로
  *  꽂아 넣을 수 있고(§19.4), agg_mode/norm_version이 현재값과 다른 날(재적재 대상)을 조인 조건으로
  *  자연스럽게 배제할 수 있다(SUM 집계로는 이 배제를 사후에 다시 걸러야 해 이중 로직이 된다).
- *  coverageInRange: 설계 §17.5 SQL③ 그대로(구간 내 커버리지 마커 — gap_days/segments.cached 판정용).
+ *  coverageInRange: 설계 §17.5 SQL③ 그대로(구간 내 커버리지 마커 — gap_days/segments.cached 판정용) +
+ *  identity_version(M-3 수정, 리뷰 2026-09-07) — usage-prom.js가 스코프 조회(employeeIdFilter가
+ *  있는 호출)에서 이 값이 현재 IDENTITY_VERSION과 다른 날을 coveredDays에서 제외해 gap_days로
+ *  정직하게 보고한다. 이 마커는 day_at당 1행뿐이고(employee_id 축이 아니다), 컬럼 하나 추가는
+ *  전사 뷰(비스코프 호출)의 read judgment(agg_mode+norm_version만 봄, decision30)에 영향을 주지 않는다.
  *  allCoverage: meta.rollup.cached_through(§17.6) 계산에는 요청 구간 밖의 과거까지 봐야 하므로 전체
  *  커버리지를 day_at 오름차순으로 받는다(설계 §17.4 — 연 3,650행 규모라 무시 가능한 비용).
  *  dataStart/lastSyncAt: 설계 §17.5 SQL④ 그대로.
  *
- *  emailFilter(승인결정1, GET /api/usage/me 전환 신규) — 소문자 정규화된 email 또는 null. null이면
- *  기존 admin 라우트(/summary·/users)와 동일하게 전 사용자 무필터. 값이 있으면 SQL WHERE 절에서
- *  직접 걸러(파라미터 바인딩, 인젝션 불가) 다른 사용자 행이 Worker 메모리로 올라오지도 않는다 —
- *  라우트 코드가 실수로 필터를 빠뜨려도 이 DAO 한 겹이 IDOR을 구조적으로 막는다(defense in depth,
- *  usage_prom_daily.user_email은 §17.3에 의해 항상 소문자로 저장되므로 대소문자 정규화 없이 등호
- *  비교만으로 충분하다). */
-export async function readHybridSnapshot(db, from, cacheTo, aggMode, normVersion, emailFilter = null) {
+ *  employeeIdFilter(usage-employee-identity.md §6.1, GET /api/usage/me 전용) — employeeIdFromEmail()이
+ *  만든 소문자 로컬파트 또는 null. null이면 기존 admin 라우트(/summary·/users)와 동일하게 전 사용자
+ *  무필터. 값이 있으면 SQL WHERE 절에서 직접 걸러(파라미터 바인딩, 인젝션 불가) 다른 직원의 행이
+ *  Worker 메모리로 올라오지도 않는다 — 라우트 코드가 실수로 필터를 빠뜨려도 이 DAO 한 겹이 IDOR을
+ *  구조적으로 막는다(defense in depth, I2 불변식 — 라벨 안전성과 무관하게 SQL 파라미터라 항상 유효). */
+export async function readHybridSnapshot(db, from, cacheTo, aggMode, normVersion, employeeIdFilter = null) {
   const stmts = [
     db.prepare(
-      `SELECT d.day_at, d.user_email, d.employee_name, d.session_count, d.input_tokens,
+      `SELECT d.day_at, d.employee_id, d.user_email, d.employee_name, d.session_count, d.input_tokens,
               d.output_tokens, d.cache_read_tokens, d.cache_write_tokens, d.cost_usd
          FROM usage_prom_daily d
          JOIN usage_prom_sync_days s ON s.day_at = d.day_at
         WHERE d.day_at BETWEEN ?1 AND ?2 AND s.agg_mode = ?3 AND s.norm_version = ?4
-          AND (?5 IS NULL OR d.user_email = ?5)
+          AND (?5 IS NULL OR d.employee_id = ?5)
         ORDER BY d.day_at`
-    ).bind(from, cacheTo, aggMode, normVersion, emailFilter),
+    ).bind(from, cacheTo, aggMode, normVersion, employeeIdFilter),
     db.prepare(
-      `SELECT day_at, agg_mode, norm_version, user_rows, unknown_types_json, fetched_at
+      `SELECT day_at, agg_mode, norm_version, identity_version, user_rows, unknown_types_json, fetched_at
          FROM usage_prom_sync_days WHERE day_at BETWEEN ?1 AND ?2 ORDER BY day_at`
     ).bind(from, cacheTo),
     db.prepare('SELECT day_at, agg_mode, norm_version FROM usage_prom_sync_days ORDER BY day_at'),
@@ -68,7 +71,7 @@ export async function readOverallCoverage(db) {
  *  상수와 비교해 직접 한다. */
 export async function selectCoverageRange(db, from, to) {
   const { results } = await db.prepare(
-    'SELECT day_at, agg_mode, norm_version, user_rows FROM usage_prom_sync_days WHERE day_at BETWEEN ?1 AND ?2 ORDER BY day_at'
+    'SELECT day_at, agg_mode, norm_version, identity_version, user_rows FROM usage_prom_sync_days WHERE day_at BETWEEN ?1 AND ?2 ORDER BY day_at'
   ).bind(from, to).all()
   return results
 }
@@ -107,24 +110,24 @@ export async function commitDay(db, dayAt, rows, marker) {
     stmts.push(
       db.prepare(
         `INSERT INTO usage_prom_daily
-           (day_at, user_email, employee_name, session_count, input_tokens, output_tokens,
+           (day_at, employee_id, user_email, employee_name, session_count, input_tokens, output_tokens,
             cache_read_tokens, cache_write_tokens, cost_usd)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
       ).bind(
-        dayAt, r.user_email, r.employee_name || null, r.session_count, r.input_tokens, r.output_tokens,
-        r.cache_read_tokens, r.cache_write_tokens, r.cost_usd
+        dayAt, r.employee_id || '', r.user_email || '', r.employee_name || null, r.session_count, r.input_tokens,
+        r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.cost_usd
       )
     )
   }
   stmts.push(
     db.prepare(
-      `INSERT INTO usage_prom_sync_days (day_at, agg_mode, norm_version, user_rows, unknown_types_json, fetched_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+      `INSERT INTO usage_prom_sync_days (day_at, agg_mode, norm_version, identity_version, user_rows, unknown_types_json, fetched_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
        ON CONFLICT(day_at) DO UPDATE SET
-         agg_mode = excluded.agg_mode, norm_version = excluded.norm_version,
+         agg_mode = excluded.agg_mode, norm_version = excluded.norm_version, identity_version = excluded.identity_version,
          user_rows = excluded.user_rows, unknown_types_json = excluded.unknown_types_json,
          fetched_at = excluded.fetched_at`
-    ).bind(dayAt, marker.aggMode, marker.normVersion, rows.length, marker.unknownTypesJson, marker.fetchedAt)
+    ).bind(dayAt, marker.aggMode, marker.normVersion, marker.identityVersion, rows.length, marker.unknownTypesJson, marker.fetchedAt)
   )
   await db.batch(stmts)
 }
