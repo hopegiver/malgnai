@@ -6,7 +6,7 @@
 // ⚠️ 이 파일은 dayGridWindow 등 시간창 계산을 새로 만들지 않는다 — server/lib/usage-prom.js의
 // fetchCompletedDayGrid(내부적으로 dayGridWindow·표현식 빌더를 라이브 경로와 공유)를 그대로 호출해
 // 이음매 양쪽이 항상 같은 계산을 하도록 보장한다(설계 §19.3-4 비협상 요구).
-import { AGG_MODE, NORM_VERSION, fetchCompletedDayGrid } from './usage-prom.js'
+import { AGG_MODE, NORM_VERSION, IDENTITY_VERSION, fetchCompletedDayGrid } from './usage-prom.js'
 import { UpstreamError } from './prom-client.js'
 import * as usagePromDailyDao from '../dao/usage-prom-daily.js'
 // m-2 수정(리뷰 2026-09-03) — todayUTCString/addDaysUTC를 이 파일에서 다시 구현하지 않고
@@ -40,10 +40,14 @@ export const REQUEST_CHUNK_RESERVE_MS = 26000 // 관리자 수동 트리거 전�
   // 기다리게 하는 것은 M-1이 피하려는 것과 같은 종류의 사용자 대기이므로, 재시도가 필요한 정도로
   // 느린 상황은 다음 회차(다시 버튼을 누르거나 다음 Cron)에 맡긴다.
 
-/** 설계 §18.5 결손 판정 — 마커가 없거나 agg_mode/norm_version이 현재 상수와 다르면 재적재 대상
- *  ("그 날의 값은 지금 규칙으로 만든 것이 아니다"). */
+/** 설계 §18.5 결손 판정 — 마커가 없거나 agg_mode/norm_version/identity_version이 현재 상수와 다르면
+ *  재적재 대상("그 날의 값은 지금 규칙으로 만든 것이 아니다"). identity_version 비교는
+ *  usage-employee-identity.md §9.1 신규 — 레거시 employee_id='' 행(마이그레이션 0019 보존 이전분,
+ *  identity_version='v0')을 지평(ROLLUP_HORIZON_DAYS) 안에서 자동 재적재 대상으로 잡는다. 읽기
+ *  판정(readHybridSnapshot의 JOIN, computeCachedThrough)은 agg_mode+norm_version만 보고
+ *  identity_version은 보지 않는다 — 그래야 재적재 전에도 레거시 날짜가 미식별 행으로 계속 보인다. */
 function isValidMarker(row) {
-  return !!row && row.agg_mode === AGG_MODE && row.norm_version === NORM_VERSION
+  return !!row && row.agg_mode === AGG_MODE && row.norm_version === NORM_VERSION && row.identity_version === IDENTITY_VERSION
 }
 
 /** 설계 §18.4 ① 대상 날짜 산출 — trailing(최근 ROLLUP_TRAILING_RESCAN_DAYS일, 무조건 재적재) ⊎
@@ -91,14 +95,24 @@ function groupIntoChunks(targetDays) {
   return chunks
 }
 
-function rowsFromByUser(byUser, dayAt) {
+/** entry.employeeNames(Set, 이미 decodeEmployeeName을 거친 값들)에서 대표값 1개를 고른다 —
+ *  pickDisplayName과 동일하게 사전순 최소(결정적, usage-employee-identity.md §3.4)를 쓴다. D1 캐시
+ *  행의 employee_name 컬럼에는 D1 users.name을 넣지 않는다(그건 응답 조립 시점에 pickDisplayName이
+ *  덧붙인다) — 이 값은 순수하게 "그날 관측된 Prometheus employee_name" 대표값이다. */
+function pickRepresentativeEmployeeName(employeeNames) {
+  if (!employeeNames || employeeNames.size === 0) return null
+  return [...employeeNames].sort()[0]
+}
+
+function rowsFromByUnit(byUnit, dayAt) {
   const rows = []
-  for (const entry of byUser.values()) {
+  for (const entry of byUnit.values()) {
     const day = entry.days.get(dayAt)
     if (!day) continue
     rows.push({
-      user_email: (entry.displayEmail || '').toLowerCase(), // §17.3 "소문자 정규화 저장"
-      employee_name: entry.employeeName,
+      employee_id: entry.employeeId || '', // §8.1 '' 센티널(NOT NULL DEFAULT '') — 미식별
+      user_email: entry.userEmail || '',   // §17.3 "소문자 정규화 저장"
+      employee_name: pickRepresentativeEmployeeName(entry.employeeNames),
       session_count: day.session_count,
       input_tokens: day.input_tokens,
       output_tokens: day.output_tokens,
@@ -153,11 +167,11 @@ export async function runUsageRollup(env, { budgetMs = ROLLUP_CRON_BUDGET_MS, re
     const chunkFrom = chunk[0]
     const chunkTo = chunk[chunk.length - 1]
     attemptedChunks += 1
-    let byUser
+    let byUnit
     let unknownTypes
     try {
       const result = await fetchCompletedDayGrid(env, { from: chunkFrom, to: chunkTo })
-      byUser = result.byUser
+      byUnit = result.byUnit
       unknownTypes = result.unknownTypes
     } catch (err) {
       console.error('[usage-rollup] chunk fetch failed (skipped — next run retries)', chunkFrom, chunkTo, err instanceof UpstreamError ? err.reason : err)
@@ -168,13 +182,13 @@ export async function runUsageRollup(env, { budgetMs = ROLLUP_CRON_BUDGET_MS, re
     // 이 청크 안에서 실제 활동이 관측된 날이 있으면 하한선을 그만큼 당긴다(같은 청크 안의 더
     // 오래된 0행 날짜에도 즉시 적용되도록 커밋 전에 먼저 갱신한다).
     for (const dayAt of chunk) {
-      if (rowsFromByUser(byUser, dayAt).length === 0) continue
+      if (rowsFromByUnit(byUnit, dayAt).length === 0) continue
       if (earliestActivityDay === null || dayAt < earliestActivityDay) earliestActivityDay = dayAt
     }
 
     const unknownTypesJson = unknownTypes && unknownTypes.size ? JSON.stringify([...unknownTypes]) : null
     for (const dayAt of chunk) {
-      const rows = rowsFromByUser(byUser, dayAt)
+      const rows = rowsFromByUnit(byUnit, dayAt)
       if (rows.length === 0 && (earliestActivityDay === null || dayAt < earliestActivityDay)) {
         // 확인된 0이라고 말할 근거가 아직 없다 — 마커를 쓰지 않고 건너뛴다(§18.5 "모르면 쓰지 않는다").
         unresolvedDays.push(dayAt)
@@ -185,6 +199,7 @@ export async function runUsageRollup(env, { budgetMs = ROLLUP_CRON_BUDGET_MS, re
         await usagePromDailyDao.commitDay(env.DB, dayAt, rows, {
           aggMode: AGG_MODE,
           normVersion: NORM_VERSION,
+          identityVersion: IDENTITY_VERSION,
           unknownTypesJson,
           fetchedAt: new Date().toISOString()
         })

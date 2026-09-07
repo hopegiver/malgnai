@@ -208,12 +208,12 @@
 export default {
   title: '사용량 통계 · malgnai-hub',
   data() {
-    const initial = usagePeriodRange('30d')
+    const initial = usagePeriodRange('today')
     return {
       guardReady: false,
       allowed: false,
 
-      presetKey: '30d',
+      presetKey: 'today',
       from: initial.from,
       to: initial.to,
 

@@ -10,7 +10,14 @@ import {
   computeLiveCompleteWindow,
   computeGapDays,
   isPromSafeEmail,
-  resolveEmailScope
+  unitKeyOf,
+  rowKeyOf,
+  foldToEmployees,
+  groupAccountsOf,
+  mergeD1AndPromUsers,
+  daySummaryRows,
+  zeroTotals,
+  getUsageOverviewHybrid
 } from './usage-prom.js'
 
 const NOW = Date.parse('2026-09-03T10:00:00Z') // 화요일, 오늘=2026-09-03(UTC) 고정
@@ -160,26 +167,209 @@ describe('isPromSafeEmail — PromQL 라벨 인젝션 방지(설계 §4.7)', () 
   })
 })
 
-describe('resolveEmailScope — GET /api/usage/me 본인 스코프 판정(승인결정1, IDOR 방지)', () => {
-  it('email 없으면(관리자 전사 조회, /summary·/users 기존 호출부) 완전 무필터', () => {
-    expect(resolveEmailScope(undefined)).toEqual({ scoped: false, emailSafe: false, emailLower: null, matchers: [] })
+// resolveEmailScope의 순수 판정 로직은 usage-identity.js의 resolveEmployeeScope로 이전됐다
+// (docs/design/usage-employee-identity.md §3.4·§6.1) — 그 단위테스트는 server/lib/usage-identity.test.js
+// 에 있다. 아래부터는 이 전환으로 새로 생긴 usage-prom.js 함수들(unitKeyOf/foldToEmployees/
+// mergeD1AndPromUsers/daySummaryRows)의 단위테스트다.
+
+function unit({ employeeId = null, userEmail = null, names = [], days = [] }) {
+  return { employeeId, userEmail, employeeNames: new Set(names), days: new Map(days) }
+}
+
+function dayValues(overrides = {}) {
+  return { session_count: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0, ...overrides }
+}
+
+describe('unitKeyOf/rowKeyOf — unit·응답 행 키 구조(usage-employee-identity.md §5.1)', () => {
+  it('employeeId·userEmail 쌍이 다르면 서로 다른 unitKey를 만든다("a"+"b@x" 대 "ab"+"@x" 충돌 불가)', () => {
+    const k1 = unitKeyOf('a', 'b@x')
+    const k2 = unitKeyOf('ab', '@x')
+    expect(k1).not.toBe(k2)
   })
 
-  it('안전한 이메일은 소문자 emailLower + user_email 라벨매처 1개를 만든다', () => {
-    const scope = resolveEmailScope('Dev@Malgnsoft.com')
-    expect(scope.scoped).toBe(true)
-    expect(scope.emailSafe).toBe(true)
-    expect(scope.emailLower).toBe('dev@malgnsoft.com')
-    expect(scope.matchers).toEqual(['user_email="Dev@Malgnsoft.com"'])
+  it('rowKeyOf — employee_id 있으면 emp:, 없고 user_email만 있으면 grp:, 둘 다 없으면 unk:(N2)', () => {
+    expect(rowKeyOf('hopegiver', 'dev@malgnsoft.com')).toBe('emp:hopegiver')
+    expect(rowKeyOf(null, 'public@malgnsoft.com')).toBe('grp:public@malgnsoft.com')
+    expect(rowKeyOf(null, null)).toBe('unk:')
+  })
+})
+
+describe('foldToEmployees — unit(employee_id×user_email) → 직원 단위 접기(§5.1·§5.3)', () => {
+  it('같은 직원이 그룹 계정 2개를 쓰면 1행으로 접히고 group_accounts에 2건이 들어간다(N3)', () => {
+    const byUnit = new Map([
+      [unitKeyOf('hopegiver', 'dev@malgnsoft.com'), unit({
+        employeeId: 'hopegiver', userEmail: 'dev@malgnsoft.com',
+        days: [['2026-09-01', dayValues({ input_tokens: 100, output_tokens: 10 })]]
+      })],
+      [unitKeyOf('hopegiver', 'ai@malgnsoft.com'), unit({
+        employeeId: 'hopegiver', userEmail: 'ai@malgnsoft.com',
+        days: [['2026-09-01', dayValues({ input_tokens: 5, output_tokens: 1 })]]
+      })]
+    ])
+    const employees = foldToEmployees(byUnit)
+    expect(employees.size).toBe(1)
+    const emp = employees.get('emp:hopegiver')
+    expect(emp.days.get('2026-09-01').input_tokens).toBe(105) // 두 계정 합산
+    const accounts = groupAccountsOf(emp)
+    expect(accounts).toHaveLength(2)
+    expect(accounts.map((a) => a.user_email).sort()).toEqual(['ai@malgnsoft.com', 'dev@malgnsoft.com'])
   })
 
-  it('라벨 인젝션 위험 문자가 섞인 이메일은 matchers를 비우되(라이브 질의 생략용) scoped는 유지한다 — ' +
-      '빈 matchers가 "무필터(전사)"로 오독되면 안 되므로 scoped 플래그로 두 상태를 구분한다', () => {
-    const scope = resolveEmailScope('a"@malgnsoft.com')
-    expect(scope.scoped).toBe(true)
-    expect(scope.emailSafe).toBe(false)
-    expect(scope.matchers).toEqual([])
-    // D1 캐시 스코핑(emailLower)은 라벨 안전성과 무관하게 항상 유효해야 한다 — SQL 파라미터라 인젝션 불가.
-    expect(scope.emailLower).toBe('a"@malgnsoft.com')
+  it('employee_id 없는 관측치는 버리지 않고 grp: 행으로 접힌다(§5.2 폴백)', () => {
+    const byUnit = new Map([
+      [unitKeyOf(null, 'public@malgnsoft.com'), unit({ employeeId: null, userEmail: 'public@malgnsoft.com', days: [['2026-09-01', dayValues({ input_tokens: 50 })]] })]
+    ])
+    const employees = foldToEmployees(byUnit)
+    const emp = employees.get('grp:public@malgnsoft.com')
+    expect(emp).toBeDefined()
+    expect(emp.identitySource).toBe('group_account')
+    expect(emp.days.get('2026-09-01').input_tokens).toBe(50)
+  })
+
+  it('employee_id·user_email 둘 다 없는 관측치는 unk: 단일 행으로 모인다(N2, 최대 1행)', () => {
+    const byUnit = new Map([
+      [unitKeyOf(null, null), unit({ days: [['2026-09-01', dayValues({ input_tokens: 7 })]] })]
+    ])
+    const employees = foldToEmployees(byUnit)
+    expect(employees.size).toBe(1)
+    expect(employees.get('unk:').identitySource).toBe('unknown')
+    expect(groupAccountsOf(employees.get('unk:'))).toEqual([]) // 계정 자체가 없으므로 빈 배열
+  })
+})
+
+describe('mergeD1AndPromUsers — D1 users.employee_id 컬럼이 병합 축(usage-employee-identity-linking.md §7.1)', () => {
+  it('D1 users.employee_id 컬럼 값을 그대로 병합 키로 쓴다(이메일 로컬파트 파생 없음)', () => {
+    // 이메일 로컬파트는 'djkim'이지만 employee_id 컬럼은 'malgn'로 연동된 실측 사례(§1) — 컬럼이
+    // 단일 정본이므로 로컬파트가 아니라 컬럼 값('malgn')으로 매칭돼야 한다.
+    const d1Users = [{ id: 'u1', email: 'djkim@malgnsoft.com', name: '김덕조', role: 'administrator', status: 'active', employee_id: 'malgn' }]
+    const byUnit = new Map([
+      [unitKeyOf('malgn', 'public@malgnsoft.com'), unit({ employeeId: 'malgn', userEmail: 'public@malgnsoft.com', days: [['2026-09-01', dayValues({ input_tokens: 42 })]] })]
+    ])
+    const rows = mergeD1AndPromUsers(d1Users, byUnit)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].row_key).toBe('emp:malgn')
+    expect(rows[0].employee_id).toBe('malgn')
+    expect(rows[0].total_tokens).toBe(42)
+  })
+
+  it('employee_id가 NULL(미연동)인 D1 사용자는 d1only: 행으로 사용량 0으로 뜬다(§7.1 신규 추가 행)', () => {
+    const d1Users = [{ id: 'u1', email: 'djkim@malgnsoft.com', name: '김덕조', role: 'administrator', status: 'active', employee_id: null }]
+    const rows = mergeD1AndPromUsers(d1Users, new Map())
+    expect(rows).toHaveLength(1)
+    expect(rows[0].row_key).toBe('d1only:u1')
+    expect(rows[0].employee_id).toBeNull()
+    expect(rows[0].total_tokens).toBe(0)
+    expect(rows[0].identity_source).toBeNull()
+  })
+
+  it('로컬파트 충돌 개념 자체가 사라졌다 — 같은 로컬파트를 가진 두 사용자도 employee_id 컬럼이 다르면 정상 병합된다(§3.3 폐기)', () => {
+    const d1Users = [
+      { id: 'u1', email: 'dup@malgnsoft.com', name: '충돌1', role: 'employee', status: 'active', employee_id: 'dup' },
+      { id: 'u2', email: 'DUP@malgnsoft.com', name: '충돌2', role: 'employee', status: 'active', employee_id: null } // 컬럼은 미연동이라 실제 충돌 없음
+    ]
+    const byUnit = new Map([
+      [unitKeyOf('dup', 'dup@malgnsoft.com'), unit({ employeeId: 'dup', userEmail: 'dup@malgnsoft.com', days: [['2026-09-01', dayValues({ input_tokens: 999 })]] })]
+    ])
+    const rows = mergeD1AndPromUsers(d1Users, byUnit)
+    const u1Row = rows.find((r) => r.user_id === 'u1')
+    const u2Row = rows.find((r) => r.user_id === 'u2')
+    expect(u1Row.total_tokens).toBe(999)
+    expect(u1Row.identity_ambiguous).toBeUndefined()
+    expect(u2Row.total_tokens).toBe(0)
+  })
+
+  it('허브 계정에 연결되지 않은 관측치(employee_id가 어떤 D1 사용자에게도 없음)는 prometheus_only 행으로 분리된다(총합 보존)', () => {
+    const d1Users = [{ id: 'u1', email: 'hopegiver@malgnsoft.com', name: '하근호', role: 'administrator', status: 'active', employee_id: 'hopegiver' }]
+    const byUnit = new Map([
+      [unitKeyOf('claude', 'public@malgnsoft.com'), unit({ employeeId: 'claude', userEmail: 'public@malgnsoft.com', names: ['김도형'], days: [['2026-09-01', dayValues({ input_tokens: 88 })]] })]
+    ])
+    const rows = mergeD1AndPromUsers(d1Users, byUnit)
+    const promOnlyRow = rows.find((r) => r.source === 'prometheus_only')
+    expect(promOnlyRow).toBeDefined()
+    expect(promOnlyRow.employee_id).toBe('claude')
+    expect(promOnlyRow.total_tokens).toBe(88) // 값 자체는 사라지지 않는다(총합 보존)
+    expect(promOnlyRow.user_id).toBeNull()
+    expect(promOnlyRow.observed_employee_name).toBe('김도형')
+    expect(promOnlyRow.observed_name_mismatch).toBe(false)
+  })
+
+  describe('observed_employee_name / observed_name_mismatch — 오연결 탐지 신호(§4.4 S4)', () => {
+    it('관측 이름이 D1 이름과 다르면 observed_name_mismatch:true(오연결 경고)', () => {
+      // djkim@(김덕조)에게 실수로 이진화가 관측되는 축('public')을 붙인 사고 시나리오(§1 실측 사례 유사)
+      const d1Users = [{ id: 'u1', email: 'djkim@malgnsoft.com', name: '김덕조', role: 'administrator', status: 'active', employee_id: 'public' }]
+      const byUnit = new Map([
+        [unitKeyOf('public', 'public@malgnsoft.com'), unit({ employeeId: 'public', userEmail: 'public@malgnsoft.com', names: ['이진화'], days: [['2026-09-01', dayValues({ input_tokens: 10 })]] })]
+      ])
+      const rows = mergeD1AndPromUsers(d1Users, byUnit)
+      expect(rows[0].observed_employee_name).toBe('이진화')
+      expect(rows[0].observed_name_mismatch).toBe(true)
+    })
+
+    it('관측 이름이 D1 이름과 같으면 mismatch:false', () => {
+      const d1Users = [{ id: 'u1', email: 'hopegiver@malgnsoft.com', name: '하근호', role: 'employee', status: 'active', employee_id: 'hopegiver' }]
+      const byUnit = new Map([
+        [unitKeyOf('hopegiver', 'dev@malgnsoft.com'), unit({ employeeId: 'hopegiver', userEmail: 'dev@malgnsoft.com', names: ['하근호'], days: [['2026-09-01', dayValues({ input_tokens: 10 })]] })]
+      ])
+      const rows = mergeD1AndPromUsers(d1Users, byUnit)
+      expect(rows[0].observed_name_mismatch).toBe(false)
+    })
+
+    it('관측 이름이 없으면(employee_name 라벨 없음) observed_employee_name:null, mismatch:false', () => {
+      const d1Users = [{ id: 'u1', email: 'hopegiver@malgnsoft.com', name: '하근호', role: 'employee', status: 'active', employee_id: 'hopegiver' }]
+      const byUnit = new Map([
+        [unitKeyOf('hopegiver', 'dev@malgnsoft.com'), unit({ employeeId: 'hopegiver', userEmail: 'dev@malgnsoft.com', days: [['2026-09-01', dayValues({ input_tokens: 10 })]] })]
+      ])
+      const rows = mergeD1AndPromUsers(d1Users, byUnit)
+      expect(rows[0].observed_employee_name).toBeNull()
+      expect(rows[0].observed_name_mismatch).toBe(false)
+    })
+  })
+})
+
+describe('daySummaryRows(byUnit) — /summary는 직원 축으로 접지 않고 unit을 그대로 합산해도 결과가 같다(§7.2)', () => {
+  it('같은 날짜의 서로 다른 employee_id/user_email unit 값이 day_at별로 정확히 합산된다', () => {
+    const byUnit = new Map([
+      [unitKeyOf('a', 'x@malgnsoft.com'), unit({ employeeId: 'a', userEmail: 'x@malgnsoft.com', days: [['2026-09-01', dayValues({ input_tokens: 10 })]] })],
+      [unitKeyOf('b', 'x@malgnsoft.com'), unit({ employeeId: 'b', userEmail: 'x@malgnsoft.com', days: [['2026-09-01', dayValues({ input_tokens: 20 })]] })]
+    ])
+    const rows = daySummaryRows(byUnit)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].day_at).toBe('2026-09-01')
+    expect(rows[0].input_tokens).toBe(30)
+  })
+})
+
+describe('zeroTotals — export 확인(라우트가 identity_unlinked/invalid 빈 응답에 재사용)', () => {
+  it('전 필드가 0/null인 총계를 반환한다', () => {
+    expect(zeroTotals()).toEqual({
+      session_count: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+      total_tokens: 0, cost_usd: 0, active_days: 0, last_active_day: null
+    })
+  })
+})
+
+describe('getUsageOverviewHybrid — requireEmployeeScope 안전망(usage-employee-identity-linking.md §4.2 I7)', () => {
+  // env를 절대 건드리면 안 되는 경로임을 증명하기 위해 접근 시 즉시 예외를 던지는 미끼 객체를 쓴다 —
+  // 가드가 실제로 D1/상류를 건드리지 않고 조기 반환하는지 이 방식으로 확실히 검증한다.
+  const poisonedEnv = new Proxy({}, {
+    get() { throw new Error('getUsageOverviewHybrid touched env despite requireEmployeeScope guard') }
+  })
+
+  it('requireEmployeeScope:true인데 employeeId가 없으면(scoped:false) env를 전혀 건드리지 않고 빈 스냅샷을 즉시 반환한다', async () => {
+    const result = await getUsageOverviewHybrid(poisonedEnv, {
+      from: '2026-08-01', to: '2026-08-05', refresh: false, employeeId: null, requireEmployeeScope: true
+    })
+    expect(result.byUnit.size).toBe(0)
+    expect(result.gapDays).toEqual(['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05'])
+    expect(result.segments).toEqual({ cached: null, live: null })
+    expect(result.liveUnavailable).toBe(false)
+    expect(result.dataStart).toBeNull()
+  })
+
+  it('requireEmployeeScope:true인데 employeeId가 빈 문자열이어도(scoped:false와 동일) 조기 반환한다', async () => {
+    const result = await getUsageOverviewHybrid(poisonedEnv, {
+      from: '2026-08-01', to: '2026-08-01', refresh: false, employeeId: '', requireEmployeeScope: true
+    })
+    expect(result.byUnit.size).toBe(0)
   })
 })

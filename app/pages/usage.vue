@@ -64,22 +64,25 @@
           </div>
         </div>
 
-        <!-- 일별 토큰 사용량 바 그래프 -->
+        <!-- 일별 토큰 사용량 바 그래프. admin/usage/index.vue의 gap-aware 패턴과 동일 CSS를
+             재사용해 "결손(모름)"과 "실사용 0"을 다른 표시로 구분한다(§12.1). -->
         <div class="card p-4 mb-3" v-if="chartData.length">
           <div class="d-flex justify-content-between align-items-center mb-3">
             <h2 class="h6 mb-0">일별 토큰 사용량</h2>
-            <span class="text-faint small">최근 {{ chartData.length }}일</span>
+            <span class="text-faint small">최근 {{ chartData.length }}일{{ gapDayCount ? ` · 결손 ${gapDayCount}일` : '' }}</span>
           </div>
-          <div class="usage-chart">
+          <div class="usage-chart" role="img" :aria-label="`일별 토큰 사용량, ${(meta && meta.from) || from}~${(meta && meta.to) || to}${gapDayCount ? `, 결손 ${gapDayCount}일 포함` : ''}`">
             <div class="usage-chart-bars">
               <div
                 v-for="d in chartData"
                 :key="d.day"
                 class="usage-chart-col"
-                :title="`${d.day} · ${formatTokens(d.tokens)} 토큰`"
+                :class="{ 'usage-chart-col--gap': d.isGap }"
+                :title="d.isGap ? `${d.day} · 아직 집계되지 않음` : `${d.day} · ${formatTokens(d.tokens)} 토큰`"
               >
-                <span class="usage-chart-value">{{ formatTokens(d.tokens) }}</span>
-                <div class="usage-chart-bar" :style="{ height: d.barPx + 'px' }"></div>
+                <span class="usage-chart-value">{{ d.isGap ? '—' : formatTokens(d.tokens) }}<span v-if="d.isGap" class="visually-hidden">(집계 안 됨)</span></span>
+                <div v-if="d.isGap" class="usage-chart-gap-band" aria-hidden="true"><div class="usage-chart-gap-marker"></div></div>
+                <div v-else class="usage-chart-bar" :style="{ height: d.barPx + 'px' }"></div>
               </div>
             </div>
             <div class="usage-chart-axis">
@@ -156,6 +159,11 @@ export default {
       error: false,
       errorMessage: '',
       dailyRows: [],
+      meta: null, // GET /api/usage/me 응답 meta(from/to/gap_days 등, docs/api.md §5.9.5) — 일별
+      // 그래프의 날짜축·결손일 표시에 쓴다. dailyRows만으로 v-for를 돌리면 결손일이 조용히
+      // 사라져 "0"으로 오독되므로(§12.1과 동일 원칙), admin/usage/index.vue의 검증된
+      // gap-aware 그래프 패턴을 여기서도 재현한다(공유 컴포넌트로 추출하지 않는 이유는 이 파일
+      // 상단 isoDaysAgo 주석 참고 — usage.vue는 의도적으로 자기 파일 안에 로컬로 유지).
       sessions: [],
     }
   },
@@ -172,18 +180,37 @@ export default {
       }
       return { ...t, modelCount: models.size || 1 }
     },
+    // meta.from~to로 날짜축을 스스로 채우고(서버가 응답을 못 줬을 때는 화면이 이미 들고 있는
+    // this.from/this.to로 폴백), meta.gap_days(결손일)는 0 막대와 구분되는 결측 표시로 그린다.
+    // meta가 아예 없거나 dailyRows가 0건이어도(백엔드 버그·순수 무사용 모두 포함) 전 구간을
+    // "확인된 0"으로 그려 빈 화면 대신 정상적인 빈 상태를 보여준다.
     chartData() {
-      const rows = this.dailyRows.map((r) => ({
-        day: r.day_at,
-        tokens: (r.input_tokens || 0) + (r.output_tokens || 0) + (r.cache_read_tokens || 0) + (r.cache_write_tokens || 0),
-      }))
-      const max = Math.max(1, ...rows.map((r) => r.tokens))
+      const from = (this.meta && this.meta.from) || this.from
+      const to = (this.meta && this.meta.to) || this.to
+      if (!from || !to) return []
+      const gapSet = new Set((this.meta && this.meta.gap_days) || [])
+      const byDay = new Map(this.dailyRows.map((r) => [r.day_at, r]))
+      const rows = enumerateUsageDays(from, to).map((day) => {
+        const isGap = gapSet.has(day)
+        const row = byDay.get(day)
+        const tokens = isGap
+          ? 0
+          : row
+            ? (row.total_tokens ?? (row.input_tokens || 0) + (row.output_tokens || 0) + (row.cache_read_tokens || 0) + (row.cache_write_tokens || 0))
+            : 0
+        return { day, tokens, isGap }
+      })
+      const max = Math.max(1, ...rows.filter((r) => !r.isGap).map((r) => r.tokens))
       const maxBarPx = 140
+      const gapMarkerPx = 2 // 결측 마커는 0인 날의 최소 막대(2px)와 같은 높이로 — "0보다 커 보임" 오독 방지
       return rows.map((r) => ({
         ...r,
-        barPx: Math.max(2, Math.round((r.tokens / max) * maxBarPx)),
+        barPx: r.isGap ? gapMarkerPx : Math.max(2, Math.round((r.tokens / max) * maxBarPx)),
         shortDay: r.day.slice(5),
       }))
+    },
+    gapDayCount() {
+      return (this.meta && this.meta.gap_days && this.meta.gap_days.length) || 0
     },
   },
   async mounted() {
@@ -204,6 +231,7 @@ export default {
         return
       }
       this.dailyRows = usageRes.data?.data || []
+      this.meta = usageRes.data?.meta || null
       this.sessions = sessionsRes.data?.data || []
     },
     formatTokens,
