@@ -2,7 +2,8 @@
 // docs/design/usage-employee-identity-linking.md 정본 — Sensitive 등급(식별자 재연결 = IDOR과
 // 같은 부류의 조작)이라 403/409/원자 커밋/no-op 무기록을 각각 별도로 증명한다.
 // server/dao/users.js는 findById/findByEmployeeId/buildUpdateEmployeeIdStatement만 대체,
-// server/dao/audit-logs.js는 buildRecordStatement만 대체해 D1 없이 라우트 로직만 검증한다.
+// server/dao/audit-logs.js는 buildRecordStatementIfPrecedingChanged만 대체해 D1 없이 라우트
+// 로직만 검증한다(M-2 수정, 리뷰 2026-09-07 — CAS UPDATE와 짝인 조건부 감사 INSERT).
 // c.env.DB.batch()는 이 파일이 직접 제어하는 vi.fn()이다(원자 커밋 여부·인자를 그대로 관찰한다).
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { Hono } from 'hono'
@@ -12,7 +13,7 @@ const findByEmailMock = vi.fn()
 const findByEmployeeIdMock = vi.fn()
 const insertMock = vi.fn()
 const buildUpdateEmployeeIdStatementMock = vi.fn()
-const buildRecordStatementMock = vi.fn()
+const buildRecordStatementIfPrecedingChangedMock = vi.fn()
 
 vi.mock('../dao/users.js', async (importOriginal) => {
   const actual = await importOriginal()
@@ -28,7 +29,7 @@ vi.mock('../dao/users.js', async (importOriginal) => {
 
 vi.mock('../dao/audit-logs.js', async (importOriginal) => {
   const actual = await importOriginal()
-  return { ...actual, buildRecordStatement: (...args) => buildRecordStatementMock(...args) }
+  return { ...actual, buildRecordStatementIfPrecedingChanged: (...args) => buildRecordStatementIfPrecedingChangedMock(...args) }
 })
 
 const { default: adminUsers } = await import('./admin-users.js')
@@ -65,9 +66,9 @@ beforeEach(() => {
   findByEmployeeIdMock.mockReset()
   insertMock.mockReset()
   buildUpdateEmployeeIdStatementMock.mockReset()
-  buildRecordStatementMock.mockReset()
+  buildRecordStatementIfPrecedingChangedMock.mockReset()
   buildUpdateEmployeeIdStatementMock.mockReturnValue({ __kind: 'update-stmt' })
-  buildRecordStatementMock.mockReturnValue({ id: 'audit-id', stmt: { __kind: 'audit-stmt' } })
+  buildRecordStatementIfPrecedingChangedMock.mockReturnValue({ id: 'audit-id', stmt: { __kind: 'audit-stmt' } })
 })
 
 describe('PUT /api/admin/users/:id/employee-id — 권한·검증', () => {
@@ -123,7 +124,7 @@ describe('PUT /api/admin/users/:id/employee-id — no-op은 감사 미기록', (
     expect(body.changed).toBe(false)
     expect(body.previous_employee_id).toBe('djkim')
     expect(batch).not.toHaveBeenCalled()
-    expect(buildRecordStatementMock).not.toHaveBeenCalled()
+    expect(buildRecordStatementIfPrecedingChangedMock).not.toHaveBeenCalled()
   })
 
   it('대소문자/공백만 다른 같은 값(정규화 후 동일)도 no-op으로 처리된다', async () => {
@@ -157,7 +158,7 @@ describe('PUT /api/admin/users/:id/employee-id — 409 충돌(무언의 이전 �
     findByIdMock.mockResolvedValue(targetRow({ employee_id: 'old-value' }))
     findByEmployeeIdMock.mockResolvedValue({ id: TARGET_ID, email: 'djkim@malgnsoft.com' })
     const app = makeApp()
-    const batch = vi.fn().mockResolvedValue([{}, {}])
+    const batch = vi.fn().mockResolvedValue([{ meta: { changes: 1 } }, { meta: { changes: 1 } }])
     const res = await putRequest(app, batch, { employee_id: 'old-value-renamed' })
     // findByEmployeeId가 자기 자신을 반환해도(가정상 값이 다르지만) holder.id === id이므로 통과해야 한다
     expect(res.status).not.toBe(409)
@@ -187,6 +188,28 @@ describe('PUT /api/admin/users/:id/employee-id — 409 충돌(무언의 이전 �
     const res = await putRequest(app, batch, { employee_id: 'public' })
     expect(res.status).toBe(500)
   })
+
+  // M-2 회귀(리뷰 2026-09-07) — 두 관리자가 동시에 같은 target을 편집: 둘 다 findByEmployeeId 사전
+  // 확인은 통과하지만(서로 다른 값이라 충돌 없음), 뒤쳐진 쪽의 CAS UPDATE(WHERE employee_id IS
+  // previousValue)가 0행이 된다. 감사 INSERT는 buildRecordStatementIfPrecedingChanged가 SQL
+  // `WHERE (SELECT changes())>0`으로 스스로 no-op 처리하므로(dao/audit-logs.js), 여기서는 라우트가
+  // updateResult.meta.changes===0을 보고 409 STALE_STATE로 응답하는지만 검증한다 — "일어나지 않은
+  // 변경"이 200으로 위장되지 않는다.
+  it('CAS 불일치(동시 편집으로 employee_id가 이미 바뀜) → batch는 던지지 않지만 meta.changes===0 → 409 STALE_STATE, 성공 응답 아님', async () => {
+    findByIdMock.mockResolvedValue(targetRow({ employee_id: 'djkim' })) // 이 요청이 읽은 시점의 값(이미 stale)
+    findByEmployeeIdMock.mockResolvedValue(null) // 새 값 'malgn'은 아무도 안 씀(사전 확인 통과)
+    const app = makeApp()
+    // CAS 조건 불일치로 UPDATE가 0행 — batch 자체는 예외 없이 resolve된다(UNIQUE 위반이 아니므로).
+    const batch = vi.fn().mockResolvedValue([{ meta: { changes: 0 } }, { meta: { changes: 0 } }])
+    const res = await putRequest(app, batch, { employee_id: 'malgn' })
+    const body = await res.json()
+
+    expect(res.status).toBe(409)
+    expect(body.error.code).toBe('STALE_STATE')
+    expect(batch).toHaveBeenCalledTimes(1)
+    // CAS 바인딩 값 확인 — WHERE employee_id IS ? 에 이 요청이 읽은 'djkim'이 그대로 들어갔다.
+    expect(buildUpdateEmployeeIdStatementMock).toHaveBeenCalledWith(expect.anything(), TARGET_ID, 'malgn', 'djkim')
+  })
 })
 
 describe('PUT /api/admin/users/:id/employee-id — 원자 커밋·감사로그·응답', () => {
@@ -196,7 +219,7 @@ describe('PUT /api/admin/users/:id/employee-id — 원자 커밋·감사로그·
       .mockResolvedValueOnce(targetRow({ employee_id: 'malgn' })) // 갱신 후 재조회
     findByEmployeeIdMock.mockResolvedValue(null) // 보유자 없음
     const app = makeApp()
-    const batch = vi.fn().mockResolvedValue([{ success: true }, { success: true }])
+    const batch = vi.fn().mockResolvedValue([{ success: true, meta: { changes: 1 } }, { success: true, meta: { changes: 1 } }])
 
     const res = await putRequest(app, batch, { employee_id: 'malgn' })
     const body = await res.json()
@@ -214,13 +237,17 @@ describe('PUT /api/admin/users/:id/employee-id — 원자 커밋·감사로그·
     expect(batchArg).toEqual([{ __kind: 'update-stmt' }, { __kind: 'audit-stmt' }])
 
     // 감사로그 메타데이터 — before/after/target_email/local_part_mismatch
-    expect(buildRecordStatementMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+    expect(buildRecordStatementIfPrecedingChangedMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       actorUserId: ADMIN_ID,
       action: 'user.employee_id_changed',
       targetType: 'user',
       targetId: TARGET_ID,
       metadata: expect.objectContaining({ before: 'djkim', after: 'malgn', target_email: 'djkim@malgnsoft.com', local_part_mismatch: true })
     }))
+
+    // M-2 — CAS: UPDATE statement 빌더에 previousValue(batch 밖에서 읽은 target.employee_id)가
+    // 네 번째 인자로 그대로 전달된다(WHERE employee_id IS ?의 바인딩 값).
+    expect(buildUpdateEmployeeIdStatementMock).toHaveBeenCalledWith(expect.anything(), TARGET_ID, 'malgn', 'djkim')
   })
 
   it('연결 해제(employee_id: null) → warnings에 local_part_mismatch는 없고 overwrote_existing_link만 있다', async () => {
@@ -228,7 +255,7 @@ describe('PUT /api/admin/users/:id/employee-id — 원자 커밋·감사로그·
       .mockResolvedValueOnce(targetRow({ employee_id: 'djkim' }))
       .mockResolvedValueOnce(targetRow({ employee_id: null }))
     const app = makeApp()
-    const batch = vi.fn().mockResolvedValue([{}, {}])
+    const batch = vi.fn().mockResolvedValue([{ meta: { changes: 1 } }, { meta: { changes: 1 } }])
 
     const res = await putRequest(app, batch, { employee_id: null })
     const body = await res.json()
@@ -246,7 +273,7 @@ describe('PUT /api/admin/users/:id/employee-id — 원자 커밋·감사로그·
       .mockResolvedValueOnce(targetRow({ employee_id: 'djkim' }))
     findByEmployeeIdMock.mockResolvedValue(null)
     const app = makeApp()
-    const batch = vi.fn().mockResolvedValue([{}, {}])
+    const batch = vi.fn().mockResolvedValue([{ meta: { changes: 1 } }, { meta: { changes: 1 } }])
 
     const res = await putRequest(app, batch, { employee_id: 'djkim' })
     const body = await res.json()
@@ -256,7 +283,7 @@ describe('PUT /api/admin/users/:id/employee-id — 원자 커밋·감사로그·
   })
 })
 
-describe('POST /api/admin/users — §5.8 신규 계정 employee_id 기본값', () => {
+describe('POST /api/admin/users — §5.8 신규 계정 employee_id 기본값(M-4 수정, 리뷰 2026-09-07: 자동 부여 폐지)', () => {
   function postBody(overrides = {}) {
     return { email: 'newhire@malgnsoft.com', name: '신입', role: 'employee', ...overrides }
   }
@@ -270,9 +297,12 @@ describe('POST /api/admin/users — §5.8 신규 계정 employee_id 기본값', 
     )
   }
 
-  it('로컬파트가 유효하고 아무도 안 쓰면 기본값으로 채운다(warnings 없음)', async () => {
+  // M-4 — "users 중 아무도 안 씀"만으로는 주인 없는 관측 축(Prometheus에서 이미 관측 중인데 어떤
+  // 허브 계정에도 안 걸린 employee_id)과 정말 미사용인 값을 구분할 수 없다. 자동 부여를 껐으므로
+  // 로컬파트가 유효하고 미보유여도 employee_id는 NULL로 남고, 후보값은 warnings로만 안내한다.
+  it('로컬파트가 유효하고 아무도 안 쓰면 → employee_id는 NULL로 남고 warnings:["employee_id_not_auto_linked"](자동 연결 안 함, 감사로그 없는 경로라 사람이 PUT으로 명시 연결해야 한다)', async () => {
     findByEmailMock.mockResolvedValue(null) // 이메일 중복 없음
-    findByEmployeeIdMock.mockResolvedValue(null) // 로컬파트 미보유
+    findByEmployeeIdMock.mockResolvedValue(null) // 로컬파트 미보유 — 그래도 자동 연결하지 않는다
     insertMock.mockImplementation(async (db, { email, name, role, employeeId }) => (
       { id: 'new-user-id', email, name, role, status: 'active', employee_id: employeeId, created_at: '2026-09-07T00:00:00.000Z' }
     ))
@@ -281,9 +311,9 @@ describe('POST /api/admin/users — §5.8 신규 계정 employee_id 기본값', 
     const body = await res.json()
 
     expect(res.status).toBe(201)
-    expect(body.employee_id).toBe('newhire')
-    expect(body.warnings).toEqual([])
-    expect(insertMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ employeeId: 'newhire' }))
+    expect(body.employee_id).toBeNull()
+    expect(body.warnings).toEqual(['employee_id_not_auto_linked'])
+    expect(insertMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ employeeId: null }))
   })
 
   it('로컬파트가 이미 쓰이고 있으면 employee_id NULL + warnings:["employee_id_taken"](계정 생성 자체는 성공)', async () => {

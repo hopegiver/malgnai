@@ -14,7 +14,11 @@
  *  usage-prom.js의 getUsageOverviewHybrid가 라이브 병합과 동일한 Map<unitKey,Map<day,values>> 구조로
  *  꽂아 넣을 수 있고(§19.4), agg_mode/norm_version이 현재값과 다른 날(재적재 대상)을 조인 조건으로
  *  자연스럽게 배제할 수 있다(SUM 집계로는 이 배제를 사후에 다시 걸러야 해 이중 로직이 된다).
- *  coverageInRange: 설계 §17.5 SQL③ 그대로(구간 내 커버리지 마커 — gap_days/segments.cached 판정용).
+ *  coverageInRange: 설계 §17.5 SQL③ 그대로(구간 내 커버리지 마커 — gap_days/segments.cached 판정용) +
+ *  identity_version(M-3 수정, 리뷰 2026-09-07) — usage-prom.js가 스코프 조회(employeeIdFilter가
+ *  있는 호출)에서 이 값이 현재 IDENTITY_VERSION과 다른 날을 coveredDays에서 제외해 gap_days로
+ *  정직하게 보고한다. 이 마커는 day_at당 1행뿐이고(employee_id 축이 아니다), 컬럼 하나 추가는
+ *  전사 뷰(비스코프 호출)의 read judgment(agg_mode+norm_version만 봄, decision30)에 영향을 주지 않는다.
  *  allCoverage: meta.rollup.cached_through(§17.6) 계산에는 요청 구간 밖의 과거까지 봐야 하므로 전체
  *  커버리지를 day_at 오름차순으로 받는다(설계 §17.4 — 연 3,650행 규모라 무시 가능한 비용).
  *  dataStart/lastSyncAt: 설계 §17.5 SQL④ 그대로.
@@ -36,7 +40,7 @@ export async function readHybridSnapshot(db, from, cacheTo, aggMode, normVersion
         ORDER BY d.day_at`
     ).bind(from, cacheTo, aggMode, normVersion, employeeIdFilter),
     db.prepare(
-      `SELECT day_at, agg_mode, norm_version, user_rows, unknown_types_json, fetched_at
+      `SELECT day_at, agg_mode, norm_version, identity_version, user_rows, unknown_types_json, fetched_at
          FROM usage_prom_sync_days WHERE day_at BETWEEN ?1 AND ?2 ORDER BY day_at`
     ).bind(from, cacheTo),
     db.prepare('SELECT day_at, agg_mode, norm_version FROM usage_prom_sync_days ORDER BY day_at'),

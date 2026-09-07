@@ -64,20 +64,26 @@ adminUsers.post('/', async (c) => {
     return c.json({ error: { code: 'CONFLICT', message: 'email already in use' } }, 409)
   }
 
-  // §5.8 — 신규 계정 기본값. 이메일 로컬파트가 유효하고 아직 아무도 보유하지 않았으면 그 값으로
-  // 채운다(폴백을 읽기에서 쓰기로 옮긴 결정의 반대쪽 짝, §3.1). 유효하지 않거나 이미 쓰이면 NULL +
-  // warnings로 계정 생성 자체는 그대로 성공시킨다(201) — 연동은 나중에 관리자 편집 API로 채울 수 있다.
+  // M-4 수정(리뷰 2026-09-07) — §5.8의 "로컬파트 자동 부여"를 껐다. "users 중 아무도 보유하지
+  // 않았다"만으로는 주인 없는 관측 축(Prometheus에서 이미 관측 중인데 어떤 허브 계정에도 안 걸린
+  // employee_id — PM 실측: malgn/public/claude 3개가 실제로 이 상태)과 "정말 아무도 안 쓰는 값"을
+  // 구분할 수 없다. 여기서 자동 부여하면 새 계정이 그 관측 축의 과거 사용량을 조용히 물려받는데,
+  // 이 라우트는 감사로그도 쓰지 않는다(§2.4 "판단은 사람이 API로 한다" 원칙 위반). 계정 생성은
+  // 그대로 성공시키되(201) employee_id는 항상 NULL로 두고, 후보값은 warnings로만 안내한다 — 실제
+  // 연결은 관리자가 PUT /api/admin/users/:id/employee-id로 명시 수행해야 하고, 그 경로만 감사로그를
+  // 남긴다(§5.5). 프런트(app/pages/admin/users.vue submitCreate)는 이 응답의 employee_id/warnings를
+  // 읽지 않으므로(편집 모달의 제안값은 이메일에서 클라이언트가 별도 계산) 계약 변경이 아니다.
   const warnings = []
-  let employeeId = null
+  const employeeId = null
   const candidateId = employeeIdFromEmail(email)
   if (!candidateId) {
     warnings.push('employee_id_underivable')
   } else {
     const holder = await usersDao.findByEmployeeId(c.env.DB, candidateId)
     if (holder) {
-      warnings.push('employee_id_taken')
+      warnings.push('employee_id_taken') // 참고 정보 — 이미 다른 사용자가 보유. 자동 연결은 하지 않는다.
     } else {
-      employeeId = candidateId
+      warnings.push('employee_id_not_auto_linked') // 후보값은 있으나 자동 부여하지 않음 — 관리자가 PUT으로 명시 연결
     }
   }
 
@@ -198,8 +204,10 @@ adminUsers.put('/:id/employee-id', async (c) => {
   }
 
   const localPartMismatch = newValue !== null && newValue !== employeeIdFromEmail(target.email)
-  const updateStmt = usersDao.buildUpdateEmployeeIdStatement(c.env.DB, id, newValue)
-  const { stmt: auditStmt } = auditLogsDao.buildRecordStatement(c.env.DB, {
+  // M-2 수정(리뷰 2026-09-07) — updateStmt에 서버측 CAS(previousValue) 추가, auditStmt는 그 CAS가
+  // 실제로 행을 바꿨을 때만 실행되는 조건부 버전으로 교체(dao/users.js·dao/audit-logs.js 주석 참고).
+  const updateStmt = usersDao.buildUpdateEmployeeIdStatement(c.env.DB, id, newValue, previousValue)
+  const { stmt: auditStmt } = auditLogsDao.buildRecordStatementIfPrecedingChanged(c.env.DB, {
     actorUserId: c.get('userId'),
     action: 'user.employee_id_changed',
     targetType: 'user',
@@ -207,10 +215,11 @@ adminUsers.put('/:id/employee-id', async (c) => {
     metadata: { before: previousValue, after: newValue, target_email: target.email, local_part_mismatch: localPartMismatch }
   })
 
+  let updateResult
   try {
     // §5.5 원자 커밋 — UPDATE와 감사 INSERT를 하나의 batch로. 어느 한쪽만 성공하는 상태(L5·L6)를
     // 만들지 않는다: batch 전체가 실패하면(경합으로 인한 UNIQUE 위반 포함) 둘 다 롤백된다.
-    await c.env.DB.batch([updateStmt, auditStmt])
+    ;[updateResult] = await c.env.DB.batch([updateStmt, auditStmt])
   } catch (err) {
     if (isUniqueConstraintError(err)) {
       // 두 관리자가 같은 값을 동시에 다른 사용자에게 지정(§5.4 L4) — 늦은 쪽만 409, 조용한 덮어쓰기 없음.
@@ -224,6 +233,16 @@ adminUsers.put('/:id/employee-id', async (c) => {
       }, 409)
     }
     throw err
+  }
+
+  // M-2 — 사전 확인(위 findByEmployeeId)을 통과한 뒤에도 다른 관리자가 이 target을 먼저 바꿨으면
+  // CAS(WHERE employee_id IS previousValue)가 걸려 0행이다. 이때 auditStmt도 이미 no-op이었으므로
+  // (buildRecordStatementIfPrecedingChanged) 여기서 그대로 반환해도 잘못된 감사로그가 남지 않는다 —
+  // 클라이언트는 최신 상태를 다시 읽고 재시도해야 한다(§5.4 T-2, 낙관적 잠금이 아니라 서버측 CAS).
+  if (updateResult.meta.changes === 0) {
+    return c.json({
+      error: { code: 'STALE_STATE', message: 'employee_id was changed by another request in the meantime, please retry' }
+    }, 409)
   }
 
   const warnings = []

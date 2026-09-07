@@ -911,14 +911,20 @@ export async function getUsageOverviewHybrid(env, { from, to, refresh, employeeI
   const cacheUnknown = new Set()
   const coveredDays = new Set()
   for (const cov of snapshot.coverageInRange) {
-    if (cov.agg_mode === AGG_MODE && cov.norm_version === NORM_VERSION) {
-      coveredDays.add(cov.day_at)
-      if (cov.unknown_types_json) {
-        try {
-          for (const t of JSON.parse(cov.unknown_types_json)) cacheUnknown.add(t)
-        } catch (err) {
-          console.error('[usage-prom] unknown_types_json parse failed (ignored)', cov.day_at, err)
-        }
+    if (cov.agg_mode !== AGG_MODE || cov.norm_version !== NORM_VERSION) continue
+    // M-3 수정(리뷰 2026-09-07) — 스코프 조회(scope.scoped, 예: GET /api/usage/me)에서는 레거시
+    // employee_id='' 행이 SQL 파라미터 필터(readHybridSnapshot의 d.employee_id=?5)로 이미 빠져
+    // 있으므로, 그 날짜를 "확정 0"으로 보이게 두지 않고 정직하게 gap_days로 되돌린다(§20.1 "0으로
+    // 위장하지 않는다"). 전사 뷰(scope.scoped===false)는 결정30이 요구한 대로 identity_version을
+    // 보지 않는다 — 레거시 데이터가 unk: 행으로 총합에 남아야 하고(read judgment는 agg_mode+
+    // norm_version만), 여기서 걸러내면 총합 보존이 깨진다(T-1 트레이드오프, 스코프 축에서만 적용).
+    if (scope.scoped && cov.identity_version !== IDENTITY_VERSION) continue
+    coveredDays.add(cov.day_at)
+    if (cov.unknown_types_json) {
+      try {
+        for (const t of JSON.parse(cov.unknown_types_json)) cacheUnknown.add(t)
+      } catch (err) {
+        console.error('[usage-prom] unknown_types_json parse failed (ignored)', cov.day_at, err)
       }
     }
   }

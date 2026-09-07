@@ -88,8 +88,16 @@ export async function findByEmployeeId(db, employeeId) {
 /** UPDATE 문 단일 빌더(§5.5 원자 커밋) — server/dao/audit-logs.js의 buildRecordStatement()가 만든
  *  감사 INSERT statement와 함께 호출부(server/api/admin-users.js)가 db.batch()로 원자 커밋한다.
  *  이 함수 자체는 실행(.run())하지 않는다 — batch 안에서만 실행돼야 "UPDATE 성공 + 감사로그 실패"
- *  또는 그 반대의 절반 커밋이 생기지 않는다(L5·L6). */
-export function buildUpdateEmployeeIdStatement(db, id, employeeId) {
+ *  또는 그 반대의 절반 커밋이 생기지 않는다(L5·L6).
+ *
+ *  M-2 수정(리뷰 2026-09-07) — WHERE에 `AND employee_id IS ?`(서버측 CAS)를 추가했다. previousValue는
+ *  호출부가 batch 직전에 읽은 target.employee_id 그대로다. 두 관리자가 동시에 같은 사용자를 편집하면
+ *  뒤쳐진 요청의 UPDATE는 이 조건에 걸려 0행이 되고(meta.changes===0), 호출부가 이를 409로 판정한다
+ *  — 설계 §5.4가 기각한 것은 "클라이언트가 보내는" expected_current 필드다(프런트 계약 변경). 서버가
+ *  자신이 방금 읽은 값을 그대로 WHERE에 되돌리는 이 방식은 프런트에 새 필드를 요구하지 않는다.
+ *  `IS`는 SQLite에서 NULL을 안전하게 비교한다(employee_id가 NULL인 미연동 사용자도 `= ?`가 아니라
+ *  `IS ?`라 정상 동작). */
+export function buildUpdateEmployeeIdStatement(db, id, employeeId, previousValue) {
   const now = new Date().toISOString()
-  return db.prepare('UPDATE users SET employee_id = ?, updated_at = ? WHERE id = ?').bind(employeeId, now, id)
+  return db.prepare('UPDATE users SET employee_id = ?, updated_at = ? WHERE id = ? AND employee_id IS ?').bind(employeeId, now, id, previousValue)
 }

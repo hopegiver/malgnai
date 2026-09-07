@@ -373,3 +373,71 @@ describe('getUsageOverviewHybrid — requireEmployeeScope 안전망(usage-employ
     expect(result.byUnit.size).toBe(0)
   })
 })
+
+describe('getUsageOverviewHybrid — M-3 회귀(리뷰 2026-09-07): 스코프 조회는 레거시(identity_version 불일치) 날짜를 "확정 0"이 아니라 gap으로 보고한다', () => {
+  const HYBRID_AGG_MODE = 'increase'
+  const HYBRID_NORM_VERSION = 'v1'
+
+  // readHybridSnapshot(server/dao/usage-prom-daily.js)의 db.batch() 응답 4개를 그대로 흉내낸다 —
+  // stmts 내용은 보지 않고 고정 응답을 순서대로 돌려준다(SQL 자체는 DAO 계층 책임, 여기는
+  // getUsageOverviewHybrid의 coveredDays/gapDays 판정 로직만 검증).
+  function fakeEnv({ validRows, coverageInRange, allCoverage, overall }) {
+    return {
+      DB: {
+        prepare() { return { bind: () => ({}) } },
+        async batch() {
+          return [{ results: validRows }, { results: coverageInRange }, { results: allCoverage }, { results: [overall] }]
+        }
+      }
+    }
+  }
+
+  // 2026-08-01 = 레거시(migrations/0019가 이전한 employee_id='' 행, identity_version='v0').
+  // 2026-08-02 = 재적재 완료(identity_version='v1'). 둘 다 agg_mode/norm_version은 현재값과 일치 —
+  // "값은 맞지만 축이 옛것"인 상태를 재현한다.
+  const coverageFixture = [
+    { day_at: '2026-08-01', agg_mode: HYBRID_AGG_MODE, norm_version: HYBRID_NORM_VERSION, identity_version: 'v0', user_rows: 1, unknown_types_json: null, fetched_at: '2026-08-02T00:00:00.000Z' },
+    { day_at: '2026-08-02', agg_mode: HYBRID_AGG_MODE, norm_version: HYBRID_NORM_VERSION, identity_version: 'v1', user_rows: 1, unknown_types_json: null, fetched_at: '2026-08-03T00:00:00.000Z' }
+  ]
+  const allCoverageFixture = coverageFixture.map(({ day_at, agg_mode, norm_version }) => ({ day_at, agg_mode, norm_version }))
+
+  it('스코프 조회(employeeId 지정, /me)에서는 v0 날짜가 gap_days에 들어가고 byUnit에도 그 날짜가 나타나지 않는다', async () => {
+    // 실제 D1의 SQL 파라미터 필터(d.employee_id=?5)를 흉내: 레거시 행(employee_id='')은 스코프
+    // 조회에서 이미 제외되므로 validRows에는 v1 날짜(2026-08-02)의 본인 행만 존재한다.
+    const env = fakeEnv({
+      validRows: [
+        { day_at: '2026-08-02', employee_id: 'self', user_email: 'self@malgnsoft.com', employee_name: null, session_count: 1, input_tokens: 100, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0 }
+      ],
+      coverageInRange: coverageFixture,
+      allCoverage: allCoverageFixture,
+      overall: { data_start: '2026-08-01', last_sync_at: '2026-08-03T00:00:00.000Z' }
+    })
+
+    const result = await getUsageOverviewHybrid(env, {
+      from: '2026-08-01', to: '2026-08-02', refresh: false, employeeId: 'self', requireEmployeeScope: true
+    })
+
+    expect(result.gapDays).toEqual(['2026-08-01']) // "확정 0"이 아니라 결손으로 정직하게 보고
+    const entry = result.byUnit.get(unitKeyOf('self', 'self@malgnsoft.com'))
+    expect(entry.days.has('2026-08-01')).toBe(false)
+    expect(entry.days.has('2026-08-02')).toBe(true)
+  })
+
+  it('비스코프 조회(/summary·/users, employeeId 생략)에서는 같은 v0 날짜가 여전히 covered로 남아 총합 보존이 깨지지 않는다(architecture.md §0 결정30)', async () => {
+    const env = fakeEnv({
+      validRows: [
+        { day_at: '2026-08-01', employee_id: '', user_email: 'group@malgnsoft.com', employee_name: null, session_count: 1, input_tokens: 50, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0 },
+        { day_at: '2026-08-02', employee_id: 'self', user_email: 'self@malgnsoft.com', employee_name: null, session_count: 1, input_tokens: 100, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0 }
+      ],
+      coverageInRange: coverageFixture,
+      allCoverage: allCoverageFixture,
+      overall: { data_start: '2026-08-01', last_sync_at: '2026-08-03T00:00:00.000Z' }
+    })
+
+    const result = await getUsageOverviewHybrid(env, { from: '2026-08-01', to: '2026-08-02', refresh: false })
+
+    expect(result.gapDays).toEqual([])
+    const legacyEntry = result.byUnit.get(unitKeyOf(null, 'group@malgnsoft.com'))
+    expect(legacyEntry.days.has('2026-08-01')).toBe(true)
+  })
+})
