@@ -24,11 +24,17 @@
     </div>
 
     <template v-else>
+      <!-- 세 가지 "빈 결과" 문구 분기(docs/design/usage-employee-identity-linking.md §4.5) — "고장"과
+           "사용 안 함"을 구별한다. dailyRows/chartData 계산 로직은 건드리지 않고 이 배너만 얹는다. -->
+      <div v-if="identityMessage" class="alert py-2 small mb-3" :class="identityAlertClass">
+        <i class="bi" :class="meta && (meta.identity_unlinked || meta.identity_invalid) ? 'bi-exclamation-triangle me-1' : 'bi-info-circle me-1'"></i>{{ identityMessage }}
+      </div>
+
       <!-- 빈 상태: 아직 2단계 데이터 없음 -->
       <div v-if="!dailyRows.length && !sessions.length" class="text-center py-5">
         <i class="bi bi-bar-chart d-block mb-3" style="font-size:2.5rem;color:var(--color-ink-faint)"></i>
-        <div class="fw-medium mb-1 text-muted">아직 사용량 데이터가 없습니다</div>
-        <div class="text-faint small">Claude Code 세션이 OTel Collector를 통해 집계되면 이곳에 표시됩니다.</div>
+        <div class="fw-medium mb-1 text-muted">{{ identityMessage ? '표시할 사용량이 없습니다' : '아직 사용량 데이터가 없습니다' }}</div>
+        <div class="text-faint small" v-if="!identityMessage">Claude Code 세션이 OTel Collector를 통해 집계되면 이곳에 표시됩니다.</div>
       </div>
 
       <template v-else>
@@ -211,6 +217,19 @@ export default {
     },
     gapDayCount() {
       return (this.meta && this.meta.gap_days && this.meta.gap_days.length) || 0
+    },
+    // 세 가지 "빈 결과" 문구 분기(§4.5) — identity_unlinked/identity_invalid는 상류 질의 자체를
+    // 하지 않은 상태, user_not_in_metrics는 축은 정상인데 이 기간 관측치가 없는 상태다. 서로 다른
+    // 대응이 필요해 문구도 다르게 안내한다.
+    identityMessage() {
+      if (!this.meta) return ''
+      if (this.meta.identity_unlinked) return '사용량 연동 아이디가 아직 설정되지 않았습니다. 관리자에게 연동을 요청하세요.'
+      if (this.meta.identity_invalid) return '사용량 연동 설정에 문제가 있습니다(관리자 문의).'
+      if (this.meta.user_not_in_metrics) return '이 기간 사용량이 없습니다. 계속 사용 중인데도 비어 있다면 PC의 OTEL_RESOURCE_ATTRIBUTES 설정을 확인하세요.'
+      return ''
+    },
+    identityAlertClass() {
+      return this.meta && (this.meta.identity_unlinked || this.meta.identity_invalid) ? 'alert-warning' : 'alert-info'
     },
   },
   async mounted() {
