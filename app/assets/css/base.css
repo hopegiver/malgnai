@@ -1651,6 +1651,28 @@ textarea.form-control {
 }
 .usage-chart-label--hidden { visibility: hidden; }
 
+/* 전사 사용량 차트의 결측일(meta.gap_days) — 0 막대와 시각적으로 구분되는 표시.
+   docs/design/usage-prometheus-realtime.md §12.1: "0으로 그리면 거짓 표시"이므로 별도 스타일 필요.
+   리뷰 2026-09-03 M-2: 이전에는 결측을 12px 해칭 "막대"로 그려 실제 0(2px)보다 커 보였다 —
+   "결손"이 "다량 사용"으로 오독되는 최악의 형태였다. 이제 막대 높이로 크기를 흉내내지 않고,
+   ① 열 전체 높이를 덮는 옅은(opacity 0.16) 해칭 밴드로 "이 구간은 값이 아니라 공백"임을 면적으로
+   알리고, ② 0인 날과 같은 높이(2px)의 마커만 그 안에 둔다 — 높이 비교로는 절대 0보다 커 보이지
+   않는다. */
+.usage-chart-col--gap { position: relative; }
+.usage-chart-gap-band {
+  position: absolute; left: 1px; right: 1px; top: 0; bottom: 0;
+  background-image: repeating-linear-gradient(45deg, var(--color-ink-faint) 0, var(--color-ink-faint) 1px, transparent 1px, transparent 6px);
+  opacity: 0.16;
+  border-radius: 2px;
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.usage-chart-gap-marker {
+  width: 60%; height: 2px; border-radius: 1px;
+  background-color: var(--color-ink-faint);
+  opacity: 0.9;
+}
+.usage-chart-col--gap .usage-chart-value { color: var(--color-ink-faint); }
+
 /* 접근성 */
 @media (prefers-reduced-motion: reduce) {
   .pd-progress-fill,

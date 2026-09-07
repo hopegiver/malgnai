@@ -1,12 +1,38 @@
 // 사용량/세션 조회 라우트 — api.md §5.5(2단계). JWT 인증(POST /api/sessions만 예외, server/api/sessions.js
-// 참고). 쓰기는 POST /api/sessions 하나뿐이라 이 파일은 GET 전용.
+// 참고). 쓰기는 POST /api/sessions 하나뿐이라 이 파일은 GET 전용(단, /admin/usage/sync는 예외 — §18.7).
+//
+// GET /api/admin/usage/* 3개 라우트는 D1이 아니라 외부 Prometheus를 정본으로 삼는다(rev.2 하이브리드
+// — docs/design/usage-prometheus-realtime.md 정본, architecture.md §0 결정29 개정). /summary·/users는
+// 완결일=D1 롤업 캐시(usage_prom_daily, Cron 적재) + 오늘=라이브 하이브리드, /users/:id는 전 구간
+// 라이브 그대로(§0.1 C9). ⚠️ 승인결정1(2026-09-04)로 GET /api/usage/me도 같은 하이브리드로 전환됐다 —
+// getUsageOverviewHybrid(env, { email })에 요청자 본인 email(JWT 서명 검증값, c.get('userEmail'))만
+// 넘겨 좁힌다. usageDailyDao(usage_daily, 자체수집)는 이제 이 파일 어디서도 import하지 않는다 —
+// 관리자 라우트뿐 아니라 /me도 자체수집 오염과 완전히 분리됐다(§17.2b 경계가 본인 축까지 확장됨).
+// /projects/:id(본인 축)는 sessions 테이블을 직접 재집계하므로(§0 결정25) 애초에 usageDailyDao와 무관.
 import { Hono } from 'hono'
 import * as projectsDao from '../dao/projects.js'
 import * as sessionsDao from '../dao/sessions.js'
-import * as usageDailyDao from '../dao/usage-daily.js'
 import * as usersDao from '../dao/users.js'
 import * as auditLogsDao from '../dao/audit-logs.js'
+import * as usagePromDailyDao from '../dao/usage-prom-daily.js'
 import { requireAdmin } from '../middleware/jwt-auth.js'
+import { withRouteBudget } from '../lib/prom-client.js'
+import { runUsageRollup, ROLLUP_REQUEST_BUDGET_MS, REQUEST_CHUNK_RESERVE_MS } from '../lib/usage-rollup.js'
+// m-2 수정(리뷰 2026-09-03) — todayUTC/addDaysUTC를 이 파일에서 다시 구현하지 않고
+// server/lib/utc-day.js(정본)를 그대로 쓴다(이전에는 usage-prom.js/usage-rollup.js와 함께 3벌 복제).
+import { todayUTCString as todayUTC, addDaysUTC } from '../lib/utc-day.js'
+import {
+  AGG_MODE,
+  getUsageOverviewHybrid,
+  getUserDrilldown,
+  daySummaryRows,
+  mergeD1AndPromUsers,
+  resolveUsersSort,
+  sortUserRows,
+  userDayRows,
+  userTotals,
+  UNAVAILABLE_FIELDS
+} from '../lib/usage-prom.js'
 
 const usage = new Hono()
 
@@ -33,16 +59,6 @@ function isValidCalendarDate(dateStr) {
   return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d
 }
 
-function todayUTC() {
-  return new Date().toISOString().slice(0, 10)
-}
-
-function addDaysUTC(dateStr, days) {
-  const d = new Date(`${dateStr}T00:00:00Z`)
-  d.setUTCDate(d.getUTCDate() + days)
-  return d.toISOString().slice(0, 10)
-}
-
 function resolveAdminRange(c) {
   const rawFrom = c.req.query('from')
   const rawTo = c.req.query('to')
@@ -58,37 +74,113 @@ function resolveAdminRange(c) {
   return { from, to }
 }
 
-function toUserSummaryRow(row) {
-  return {
-    user_id: row.user_id,
-    name: row.name,
-    email: row.email,
-    role: row.role,
-    status: row.status,
-    session_count: row.session_count,
-    input_tokens: row.input_tokens,
-    output_tokens: row.output_tokens,
-    cache_read_tokens: row.cache_read_tokens,
-    cache_write_tokens: row.cache_write_tokens,
-    total_tokens: row.total_tokens,
-    tool_calls: row.tool_calls,
-    tool_errors: row.tool_errors,
-    retries: row.retries,
-    turns: row.turns,
-    api_calls: row.api_calls,
-    active_days: row.active_days,
-    last_active_day: row.last_active_day
-  }
-}
-
 function toPublicUser(user) {
   return { id: user.id, name: user.name, email: user.email, role: user.role, status: user.status }
 }
 
-// GET /api/usage/me?from=&to= — 본인 usage_daily 행(schema.sql §3.12, §0 결정25).
+// 상류(Grafana/Prometheus) 실패를 503 UPSTREAM_UNAVAILABLE로 변환(설계 §9.3) — 401을 그대로
+// 돌려주면 app/assets/js/utils.js의 useApi가 관리자를 강제 로그아웃시키므로 절대 401을 전파하지 않는다.
+// UpstreamError가 아닌(D1 등 진짜 내부 오류) 예외는 그대로 다시 던져 webApp.onError(500)로 넘긴다.
+function upstreamErrorResponse(c, err) {
+  if (err && err.name === 'UpstreamError') {
+    console.error('[admin usage] upstream failure', err.reason, err.message)
+    return c.json({
+      error: {
+        code: 'UPSTREAM_UNAVAILABLE',
+        message: '사용량 데이터 소스에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.',
+        details: { upstream: 'grafana-prometheus', reason: err.reason }
+      }
+    }, 503)
+  }
+  throw err
+}
+
+// /summary·/users 공통 meta(설계 §5.0·§17.6 정본) — getUsageOverviewHybrid()의 결과를 그대로 옮긴다.
+// ⚠️ data_start는 rev.2에서 값이 없어도 키 자체는 항상 포함한다(null 허용, §12.1 — 생략하면 프런트가
+// undefined 분기를 만들고 그 분기가 곧 "결손을 못 본 화면"이 된다).
+function buildHybridMeta(range, hybrid) {
+  const windowClamped = !!(hybrid.dataStart && range.from < hybrid.dataStart)
+  return {
+    from: range.from,
+    to: range.to,
+    source: 'prometheus',
+    fetched_at: hybrid.cacheMeta.fetched_at,
+    cache: { hit: hybrid.cacheMeta.hit, age_seconds: hybrid.cacheMeta.age_seconds, ttl_seconds: hybrid.cacheMeta.ttl_seconds },
+    stale: hybrid.cacheMeta.stale,
+    refresh_throttled: !!hybrid.cacheMeta.refresh_throttled,
+    data_start: hybrid.dataStart,
+    window_clamped: windowClamped,
+    unavailable_fields: UNAVAILABLE_FIELDS,
+    unknown_types: Array.from(hybrid.unknownTypes),
+    segments: hybrid.segments,
+    gap_days: hybrid.gapDays,
+    rollup: hybrid.rollup,
+    live_unavailable: hybrid.liveUnavailable
+  }
+}
+
+// /users/:id(전 구간 라이브) 전용 meta — segments.cached는 항상 null(캐시를 안 쓴다), rollup은
+// 참고용(§5.0 "rollup.cached_through는 참고용으로만 채운다"), gap_days·live_unavailable은 이
+// 라우트에 적용되지 않는 개념이라 항상 빈 배열/false로 고정한다(§20.4 "이 단계가 없다").
+function buildDrilldownMeta(range, drilldown, overall) {
+  const windowClamped = !!(overall.dataStart && range.from < overall.dataStart)
+  return {
+    from: range.from,
+    to: range.to,
+    source: 'prometheus',
+    fetched_at: drilldown.meta.fetched_at,
+    cache: { hit: drilldown.meta.hit, age_seconds: drilldown.meta.age_seconds, ttl_seconds: drilldown.meta.ttl_seconds },
+    stale: drilldown.meta.stale,
+    refresh_throttled: !!drilldown.meta.refresh_throttled,
+    data_start: overall.dataStart,
+    window_clamped: windowClamped,
+    unavailable_fields: UNAVAILABLE_FIELDS,
+    unknown_types: Array.from(drilldown.unknownTypes),
+    segments: { cached: null, live: { from: range.from, to: range.to } },
+    gap_days: [],
+    rollup: { cached_through: null, last_sync_at: overall.lastSyncAt, agg_mode: AGG_MODE },
+    live_unavailable: false
+  }
+}
+
+// GET /api/usage/me?from=&to=&refresh= — 본인 스코프 하이브리드(승인결정1, 2026-09-04 개정 —
+// architecture.md §0 결정29). 관리자 /summary·/users와 완전히 같은 getUsageOverviewHybrid()를
+// email로 좁혀 재사용한다(완결일=D1 롤업 캐시 + 오늘=라이브). 날짜 범위 파싱·검증은 관리자 라우트와
+// 동일한 resolveAdminRange()를 그대로 재사용한다(이름은 "admin"이지만 로직 자체는 일반 날짜 범위
+// 파서다 — from/to 형식 검증·기본값 최근 30일이 이 라우트에도 그대로 맞는다).
+//
+// IDOR 방지: email은 오직 c.get('userEmail')(jwtAuthMiddleware가 JWT 서명 검증 후 c.set한 값,
+// server/middleware/jwt-auth.js)에서만 가져온다 — 쿼리 파라미터·바디로 다른 사용자의 email을 받는
+// 경로 자체가 이 라우트에 없다. getUsageOverviewHybrid 내부에서도 D1 SQL 파라미터(usage-prom-daily.js
+// readHybridSnapshot의 emailFilter)와 PromQL 라벨매처(usage-prom.js resolveEmailScope) 양쪽에서
+// 이중으로 좁혀지므로, 설령 이 핸들러가 실수로 무필터 호출을 하더라도 하위 계층이 스코프를 강제한다.
+//
+// Prometheus에 데이터가 없는 사용자(수집 대상 아님): hybrid.byUser에 그 사용자 항목 자체가 없을 뿐
+// 에러가 아니다 — 빈 Map 엔트리로 폴백해 200 + data:[] + totals 전부 0을 정상 반환한다.
 usage.get('/me', async (c) => {
-  const data = await usageDailyDao.findForUser(c.env.DB, c.get('userId'), parseRange(c))
-  return c.json({ data })
+  const email = c.get('userEmail')
+  const range = resolveAdminRange(c)
+  if (range.error) return c.json({ error: { code: 'VALIDATION_ERROR', message: range.error } }, 400)
+  const refresh = c.req.query('refresh') === '1'
+
+  let hybrid
+  try {
+    hybrid = await getUsageOverviewHybrid(c.env, { from: range.from, to: range.to, refresh, email })
+  } catch (err) {
+    return upstreamErrorResponse(c, err)
+  }
+
+  const emailLower = email.toLowerCase()
+  const entry = hybrid.byUser.get(emailLower) || { displayEmail: email, employeeName: null, days: new Map() }
+  const data = userDayRows(entry).map((r) => ({
+    ...r, tool_calls: null, tool_errors: null, retries: null, turns: null, api_calls: null, updated_at: null
+  }))
+  const totals = userTotals(entry)
+
+  const meta = buildHybridMeta(range, hybrid)
+  if (!hybrid.byUser.has(emailLower)) meta.user_not_in_metrics = true
+
+  return c.json({ data, totals, meta })
 })
 
 // GET /api/usage/projects/:id?from=&to= — 본인 소유 project만. usage_daily엔 project_id가 없어
@@ -126,32 +218,45 @@ usage.get('/sessions', async (c) => {
 
 export default usage
 
-// GET /api/admin/usage/summary?from=&to= — administrator만. 전사(전 사용자) 일별 추세
-// (organizations 없음 → day_at으로만 GROUP, api.md §5.6).
+// GET /api/admin/usage/summary?from=&to=&refresh= — administrator만. 전사(전 사용자) 일별 추세.
+// rev.2 하이브리드(완결일=D1 롤업 캐시 + 오늘=라이브, docs/design/usage-prometheus-realtime.md
+// §19.4 정본, architecture.md §0 결정29 개정). /users와 완전히 같은 getUsageOverviewHybrid() 결과를
+// 축만 바꿔 접는다 — 합성은 그 함수 한 곳에서만 일어나므로 KPI(요약)와 표(목록)의 총합이 구조적으로
+// 일치한다(§5.2).
 export const adminUsage = new Hono()
 adminUsage.get('/summary', requireAdmin, async (c) => {
-  const data = await usageDailyDao.sumAllByDay(c.env.DB, parseRange(c))
-  return c.json({ data })
+  const range = resolveAdminRange(c)
+  if (range.error) return c.json({ error: { code: 'VALIDATION_ERROR', message: range.error } }, 400)
+  const refresh = c.req.query('refresh') === '1'
+
+  let hybrid
+  try {
+    // M-1 수정 — withRouteBudget은 이제 getUsageOverviewHybrid() 내부(라이브 질의 promise 하나)에만
+    // 걸린다(usage-prom.js). 여기서 전체 호출을 다시 감싸면 예산 초과 시 이미 읽은 D1 캐시 구간까지
+    // 버려지고 503이 나가던 원래 버그가 재발한다 — 절대 다시 감싸지 말 것.
+    hybrid = await getUsageOverviewHybrid(c.env, { from: range.from, to: range.to, refresh })
+  } catch (err) {
+    return upstreamErrorResponse(c, err)
+  }
+
+  const data = daySummaryRows(hybrid.byUser)
+  const meta = buildHybridMeta(range, hybrid)
+
+  return c.json({ data, meta })
 })
 
-// GET /api/admin/usage/users?from=&to=&sort=&order=&limit= — 사용자별 기간 합계 목록(api.md §5.8.1).
+// GET /api/admin/usage/users?from=&to=&sort=&order=&limit=&refresh= — 사용자별 기간 합계 목록
+// (docs/design/usage-prometheus-realtime.md §5.1). D1 users를 좌항으로 두고 Prometheus 사용량을
+// 이메일로 병합(§5.4) — D1에 없는 Prometheus-only 사용자도 버리지 않고 포함한다.
 adminUsage.get('/users', requireAdmin, async (c) => {
   const range = resolveAdminRange(c)
   if (range.error) return c.json({ error: { code: 'VALIDATION_ERROR', message: range.error } }, 400)
 
-  const sort = c.req.query('sort') || 'tokens'
-  // Object.hasOwn으로 own-property만 인정 — plain object 화이트리스트는 constructor/toString/
-  // valueOf/hasOwnProperty/__proto__ 같은 값이 Object.prototype 체인을 타고 truthy로 통과하는
-  // 우회가 있다(M-1). in 연산자도 프로토타입 체인을 보므로 hasOwn만 안전하다.
-  const sortColumn = Object.hasOwn(usageDailyDao.USER_SUMMARY_SORT_COLUMNS, sort)
-    ? usageDailyDao.USER_SUMMARY_SORT_COLUMNS[sort]
-    : undefined
-  if (!sortColumn) {
+  const rawSort = c.req.query('sort') || 'tokens'
+  const sortResolution = resolveUsersSort(rawSort)
+  if (!sortResolution.sort) {
     return c.json({
-      error: {
-        code: 'VALIDATION_ERROR',
-        message: `sort must be one of ${Object.keys(usageDailyDao.USER_SUMMARY_SORT_COLUMNS).join(', ')}`
-      }
+      error: { code: 'VALIDATION_ERROR', message: 'sort must be one of tokens, sessions, name, last_active, cost' }
     }, 400)
   }
 
@@ -159,31 +264,72 @@ adminUsage.get('/users', requireAdmin, async (c) => {
   if (rawOrder !== undefined && rawOrder !== 'asc' && rawOrder !== 'desc') {
     return c.json({ error: { code: 'VALIDATION_ERROR', message: 'order must be asc or desc' } }, 400)
   }
-  // order 기본값은 desc, 단 sort=name일 때만 기본 asc(api.md §5.8.1 쿼리 파라미터 표).
-  const order = rawOrder || (sort === 'name' ? 'asc' : 'desc')
-  const orderDirection = order === 'asc' ? 'ASC' : 'DESC'
-
+  // order 기본값은 desc, 단 sort=name일 때만 기본 asc(기존 §5.8.1 쿼리 파라미터 표 관례 유지).
+  const order = rawOrder || (sortResolution.sort === 'name' ? 'asc' : 'desc')
   const limit = parseLimit(c, 100, 500)
+  const refresh = c.req.query('refresh') === '1'
 
-  const rows = await usageDailyDao.listUserSummaries(c.env.DB, {
-    from: range.from,
-    to: range.to,
-    sortColumn,
-    orderDirection,
-    fetchLimit: limit + 1
-  })
-  const truncated = rows.length > limit
-  const data = (truncated ? rows.slice(0, limit) : rows).map(toUserSummaryRow)
+  let hybrid
+  let d1Users
+  try {
+    // M-1 수정 — 이유는 /summary와 동일(위 주석 참고). usersDao.listAll은 D1 단일 쿼리라 예산으로
+    // 보호할 만큼 느릴 이유가 없고, getUsageOverviewHybrid 자체가 라이브 구간만 내부에서 예산을 건다.
+    ;[hybrid, d1Users] = await Promise.all([
+      getUsageOverviewHybrid(c.env, { from: range.from, to: range.to, refresh }),
+      usersDao.listAll(c.env.DB)
+    ])
+  } catch (err) {
+    return upstreamErrorResponse(c, err)
+  }
 
-  return c.json({
-    data,
-    meta: { from: range.from, to: range.to, sort, order, limit, returned: data.length, truncated }
-  })
+  const merged = mergeD1AndPromUsers(d1Users, hybrid.byUser)
+  const sorted = sortUserRows(merged, sortResolution.field, order)
+  const truncated = sorted.length > limit
+  const data = truncated ? sorted.slice(0, limit) : sorted
+
+  const meta = buildHybridMeta(range, hybrid)
+  meta.sort = sortResolution.sort
+  meta.order = order
+  meta.limit = limit
+  meta.returned = data.length
+  meta.truncated = truncated
+
+  return c.json({ data, meta })
 })
 
-// GET /api/admin/usage/users/:id?from=&to= — 특정 사용자 1명의 일별 롤업(api.md §5.8.2).
-// data shape는 GET /api/usage/me와 완전히 동일(usageDailyDao.findForUser 그대로 재사용,
-// §5.8.4 함정8 — 프런트 컴포넌트 재사용 전제).
+// POST /api/admin/usage/sync — administrator만. Cron(§18.1)과 동일한 runUsageRollup()을 짧은 예산
+// (ROLLUP_REQUEST_BUDGET_MS)으로 1회 실행(설계 §18.7 — 있으면 좋음, 필수 아님). 배포 직후 즉시
+// 채우기 / Cron 실패 후 즉시 복구 용도. 부분 성공도 그대로 200(커밋된 날짜는 실제로 커밋됐다) —
+// 한 청크도 못 하면(=상류가 완전히 죽어 있으면) UpstreamError가 그대로 던져져 기존 503 매핑을 탄다.
+adminUsage.post('/sync', requireAdmin, async (c) => {
+  try {
+    // C-1 수정 — 요청 경로 전용 reserve(REQUEST_CHUNK_RESERVE_MS)를 함께 넘긴다. Cron 전용
+    // reserve(CHUNK_RESERVE_MS=35000)를 그대로 썼을 때 요청 예산(구 8000ms)보다 항상 커서 청크가
+    // 단 하나도 실행되지 못하던 산술 모순이 여기서 발생했었다(server/lib/usage-rollup.js 참고).
+    const result = await runUsageRollup(c.env, { budgetMs: ROLLUP_REQUEST_BUDGET_MS, reserveMs: REQUEST_CHUNK_RESERVE_MS })
+    // m-8 수정(리뷰 2026-09-03) — 이 라우트는 전사 사용량 D1 롤업 캐시에 직접 쓰는 유일한 관리자
+    // 액션이라 감사기록을 남긴다(migrations/0018). best-effort(기존 admin.cross_user_view 방침과
+    // 동일) — INSERT 실패가 이미 끝난 적재 자체를 실패로 만들지 않는다.
+    try {
+      await auditLogsDao.record(c.env.DB, {
+        actorUserId: c.get('userId'),
+        action: 'admin.usage_sync',
+        targetType: null,
+        targetId: null,
+        metadata: { committed_days: result.committed_days.length, remaining_gap_days: result.remaining_gap_days.length, budget_exhausted: result.budget_exhausted }
+      })
+    } catch (err) {
+      console.error('admin.usage_sync audit log write failed', err)
+    }
+    return c.json(result)
+  } catch (err) {
+    return upstreamErrorResponse(c, err)
+  }
+})
+
+// GET /api/admin/usage/users/:id?from=&to=&refresh= — 특정 사용자 1명의 일별 롤업 + 기간 합계 +
+// 모델별 사용량(docs/design/usage-prometheus-realtime.md §5.3). GET /api/usage/me와의 shape 동일화
+// 전제는 이 라우트에 한해 폐기(§5.8.4 함정8 폐기) — Prometheus에 없는 5개 필드는 null.
 adminUsage.get('/users/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const target = await usersDao.findById(c.env.DB, id)
@@ -191,10 +337,23 @@ adminUsage.get('/users/:id', requireAdmin, async (c) => {
 
   const range = resolveAdminRange(c)
   if (range.error) return c.json({ error: { code: 'VALIDATION_ERROR', message: range.error } }, 400)
+  const refresh = c.req.query('refresh') === '1'
 
-  const data = await usageDailyDao.findForUser(c.env.DB, id, range)
+  let drilldown
+  let overall
+  try {
+    ;[drilldown, overall] = await withRouteBudget(Promise.all([
+      getUserDrilldown(c.env, { from: range.from, to: range.to, email: target.email, refresh }),
+      // meta.data_start는 rev.2부터 D1 MIN(day_at) 한 줄로 얻는다(§4.5) — 상류 180일 프로브(rev.1,
+      // 실측 ~4초로 상류 자체 타임아웃 코앞이라 사실상 비활성이었다)는 폐기했다. 이 라우트는 전 구간
+      // 라이브라 캐시를 안 쓰지만, data_start는 "우리가 답할 수 있는 첫 날"의 참고값으로 여전히 싣는다.
+      usagePromDailyDao.readOverallCoverage(c.env.DB)
+    ]))
+  } catch (err) {
+    return upstreamErrorResponse(c, err)
+  }
 
-  // 감사 로그는 best-effort(§5.8.0) — INSERT 실패가 이 읽기 전용 조회 자체를 막지 않는다.
+  // 감사 로그는 best-effort(기존 §5.8.0 방침 유지) — INSERT 실패가 이 읽기 전용 조회 자체를 막지 않는다.
   try {
     await auditLogsDao.record(c.env.DB, {
       actorUserId: c.get('userId'),
@@ -207,5 +366,41 @@ adminUsage.get('/users/:id', requireAdmin, async (c) => {
     console.error('admin.cross_user_view audit log write failed', err)
   }
 
-  return c.json({ user: toPublicUser(target), data, meta: { from: range.from, to: range.to } })
+  const data = drilldown.rows.map((r) => ({
+    user_id: target.id,
+    day_at: r.day_at,
+    session_count: r.session_count,
+    input_tokens: r.input_tokens,
+    output_tokens: r.output_tokens,
+    cache_read_tokens: r.cache_read_tokens,
+    cache_write_tokens: r.cache_write_tokens,
+    total_tokens: r.total_tokens,
+    cost_usd: r.cost_usd,
+    tool_calls: null, tool_errors: null, retries: null, turns: null, api_calls: null,
+    updated_at: null
+  }))
+
+  const totals = {
+    session_count: drilldown.totals.session_count,
+    input_tokens: drilldown.totals.input_tokens,
+    output_tokens: drilldown.totals.output_tokens,
+    cache_read_tokens: drilldown.totals.cache_read_tokens,
+    cache_write_tokens: drilldown.totals.cache_write_tokens,
+    total_tokens: drilldown.totals.total_tokens,
+    cost_usd: drilldown.totals.cost_usd,
+    active_time_seconds: drilldown.totals.active_time_seconds,
+    active_days: drilldown.totals.active_days
+  }
+
+  const meta = buildDrilldownMeta(range, drilldown, overall)
+  if (drilldown.notInMetrics) meta.user_not_in_metrics = true
+
+  return c.json({
+    user: toPublicUser(target),
+    data,
+    totals,
+    by_model: drilldown.byModel,
+    code: null, // G2(lines_of_code 등 라벨셋) 미확인 — 확인 전까지 null(설계 §4.5 R4)
+    meta
+  })
 })
