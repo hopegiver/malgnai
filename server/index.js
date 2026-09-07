@@ -13,6 +13,7 @@ import adminUsersRouter from './api/admin-users.js'
 import catalogRouter from './api/catalog.js'
 import adminCatalogRouter from './api/admin-catalog.js'
 import { syncCatalog } from './lib/catalog-sync.js'
+import { runUsageRollup, ROLLUP_CRON_BUDGET_MS } from './lib/usage-rollup.js'
 import oauthRouter, { registerWellKnownRoutes } from './api/oauth.js'
 import sessionsRouter from './api/sessions.js'
 import usageRouter, { adminUsage as adminUsageRouter } from './api/usage.js'
@@ -92,15 +93,36 @@ export default {
     return new Response('Not found', { status: 404 })
   },
 
-  // Cloudflare Cron Trigger(wrangler.jsonc triggers.crons, 1일 1회) — malgn-agent 카탈로그
-  // 자동 동기화. 관리자 수동 트리거(POST /api/admin/catalog/sync)와 동일한 syncCatalog()를
-  // 그대로 호출한다. 실패해도 Worker 자체는 죽지 않도록 캐치해 로그만 남긴다(다음 cron 또는
-  // 관리자 수동 트리거로 회복 가능 — 매일 재시도되는 배치라 알림/재시도 큐는 v1에서 두지 않는다).
+  // Cloudflare Cron Trigger(wrangler.jsonc triggers.crons) — controller.cron 문자열로 배치를
+  // 분기한다(docs/design/usage-prometheus-realtime.md §18.3). ⚠️ 아래 문자열 리터럴은
+  // wrangler.jsonc의 triggers.crons와 공백까지 정확히 일치해야 한다(Cloudflare 공식 요구) — 이
+  // 값을 바꾸면 반드시 wrangler.jsonc도 같이 바꿀 것, 한쪽만 바꾸면 그 회차는 조용히 아무것도
+  // 하지 않는다.
+  //
+  // 두 배치(카탈로그 동기화 / 사용량 롤업 적재)는 서로 독립된 ctx.waitUntil + 각자 catch에 넣는다
+  // (Promise.all로 묶지 않는다) — 한쪽의 실패가 다른 쪽의 성공 여부를 가리지 않게 하기 위함
+  // (설계 §18.3 규칙1). 실패해도 Worker 자체는 죽지 않는다 — 카탈로그는 다음 cron 또는 관리자 수동
+  // 트리거, 사용량 롤업은 다음 회차의 결손 탐지가 자동으로 회복한다(알림/재시도 큐는 v1에서 두지
+  // 않음, 기존 카탈로그 동기화와 동일 방침).
   async scheduled(controller, env, ctx) {
-    ctx.waitUntil(
-      syncCatalog(env.DB)
-        .then((result) => console.log('[catalog-sync] cron sync done', JSON.stringify(result)))
-        .catch((err) => console.error('[catalog-sync] cron sync failed', err))
-    )
+    if (controller.cron === '0 18 * * *') {
+      ctx.waitUntil(
+        syncCatalog(env.DB)
+          .then((result) => console.log('[catalog-sync] cron sync done', JSON.stringify(result)))
+          .catch((err) => console.error('[catalog-sync] cron sync failed', err))
+      )
+      // 18:00 UTC 회차는 01:00 UTC 주 적재가 실패했을 때의 같은 날 보조 재시도를 겸한다(§18.1).
+      ctx.waitUntil(
+        runUsageRollup(env, { budgetMs: ROLLUP_CRON_BUDGET_MS })
+          .catch((err) => console.error('[usage-rollup] cron run failed', err))
+      )
+    } else if (controller.cron === '0 1 * * *') {
+      ctx.waitUntil(
+        runUsageRollup(env, { budgetMs: ROLLUP_CRON_BUDGET_MS })
+          .catch((err) => console.error('[usage-rollup] cron run failed', err))
+      )
+    } else {
+      console.error('[scheduled] unknown cron trigger — no-op', controller.cron)
+    }
   }
 }

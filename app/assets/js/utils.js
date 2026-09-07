@@ -311,13 +311,69 @@ function usagePeriodRange(key) {
 // 컴포넌트에서 window.USAGE_PERIOD_PRESETS로 접근할 가능성을 대비해 명시 등록.
 window.USAGE_PERIOD_PRESETS = USAGE_PERIOD_PRESETS
 
-/** 큰 수를 1.2M / 980K 식으로 축약(토큰 사용량 등). */
-function formatTokens(n) {
+/**
+ * 큰 수를 1.2M / 980K 식으로 축약(토큰 사용량 등).
+ * @param {number|null|undefined} n
+ * @param {{ nullAs?: string }} [opts] - null/undefined를 '0'이 아닌 다른 문자로 렌더하고 싶을 때만
+ *   지정한다(예: '—'). 기본 동작(=null도 '0')은 기존 화면(app/pages/usage.vue 등)이 이미 의존하고
+ *   있어 바꾸지 않는다 — 신규 화면(관리자 사용량)에서만 옵션으로 opt-in한다(리뷰 2026-09-03 m-1:
+ *   "null 토큰이 0으로 보이면 그 자체가 거짓 표시" 방어선을 공유 유틸 회귀 없이 추가).
+ */
+function formatTokens(n, opts = {}) {
+  if (n === null || n === undefined) return 'nullAs' in opts ? opts.nullAs : '0'
   if (!n) return '0'
   if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B'
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
   return String(n)
+}
+
+/** USD 비용을 '$12,345.67' 형식으로(n-2: 큰 자릿수 가독성을 위해 천단위 구분). null/undefined는
+ * "측정 불가"이지 0원이 아니므로 '—'(em dash, 설계 §12 표기)로 구분 표시한다
+ * (docs/design/usage-prometheus-realtime.md §12.1 — null을 0으로 렌더하지 않는 원칙). */
+function formatCost(n) {
+  if (n === null || n === undefined) return '—'
+  return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+/**
+ * 관리자 사용량 화면(§9.3 UPSTREAM_UNAVAILABLE) 503 응답의 `error.details.reason`을 실행 가능한
+ * 안내 문구로 매핑한다(리뷰 2026-09-03 M-4). reason이 없거나 매핑에 없는 값이면 서버 message(또는
+ * 공용 문구)로 폴백하고 재시도 가능한 것으로 취급한다.
+ * `retryable: false`인 항목(not_configured/auth/invalid_response)은 "잠시 후 다시 시도"가 영원히
+ * 틀린 안내이므로 호출부가 재시도 버튼을 숨기는 데 쓴다.
+ * @param {{message?:string, details?:{reason?:string}}|string|null} error - useApi()가 반환하는 error
+ * @returns {{message: string, retryable: boolean}}
+ */
+const USAGE_ERROR_REASON_MESSAGES = {
+  not_configured: { message: '사용량 수집이 아직 설정되지 않았습니다(관리자 설정 필요).', retryable: false },
+  auth: { message: '상류 자격증명이 만료됐습니다(관리자 설정 필요).', retryable: false },
+  timeout: { message: '사용량 데이터 소스 응답이 지연되고 있습니다.', retryable: true },
+  upstream_error: { message: '사용량 데이터 소스에 일시적인 문제가 발생했습니다.', retryable: true },
+  invalid_response: { message: '사용량 데이터 소스 응답 형식이 예상과 다릅니다(관리자 확인 필요).', retryable: false },
+  circuit_open: { message: '반복된 실패로 잠시 요청을 멈췄습니다.', retryable: true },
+}
+function usageErrorMessage(error) {
+  const reason = error && typeof error === 'object' ? error.details?.reason : null
+  const mapped = reason && USAGE_ERROR_REASON_MESSAGES[reason]
+  if (mapped) return mapped
+  const message = (error && typeof error === 'object' ? error.message : error) || '사용량 데이터를 불러오지 못했습니다.'
+  return { message, retryable: true }
+}
+
+/** 'YYYY-MM-DD' from~to(포함, UTC 기준) 사이 날짜를 빠짐없이 나열. 관리자 전사 사용량 차트가
+ * meta.gap_days(결측일)를 0 막대가 아니라 결측으로 그리려면 날짜축을 서버 응답과 무관하게
+ * 스스로 채워야 해서 필요(§12.1 — "결측을 0으로 그리면 거짓 표시"). */
+function enumerateUsageDays(from, to) {
+  if (!from || !to) return []
+  const days = []
+  let cur = new Date(from + 'T00:00:00Z')
+  const end = new Date(to + 'T00:00:00Z')
+  while (cur.getTime() <= end.getTime()) {
+    days.push(cur.toISOString().slice(0, 10))
+    cur = new Date(cur.getTime() + 86400000)
+  }
+  return days
 }
 
 /** links_json/artifacts 같은 문자열 JSON 배열 필드 파싱. 실패/빈 값/비배열은 []. 이미 배열이면 그대로. */

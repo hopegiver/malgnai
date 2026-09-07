@@ -45,10 +45,36 @@
     "enabled": true
   },
 
+  // 사용량 통계의 상류 — 회사 OTel/Prometheus를 Grafana 데이터소스 프록시로 읽는다
+  // (docs/architecture.md §0 결정29, docs/design/usage-prometheus-realtime.md).
+  // 비밀이 아닌 값만 여기 둔다. GRAFANA_API_TOKEN은 `wrangler secret put`으로만 주입한다.
+  //
+  // ⚠️ 반드시 https + 호스트명이어야 한다. Cloudflare Workers는 raw IP로 아웃바운드 fetch를
+  // 하지 못하고(엣지가 403 `error code: 1003`으로 반려), 프로덕션은 server/lib/prom-client.js의
+  // validateUpstreamScheme()가 https가 아니면 상류로 나가지 않고 fail-closed한다.
+  // 이 호스트는 Cloudflare DNS 프록시 + Origin Rule(목적지 포트 3000)로 오리진 Grafana에
+  // 연결된다 — 구성 절차는 docs/runbook/grafana-cloudflare-dns-proxy.md.
+  "vars": {
+    "GRAFANA_BASE_URL": "https://otel.apiserver.kr",
+    "GRAFANA_PROM_DATASOURCE_UID": "cftfxno3cwm4gd"
+  },
+
+  // 로컬 dev 서버 고유 포트 — wrangler 기본값(8787)은 다른 프로젝트도 미지정 시 같이 쓰는
+  // 값이라 동시 작업 중 포트 충돌·오인 kill 사고가 났음(2026-09-01). mycerti=8001,
+  // malgnsales=8002, malgn-wiki=8003, performance=8790과 겹치지 않는 값으로 고정.
+  "dev": {
+    "port": 8004
+  },
+
   // malgn-dev 카탈로그(agents/skills/knowledge) 1일 1회 자동 동기화 — server/index.js의
   // scheduled 핸들러가 server/lib/catalog-sync.js의 syncCatalog()를 호출한다. 매일 18:00 UTC
   // (KST 03:00) — 트래픽 낮은 새벽 시간대, GitHub 미인증 60req/h 한도와도 무관(하루 1회뿐).
+  //
+  // "0 1 * * *"는 사용량 Prometheus 롤업 캐시 적재(신규, docs/design/usage-prometheus-realtime.md
+  // §18.1·§11.1) — 01:00 UTC 주 적재 + 기존 18:00 UTC 회차가 보조 재시도를 겸한다. ⚠️ 이 두
+  // 문자열은 server/index.js의 scheduled(controller,…) 분기 문자열과 공백까지 정확히 일치해야
+  // 한다(Cloudflare 공식 요구 — 한쪽만 바꾸면 그 회차는 조용히 아무것도 하지 않는다).
   "triggers": {
-    "crons": ["0 18 * * *"]
+    "crons": ["0 18 * * *", "0 1 * * *"]
   }
 }
