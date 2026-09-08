@@ -58,6 +58,15 @@ export async function listForUser(db, userId) {
   return results
 }
 
+/** 전체 사용자의 프로젝트 개수를 한 번에 집계(GET /api/admin/users의 project_count 병합용, api.md §5.6).
+ *  Map<user_id, count> — 프로젝트가 없는 사용자는 이 Map에 키 자체가 없다(호출부가 0으로 기본 처리). */
+export async function countAllByUser(db) {
+  const { results } = await db.prepare('SELECT user_id, COUNT(*) as count FROM projects GROUP BY user_id').all()
+  const map = new Map()
+  for (const row of results) map.set(row.user_id, row.count)
+  return map
+}
+
 /** 같은 repository_key에 대한 여러 사용자의 작업을 조인해 열람(administrator 전용, api.md §5.3). */
 export async function listByRepositoryKey(db, repositoryKey) {
   const { results } = await db.prepare(

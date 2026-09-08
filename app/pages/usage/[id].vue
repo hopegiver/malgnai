@@ -156,7 +156,7 @@
                 <table class="table table-sm mb-0">
                   <thead><tr><th>날짜</th><th class="text-end">세션</th><th class="text-end">입력</th><th class="text-end">출력</th><th class="text-end">캐시읽기</th><th class="text-end">비용</th></tr></thead>
                   <tbody>
-                    <tr v-for="row in dailyRows" :key="row.day_at">
+                    <tr v-for="row in sortedDailyRows" :key="row.day_at">
                       <td>{{ row.day_at }}</td>
                       <td class="text-end">{{ row.session_count }}</td>
                       <td class="text-end">{{ formatTokens(row.input_tokens) }}</td>
@@ -291,6 +291,11 @@ export default {
         barPx: Math.max(2, Math.round((r.tokens / max) * maxBarPx)),
         shortDay: r.day.slice(5),
       }))
+    },
+    // "일별 사용량" 표만 최신 날짜가 먼저 보이도록 정렬한다(chartData/dailyRows 원본은 그대로
+    // 둔다). 이 페이지는 day_at만 있고 model 컬럼이 없어 단순 날짜 내림차순이면 된다.
+    sortedDailyRows() {
+      return [...this.dailyRows].sort((a, b) => b.day_at.localeCompare(a.day_at))
     },
   },
   async mounted() {

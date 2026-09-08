@@ -17,7 +17,7 @@
  * UsagePeriodPreset — 사용량 화면 공통 기간 프리셋(오늘/최근7일/최근30일) 선택기.
  *
  * 목적: 전사 통합 대시보드(app/pages/admin/usage/index.vue)와 사용자별 드릴다운
- * (app/pages/admin/usage/[id].vue)이 "오늘"의 정의(UTC 기준, utils.js isoDaysAgo())를
+ * (app/pages/usage/[id].vue)이 "오늘"의 정의(UTC 기준, utils.js isoDaysAgo())를
  * 어긋나지 않게 같은 소스로 공유한다(docs/api.md §5.8.0). 기존 app/pages/usage.vue는
  * 프리셋 버튼이 아니라 직접 날짜 입력 UI라 이 컴포넌트를 쓰도록 바꾸지 않았다(동작 불변 원칙).
  *

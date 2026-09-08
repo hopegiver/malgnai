@@ -54,6 +54,8 @@
                 <th>역할</th>
                 <th>상태</th>
                 <th>연동 아이디</th>
+                <th class="text-end">프로젝트</th>
+                <th class="text-nowrap">최근 사용일</th>
                 <th class="text-end">작업</th>
               </tr>
             </thead>
@@ -66,6 +68,13 @@
                 <td>
                   <code v-if="u.employee_id">{{ u.employee_id }}</code>
                   <span v-else class="badge bg-light text-dark">미연동</span>
+                </td>
+                <td class="text-end">{{ u.project_count ?? 0 }}</td>
+                <td class="text-nowrap">
+                  <span v-if="usageUnavailable">-</span>
+                  <span v-else-if="!u.employee_id" class="badge bg-light text-dark">미연동</span>
+                  <span v-else-if="!usageByUserId[u.id] || !usageByUserId[u.id].last_active_day" class="text-muted">사용 기록 없음</span>
+                  <span v-else>{{ formatDate(usageByUserId[u.id].last_active_day) }}</span>
                 </td>
                 <td class="text-end">
                   <div class="d-flex justify-content-end gap-2">
@@ -249,6 +258,11 @@ export default {
       busyIds: new Set(),
       rowError: '',
 
+      // 최근 사용일(GET /api/admin/usage/users) 병합 결과. user_id -> { employee_id, last_active_day, ... }.
+      // 이 보조 호출은 실패해도 사용자 목록 자체는 정상 표시돼야 하므로 별도로 관리한다.
+      usageByUserId: {},
+      usageUnavailable: false,
+
       showCreateModal: false,
       createForm: { email: '', name: '', role: 'employee' },
       creating: false,
@@ -282,7 +296,11 @@ export default {
       this.loading = true
       this.error = false
       this.rowError = ''
-      const { data, error } = await useApi('/api/admin/users')
+      const [usersResult] = await Promise.all([
+        useApi('/api/admin/users'),
+        this.loadUsage(),
+      ])
+      const { data, error } = usersResult
       this.loading = false
       if (error) {
         this.error = true
@@ -290,6 +308,22 @@ export default {
         return
       }
       this.users = data?.data || []
+    },
+    // 최근 사용일 보조 데이터(Prometheus 조회 포함 — 실패 가능). 실패해도 사용자 목록 표시를
+    // 막지 않도록 별도 try로 분리하고, 실패 시 '최근 사용일' 컬럼만 '-'로 표시한다.
+    async loadUsage() {
+      this.usageUnavailable = false
+      const { data, error } = await useApi('/api/admin/usage/users?limit=500&sort=name&order=asc')
+      if (error) {
+        this.usageUnavailable = true
+        this.usageByUserId = {}
+        return
+      }
+      const map = {}
+      for (const row of data?.data || []) {
+        if (row && row.user_id != null) map[row.user_id] = row
+      }
+      this.usageByUserId = map
     },
     async toggleRole(u) {
       const nextRole = u.role === 'administrator' ? 'employee' : 'administrator'

@@ -7,6 +7,7 @@
 // db.batch()로 원자 커밋하고, 다른 사용자가 보유 중인 값은 409로 거절해 무언의 이전을 막는다(§4.4 S2).
 import { Hono } from 'hono'
 import * as usersDao from '../dao/users.js'
+import * as projectsDao from '../dao/projects.js'
 import * as auditLogsDao from '../dao/audit-logs.js'
 import * as sharedWorkstationsDao from '../dao/usage-shared-workstations.js'
 import { hashPassword, generateTempPassword } from '../lib/tokens.js'
@@ -21,8 +22,10 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const adminUsers = new Hono()
 adminUsers.use('*', requireAdmin)
 
-function toPublicUser(user) {
-  return { id: user.id, email: user.email, name: user.name, role: user.role, status: user.status, employee_id: user.employee_id || null, created_at: user.created_at }
+// projectCount 생략 시 0 — POST(신규 계정)는 항상 프로젝트 0개라 정확하고, PATCH/PUT employee-id는
+// 이 필드를 소비하지 않는 화면 갱신 경로라 조회를 추가하지 않는다(GET / 만 실제 집계값을 채운다).
+function toPublicUser(user, projectCount = 0) {
+  return { id: user.id, email: user.email, name: user.name, role: user.role, status: user.status, employee_id: user.employee_id || null, created_at: user.created_at, project_count: projectCount }
 }
 
 // D1 UNIQUE 위반 메시지 판별(§5.4 L5 — 사전 확인 통과 후 커밋 시점 경합). D1/SQLite 드라이버는
@@ -32,10 +35,15 @@ function isUniqueConstraintError(err) {
   return !!err && typeof err.message === 'string' && err.message.includes('UNIQUE constraint failed')
 }
 
-// GET /api/admin/users — 전체 사용자 목록(password_hash 제외).
+// GET /api/admin/users — 전체 사용자 목록(password_hash 제외). project_count(정수, 프로젝트가
+// 없으면 0)는 projects 테이블을 사용자별로 GROUP BY 집계한 뒤 메모리에서 병합한다(N+1 방지).
 adminUsers.get('/', async (c) => {
-  const list = await usersDao.listAll(c.env.DB)
-  return c.json({ data: list })
+  const [list, projectCounts] = await Promise.all([
+    usersDao.listAll(c.env.DB),
+    projectsDao.countAllByUser(c.env.DB)
+  ])
+  const data = list.map((user) => toPublicUser(user, projectCounts.get(user.id) || 0))
+  return c.json({ data })
 })
 
 // POST /api/admin/users — { email, name, role }로 신규 계정 생성. 시스템이 임시 비밀번호를

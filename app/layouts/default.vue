@@ -131,6 +131,7 @@ export default {
       const p = this.$route.path
       if (p === '/') return [{ label: '프로젝트' }]
       if (p.match(/^\/projects\/[^/]+/)) return [{ label: '프로젝트', to: '/' }, { label: this.$route.params?.id || '프로젝트 상세' }]
+      if (p.match(/^\/usage\/[^/]+/)) return [{ label: '사용량', to: '/usage' }, { label: '사용자별 상세' }]
       if (p.startsWith('/usage')) return [{ label: '사용량' }]
       if (p.startsWith('/sessions')) return [{ label: '세션이력' }]
       if (p.match(/^\/catalog\/[^/]+/)) return [{ label: '카탈로그', to: '/catalog' }, { label: '상세' }]
@@ -139,7 +140,6 @@ export default {
       if (p.startsWith('/profile')) return [{ label: '프로필' }]
       if (p.startsWith('/keys')) return [{ label: '인증키 관리' }]
       if (p.startsWith('/admin/users')) return [{ label: '사용자 관리' }]
-      if (p.match(/^\/admin\/usage\/[^/]+/)) return [{ label: '사용량 통계', to: '/admin/usage' }, { label: '사용자별 상세' }]
       if (p.startsWith('/admin/usage')) return [{ label: '사용량 통계' }]
       return [{ label: '' }]
     },

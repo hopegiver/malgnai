@@ -12,11 +12,14 @@ const findByIdMock = vi.fn()
 const findByEmailMock = vi.fn()
 const findByEmployeeIdMock = vi.fn()
 const insertMock = vi.fn()
+const listAllMock = vi.fn()
 const buildUpdateEmployeeIdStatementMock = vi.fn()
 const buildRecordStatementIfPrecedingChangedMock = vi.fn()
 // 공용 워크스테이션 레지스트리 PK 단건 조회(usage_shared_workstations, migrations/0022) —
 // docs/design/usage-shared-workstation-axes.md §5.1의 409 SHARED_WORKSTATION 가드가 쓴다.
 const sharedFindByIdMock = vi.fn()
+// GET / 의 project_count 병합(api.md §5.6) — projects 테이블 GROUP BY 집계 대체.
+const countAllByUserMock = vi.fn()
 
 vi.mock('../dao/usage-shared-workstations.js', async (importOriginal) => {
   const actual = await importOriginal()
@@ -31,8 +34,14 @@ vi.mock('../dao/users.js', async (importOriginal) => {
     findByEmail: (...args) => findByEmailMock(...args),
     findByEmployeeId: (...args) => findByEmployeeIdMock(...args),
     insert: (...args) => insertMock(...args),
+    listAll: (...args) => listAllMock(...args),
     buildUpdateEmployeeIdStatement: (...args) => buildUpdateEmployeeIdStatementMock(...args)
   }
+})
+
+vi.mock('../dao/projects.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return { ...actual, countAllByUser: (...args) => countAllByUserMock(...args) }
 })
 
 vi.mock('../dao/audit-logs.js', async (importOriginal) => {
@@ -80,12 +89,69 @@ beforeEach(() => {
   findByEmailMock.mockReset()
   findByEmployeeIdMock.mockReset()
   insertMock.mockReset()
+  listAllMock.mockReset()
+  countAllByUserMock.mockReset()
   buildUpdateEmployeeIdStatementMock.mockReset()
   buildRecordStatementIfPrecedingChangedMock.mockReset()
   sharedFindByIdMock.mockReset()
   buildUpdateEmployeeIdStatementMock.mockReturnValue({ __kind: 'update-stmt' })
   buildRecordStatementIfPrecedingChangedMock.mockReturnValue({ id: 'audit-id', stmt: { __kind: 'audit-stmt' } })
   sharedFindByIdMock.mockResolvedValue(null) // 기본: 공용 워크스테이션으로 등록되지 않은 값
+  countAllByUserMock.mockResolvedValue(new Map())
+})
+
+// GET /api/admin/users — project_count 병합(api.md §5.6). usersDao.listAll과 projectsDao.countAllByUser를
+// Promise.all로 병렬 호출한 뒤 메모리에서 merge한다(N+1 방지) — 두 DAO 모두 mock으로 대체해 D1 없이 검증.
+describe('GET /api/admin/users — project_count 병합', () => {
+  function getRequest(app) {
+    return app.request('/api/admin/users', { method: 'GET' }, { DB: {} })
+  }
+
+  it('프로젝트가 없는 사용자는 project_count: 0', async () => {
+    listAllMock.mockResolvedValue([targetRow({ id: 'user-no-projects', employee_id: null })])
+    countAllByUserMock.mockResolvedValue(new Map()) // 아무도 프로젝트를 갖고 있지 않음
+    const app = makeApp()
+
+    const res = await getRequest(app)
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.data).toHaveLength(1)
+    expect(body.data[0].project_count).toBe(0)
+  })
+
+  it('여러 사용자 각각의 project_count가 집계 결과대로 정확히 매핑된다', async () => {
+    listAllMock.mockResolvedValue([
+      targetRow({ id: 'user-a', employee_id: 'a' }),
+      targetRow({ id: 'user-b', employee_id: 'b' }),
+      targetRow({ id: 'user-c', employee_id: 'c' })
+    ])
+    countAllByUserMock.mockResolvedValue(new Map([
+      ['user-a', 3],
+      ['user-b', 1]
+      // user-c는 Map에 키 자체가 없음 — 0으로 기본 처리되어야 한다
+    ]))
+    const app = makeApp()
+
+    const res = await getRequest(app)
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    const byId = Object.fromEntries(body.data.map((u) => [u.id, u.project_count]))
+    expect(byId).toEqual({ 'user-a': 3, 'user-b': 1, 'user-c': 0 })
+  })
+
+  it('password_hash는 응답에 포함되지 않는다(toPublicUser 필드 화이트리스트 유지)', async () => {
+    listAllMock.mockResolvedValue([targetRow({ id: 'user-a' })])
+    countAllByUserMock.mockResolvedValue(new Map([['user-a', 2]]))
+    const app = makeApp()
+
+    const res = await getRequest(app)
+    const body = await res.json()
+
+    expect(body.data[0]).not.toHaveProperty('password_hash')
+    expect(body.data[0].project_count).toBe(2)
+  })
 })
 
 describe('PUT /api/admin/users/:id/employee-id — 권한·검증', () => {

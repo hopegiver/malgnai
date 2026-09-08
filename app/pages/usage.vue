@@ -119,7 +119,7 @@
               <table class="table table-sm mb-0">
                 <thead><tr><th>날짜</th><th>모델</th><th class="text-end">세션</th><th class="text-end">입력</th><th class="text-end">출력</th><th class="text-end">캐시읽기</th><th class="text-end">도구</th><th class="text-end">턴</th><th class="text-end">API호출</th></tr></thead>
                 <tbody>
-                  <tr v-for="row in dailyRows" :key="row.day_at + row.model">
+                  <tr v-for="row in sortedDailyRows" :key="row.day_at + row.model">
                     <td>{{ row.day_at }}</td>
                     <td><span class="badge bg-light text-dark">{{ row.model || '미상' }}</span></td>
                     <td class="text-end">{{ row.session_count }}</td>
@@ -262,6 +262,12 @@ export default {
     },
     gapDayCount() {
       return (this.meta && this.meta.gap_days && this.meta.gap_days.length) || 0
+    },
+    // "일별·모델별 사용량" 표만 최신 날짜가 먼저 보이도록 정렬한다(그래프의 chartData/dailyRows
+    // 원본은 그대로 둔다). Array#sort는 표준상 안정 정렬이라 같은 날짜(day_at)의 모델 간 상대
+    // 순서는 dailyRows에 있던 그대로 유지된다.
+    sortedDailyRows() {
+      return [...this.dailyRows].sort((a, b) => b.day_at.localeCompare(a.day_at))
     },
     // 세 가지 "빈 결과" 문구 분기(§4.5) — identity_unlinked/identity_invalid는 상류 질의 자체를
     // 하지 않은 상태, user_not_in_metrics는 축은 정상인데 이 기간 관측치가 없는 상태다. 서로 다른

@@ -869,7 +869,7 @@ export default {
     // Prometheus-only 행(user_id === null)은 malgnai-hub 계정이 없어 드릴다운을 열 수 없다(§5.1).
     goToUser(u) {
       if (u.source === 'prometheus_only' || !u.user_id) return
-      this.$router.push(`/admin/usage/${u.user_id}`)
+      this.$router.push(`/usage/${u.user_id}`)
     },
     // 공용 워크스테이션 축(관측 행) 여부. identity_source만으로는 판정할 수 없다 —
     // docs/api.md §5.9.2가 명시하듯 서버는 **회원 행(d1_user)에도** 그 회원의 연동 값이 공용 축이면
