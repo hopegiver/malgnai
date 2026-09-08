@@ -21,6 +21,7 @@ import * as sessionsDao from '../dao/sessions.js'
 import * as usersDao from '../dao/users.js'
 import * as auditLogsDao from '../dao/audit-logs.js'
 import * as usagePromDailyDao from '../dao/usage-prom-daily.js'
+import * as sharedWorkstationsDao from '../dao/usage-shared-workstations.js'
 import { requireAdmin } from '../middleware/jwt-auth.js'
 import { withRouteBudget } from '../lib/prom-client.js'
 import { runUsageRollup, ROLLUP_REQUEST_BUDGET_MS, REQUEST_CHUNK_RESERVE_MS } from '../lib/usage-rollup.js'
@@ -219,6 +220,27 @@ usage.get('/me', async (c) => {
     return c.json({ data: [], totals: zeroTotals(), meta })
   }
 
+  // I9(usage-shared-workstation-axes.md §4.2) — 본인 축이 공용 워크스테이션으로 등록돼 있으면
+  // 상류·D1 광역 조회를 시작하지 않고 200 + 전용 meta 플래그로 조기 반환한다. I7("값이 없으면")의
+  // 자매 조항: I7은 *없는* 축, I9는 *개인이 아닌* 축을 막는다. 이 축의 사용량은 여러 사람의 합계라
+  // 개인 화면에 띄우는 순간 그 자체가 오귀속이고, 당사자는 자기 숫자가 부풀었다는 사실을 알 수 없다.
+  //
+  // ⚠️ 전건 스캔(loadMap)이 아니라 **PK 단건 조회**다 — 이 지점은 "이 하나의 값이 공용인가"만
+  //    알면 되고, 레지스트리가 커져도 비용이 고정이다.
+  // ⚠️ 조용한 빈 화면을 만들지 않는다(이 프로젝트가 반복해서 밟은 실패 모드) — user_not_in_metrics와
+  //    구분 가능한 전용 플래그를 반드시 실어 화면이 다른 문구를 낼 수 있게 한다.
+  // ⚠️ fail-closed — 이 조회가 실패하면 예외를 그대로 흘려 500이 되게 둔다(try/catch로 삼켜서
+  //    "레지스트리를 못 읽었으니 개인으로 취급"하면 그 순간 오귀속이 발생한다, 설계 S10).
+  const sharedSelf = await sharedWorkstationsDao.findById(c.env.DB, employeeId)
+  if (sharedSelf) {
+    const meta = buildSkippedIdentityMeta(range, {
+      employee_id: employeeId,
+      group_accounts: [],
+      identity_shared_workstation: true
+    })
+    return c.json({ data: [], totals: zeroTotals(), meta })
+  }
+
   // 매처 삽입 직전 재검증(I1의 실제 방어선, §4.1) — 저장값이라도 다시 본다. 운영상 발생 불가
   // (편집 API가 이미 형식·길이를 강제한다)하지만, 직접 DB 조작 등으로 어긋난 값이 들어와도 무필터로
   // 넓히지 않고 정직하게 빈 결과 + identity_invalid를 낸다.
@@ -239,8 +261,12 @@ usage.get('/me', async (c) => {
   // 계정(그룹 로그인 이메일) 축을 접어 직원 1행(emp:<employeeId>)을 얻는다. 그 직원 항목이 없으면
   // (Prometheus에 데이터가 없는 사용자, 수집 대상 아님) 에러가 아니라 200 + data:[] + totals 0을
   // 정상 반환한다.
-  const employees = foldToEmployees(hybrid.byUnit)
-  const emp = employees.get(`emp:${employeeId}`)
+  const employees = foldToEmployees(hybrid.byUnit, hybrid.sharedById)
+  const folded = employees.get(`emp:${employeeId}`)
+  // 2차 방어 — 위 I9 조기 반환이 1차다. rowKey를 shr:로 바꾸지 않기로 했으므로(PM 판정1) 키 미스가
+  // 아니라 이 명시적 검사가 최종 방어선이다: 조기 반환과 이 지점 사이에 등록이 일어나도(요청 처리
+  // 도중 다른 관리자가 등록) 개인 화면에 공용 축 합계가 뜨지 않는다.
+  const emp = folded && folded.isShared ? null : folded
   const data = (emp ? userDayRows(emp) : []).map((r) => ({
     ...r, tool_calls: null, tool_errors: null, retries: null, turns: null, api_calls: null, updated_at: null
   }))
@@ -250,6 +276,9 @@ usage.get('/me', async (c) => {
   meta.employee_id = employeeId
   meta.group_accounts = emp ? groupAccountsOf(emp) : []
   if (!emp) meta.user_not_in_metrics = true
+  // 요청 처리 도중(위 조기 반환 이후) 그 축이 공용으로 등록된 희귀 경합 — 빈 화면의 이유를
+  // user_not_in_metrics로 위장하지 않고 정확한 플래그를 함께 싣는다.
+  if (folded && folded.isShared) meta.identity_shared_workstation = true
 
   return c.json({ data, totals, meta })
 })
@@ -355,7 +384,10 @@ adminUsage.get('/users', requireAdmin, async (c) => {
     return upstreamErrorResponse(c, err)
   }
 
-  const merged = mergeD1AndPromUsers(d1Users, hybrid.byUnit)
+  // hybrid.sharedById — getUsageOverviewHybrid가 캐시 스냅샷과 병렬로 읽은 공용 워크스테이션
+  // 레지스트리(usage-shared-workstation-axes.md). 등록된 축은 어떤 회원 행에도 귀속되지 않고
+  // 별도 행으로 남는다(총합 보존).
+  const merged = mergeD1AndPromUsers(d1Users, hybrid.byUnit, hybrid.sharedById)
   const sorted = sortUserRows(merged, sortResolution.field, order)
   const truncated = sorted.length > limit
   const data = truncated ? sorted.slice(0, limit) : sorted
@@ -418,15 +450,23 @@ adminUsage.get('/users/:id', requireAdmin, async (c) => {
 
   const employeeId = target.employee_id || null
 
+  // 공용 워크스테이션 축 판정(usage-shared-workstation-axes.md §4.3) — PK 단건 조회(전건 스캔 아님).
+  // 대상 회원의 연동 값이 공용 축이면 상류 질의 없이 200 + 전용 meta 플래그를 준다: 그 축의 사용량은
+  // 여러 사람의 합계라 특정 개인의 드릴다운으로 보여줄 수 없다. fail-closed(조회 실패 → 예외 전파
+  // → 500)이며, 빈 Map/false로 눙치지 않는다(설계 S10).
+  const sharedTarget = employeeId ? await sharedWorkstationsDao.findById(c.env.DB, employeeId) : null
+
   let drilldown
   let overall
   try {
-    if (!employeeId) {
+    if (!employeeId || sharedTarget) {
       // §4.6 — 미연동(NULL)이면 상류 질의 자체를 하지 않는다. overall(coverage)은 D1 전용 조회라
       // 계속 읽어 meta.data_start 등은 정상 채운다. getUserDrilldown은 저장값이 안전하지 않은 경우도
       // 내부에서 이미 빈 결과로 처리하므로(isPromSafeEmployeeId 재검증) 무필터로 뒤집히지 않는다 —
       // 그래도 NULL은 라우트에서 먼저 끊어 상류 왕복을 아끼고 identity_unlinked 플래그를 정확히 낸다.
-      drilldown = { notInMetrics: true, rows: [], totals: { ...zeroTotals(), active_time_seconds: 0 }, groupAccounts: [], byModel: [], unknownTypes: new Set(), meta: aggregateCacheMeta([]) }
+      // 공용 워크스테이션 축(sharedTarget)도 같은 분기를 탄다 — 상류 왕복을 아끼고 아래에서
+      // identity_shared_workstation 플래그를 정확히 낸다(getUserDrilldown 내부에도 2차 방어가 있다).
+      drilldown = { notInMetrics: true, sharedWorkstation: !!sharedTarget, rows: [], totals: { ...zeroTotals(), active_time_seconds: 0 }, groupAccounts: [], byModel: [], unknownTypes: new Set(), meta: aggregateCacheMeta([]) }
       overall = await usagePromDailyDao.readOverallCoverage(c.env.DB)
     } else {
       ;[drilldown, overall] = await withRouteBudget(Promise.all([
@@ -483,6 +523,10 @@ adminUsage.get('/users/:id', requireAdmin, async (c) => {
   const meta = buildDrilldownMeta(range, drilldown, overall)
   if (drilldown.notInMetrics) meta.user_not_in_metrics = true
   if (!employeeId) meta.identity_unlinked = true
+  // 조용한 빈 화면 금지 — "관측치가 없다(user_not_in_metrics)"와 "공용 축이라 개인에게 귀속하지
+  // 않는다"는 화면 문구·조치가 완전히 다르다. drilldown.sharedWorkstation은 라이브 경로(2차 방어)가
+  // 켠 값도 포함한다.
+  if (sharedTarget || drilldown.sharedWorkstation) meta.identity_shared_workstation = true
 
   return c.json({
     user: toPublicUser(target),

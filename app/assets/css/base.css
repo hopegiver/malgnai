@@ -865,6 +865,12 @@ textarea.form-control {
   border: none;
   border-radius: var(--rounded-xl);
   box-shadow: var(--shadow-xl);
+  /* Bootstrap 5.3의 .modal-content는 background-color: var(--bs-modal-bg)인데 그 변수는 .modal
+     래퍼에서만 정의된다. 이 앱은 Bootstrap 모달 JS 대신 .modal-backdrop-custom + .modal-dialog-custom
+     커스텀 마크업을 쓰므로 .modal이 없어 변수가 미정의 → 배경이 투명해지고 뒤 화면 글자가 비쳐
+     모달 본문(경고 문구 포함)이 읽히지 않았다(2026-09-08 실측: /admin/users 연동 아이디 편집 모달).
+     디자인 토큰의 surface 색으로 명시 지정해 원래 의도(불투명 카드)를 복구한다. */
+  background-color: var(--color-surface);
 }
 .modal-header {
   border-bottom: 1px solid var(--color-border);

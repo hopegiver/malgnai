@@ -99,3 +99,18 @@ export function pickDisplayName({ d1Name, employeeNames, employeeId }) {
   if (names.length) return names[0]
   return employeeId || null
 }
+
+/** 공용 워크스테이션 행의 표시 이름 정본(usage-shared-workstation-axes.md §4.1-3·S14) —
+ *  **등록 라벨 > employee_id**. 관측 employee_name으로는 절대 폴백하지 않는다.
+ *
+ *  이 규칙이 pickDisplayName의 분기가 아니라 별도 함수인 이유: 공용 축에 pickDisplayName을 그대로
+ *  쓰면 `shr` 후보 행의 이름이 관측 라벨("김도형")로 뜨고, 그 표시가 바로 이번 사고의 출발점이다
+ *  (관리자가 "김도형 개인 관측치"로 오해해 개인 계정에 연결 → 여러 명의 합계가 1명 사용량으로 표시).
+ *  라벨이 비어 있으면 employee_id 자체("claude")를 쓴다 — 관측 이름으로 폴백하는 순간 그 오해가
+ *  그대로 되살아나기 때문이다. 관측 이름은 응답의 observed_employee_name에 그대로 남아 판단
+ *  근거로 계속 보인다(정보를 지우지 않고 표시 우선순위만 바꾼다). */
+export function pickSharedWorkstationName({ label, employeeId }) {
+  const trimmed = typeof label === 'string' ? label.trim() : ''
+  if (trimmed) return trimmed
+  return employeeId || null
+}

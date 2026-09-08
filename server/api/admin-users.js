@@ -8,6 +8,7 @@
 import { Hono } from 'hono'
 import * as usersDao from '../dao/users.js'
 import * as auditLogsDao from '../dao/audit-logs.js'
+import * as sharedWorkstationsDao from '../dao/usage-shared-workstations.js'
 import { hashPassword, generateTempPassword } from '../lib/tokens.js'
 import { requireAdmin } from '../middleware/jwt-auth.js'
 import { normalizeEmployeeIdInput, employeeIdFromEmail } from '../lib/usage-identity.js'
@@ -188,6 +189,36 @@ adminUsers.put('/:id/employee-id', async (c) => {
     return c.json({ user: toPublicUser(target), previous_employee_id: previousValue, changed: false, warnings: [] })
   }
 
+  // 【공용 워크스테이션 차단, docs/design/usage-shared-workstation-axes.md §5.1】
+  // 등록된 공용 축(여러 명이 함께 쓰는 PC)을 개인 계정에 연결하면 그 그룹 전체의 사용량이 한 사람의
+  // 개인 사용량으로 표시된다 — 이번 기능 전환의 목적에 정면으로 반하는 조작이라 409로 막는다.
+  // ⚠️ 강제 우회(force/confirm)를 만들지 않는다: 같은 라우트의 보유자 409가 이미 "선해제 요구"를
+  //    택했고, force는 이 안전장치 전체가 무너지는 단일 지점이 된다. 정당한 연결이 필요하면 먼저
+  //    레지스트리에서 해제한다(감사로그가 남는 2회 조작).
+  // ⚠️ 검사 순서 — 보유자 검사(아래)보다 **먼저** 본다. 두 조건이 동시에 성립해도 응답은 항상
+  //    SHARED_WORKSTATION으로 결정적이다(관리자가 먼저 해야 할 조치가 "공용 등록 해제"이기 때문).
+  // ⚠️ 해제(newValue === null)는 이 검사를 아예 타지 않는다 — 잘못된 상태에서 빠져나오는 경로를
+  //    등록 여부와 무관하게 항상 열어 둔다(레거시 탈출구).
+  // ⚠️ fail-open 금지 — 레지스트리 조회가 실패하면 예외를 그대로 전파해 5xx로 떨어뜨린다(try/catch로
+  //    삼켜 "못 읽었으니 통과"시키면 이 안전장치가 장애 시 자동으로 꺼진다).
+  if (newValue !== null) {
+    const shared = await sharedWorkstationsDao.findById(c.env.DB, newValue)
+    if (shared) {
+      return c.json({
+        error: {
+          code: 'SHARED_WORKSTATION',
+          message: 'employee_id is registered as a shared workstation and cannot be linked to a member account',
+          details: {
+            employee_id: shared.employee_id,
+            label: shared.label || null,
+            registered_at: shared.created_at,
+            registered_by_user_id: shared.registered_by || null
+          }
+        }
+      }, 409)
+    }
+  }
+
   // 사전 확인(§5.4) — 다른 사용자가 이미 그 값을 보유하면 409, 자동 이전하지 않는다. 이 확인을
   // 통과했더라도 두 관리자의 동시 요청이 있으면 아래 db.batch()의 UNIQUE 제약이 최종 심판자다.
   if (newValue !== null) {
@@ -240,6 +271,26 @@ adminUsers.put('/:id/employee-id', async (c) => {
   // (buildRecordStatementIfPrecedingChanged) 여기서 그대로 반환해도 잘못된 감사로그가 남지 않는다 —
   // 클라이언트는 최신 상태를 다시 읽고 재시도해야 한다(§5.4 T-2, 낙관적 잠금이 아니라 서버측 CAS).
   if (updateResult.meta.changes === 0) {
+    // 0행의 원인이 두 가지다(§5.2 방향 A) — ① CAS 불일치(다른 관리자가 이 target을 먼저 바꿈)
+    // ② 사전 검사 통과 후 그 값이 공용 워크스테이션으로 등록됨(UPDATE WHERE의 NOT EXISTS가 걸림).
+    // 레지스트리를 다시 읽어 재판정한다 — 관리자에게 "재시도하라"(STALE_STATE)와 "먼저 공용 등록을
+    // 해제하라"(SHARED_WORKSTATION)는 완전히 다른 조치이기 때문이다. 감사로그는 조건부 INSERT라
+    // 이미 함께 no-op이므로 일어나지 않은 변경이 기록되지 않는다.
+    const shared = newValue !== null ? await sharedWorkstationsDao.findById(c.env.DB, newValue) : null
+    if (shared) {
+      return c.json({
+        error: {
+          code: 'SHARED_WORKSTATION',
+          message: 'employee_id is registered as a shared workstation and cannot be linked to a member account',
+          details: {
+            employee_id: shared.employee_id,
+            label: shared.label || null,
+            registered_at: shared.created_at,
+            registered_by_user_id: shared.registered_by || null
+          }
+        }
+      }, 409)
+    }
     return c.json({
       error: { code: 'STALE_STATE', message: 'employee_id was changed by another request in the meantime, please retry' }
     }, 409)

@@ -10,6 +10,7 @@ import {
   employeeIdFromEmail,
   isPromSafeEmployeeId,
   normalizeEmployeeIdInput,
+  pickSharedWorkstationName,
   escapeLabelValue,
   employeeIdMatcher,
   resolveEmployeeScope,
@@ -203,5 +204,28 @@ describe('pickDisplayName — 표시 이름 단일 정본(§3.4, 사전순 최�
 
   it('employeeNames에 빈 문자열이 섞여 있어도 무시한다', () => {
     expect(pickDisplayName({ d1Name: null, employeeNames: new Set(['', '나나']), employeeId: 'x' })).toBe('나나')
+  })
+})
+
+// docs/design/usage-shared-workstation-axes.md §4.1-3·S14 — 공용 워크스테이션 행의 표시 이름은
+// **등록 라벨 > employee_id**이고, 관측 employee_name으로는 절대 폴백하지 않는다. 관측 이름을 주
+// 이름으로 쓰면 이번 사고의 원인(관리자가 "김도형 개인 관측치"로 오해)이 그대로 되살아난다.
+describe('pickSharedWorkstationName — 공용 축 표시 이름(관측 이름 폴백 금지)', () => {
+  it('라벨이 있으면 라벨을 쓴다', () => {
+    expect(pickSharedWorkstationName({ label: '3층 공용 PC', employeeId: 'claude' })).toBe('3층 공용 PC')
+  })
+
+  it('라벨이 없으면(null·빈 문자열·공백만) employee_id로 폴백한다 — 관측 이름은 애초에 인자로 받지 않는다', () => {
+    expect(pickSharedWorkstationName({ label: null, employeeId: 'claude' })).toBe('claude')
+    expect(pickSharedWorkstationName({ label: '', employeeId: 'claude' })).toBe('claude')
+    expect(pickSharedWorkstationName({ label: '   ', employeeId: 'claude' })).toBe('claude')
+  })
+
+  it('라벨 앞뒤 공백은 다듬는다', () => {
+    expect(pickSharedWorkstationName({ label: '  2층 공용  ', employeeId: 'malgn' })).toBe('2층 공용')
+  })
+
+  it('둘 다 없으면 null', () => {
+    expect(pickSharedWorkstationName({ label: null, employeeId: null })).toBeNull()
   })
 })

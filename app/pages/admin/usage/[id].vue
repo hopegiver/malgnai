@@ -65,7 +65,17 @@
             <i class="bi bi-info-circle me-1"></i>최신 데이터를 가져오지 못해 {{ (meta.cache && meta.cache.age_seconds) || 0 }}초 전 데이터를 표시 중입니다.
           </div>
 
-          <div v-if="meta && meta.user_not_in_metrics" class="alert alert-info py-2 small mb-3">
+          <!-- 공용 워크스테이션 축(docs/api.md §5.9.3) — 서버가 user_not_in_metrics도 함께 켜서
+               내려주므로, 아래 일반 문구("신규 사용자이거나 사용 이력이 없음")보다 먼저 분기해야
+               "0인 진짜 이유"가 가려지지 않는다. 그 축의 사용량은 여러 사람의 합계라 개인
+               드릴다운으로 보여줄 수 없다(공용 축 자체의 상세 화면은 없다 — 목록 행에 기간 합계와
+               그룹 계정이 있다). -->
+          <div v-if="meta && meta.identity_shared_workstation" class="alert alert-warning py-2 small mb-3">
+            <i class="bi bi-pc-display me-1"></i>
+            이 사용자의 연동 아이디는 <strong>공용 워크스테이션 축</strong>으로 등록돼 있어 개인 사용량을 표시하지 않습니다(여러 사람의 합계라 개인 드릴다운으로 귀속할 수 없습니다).
+            개인 사용량이 필요하면 <router-link to="/admin/users">사용자 관리</router-link>에서 이 회원의 연동 아이디를 개인 축으로 바꾸세요.
+          </div>
+          <div v-else-if="meta && meta.user_not_in_metrics" class="alert alert-info py-2 small mb-3">
             <i class="bi bi-info-circle me-1"></i>이 사용자는 선택 기간에 Prometheus 계측 데이터가 없습니다(신규 사용자이거나 아직 사용 이력이 없을 수 있습니다).
           </div>
 
