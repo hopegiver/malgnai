@@ -206,7 +206,7 @@ describe('foldToEmployees — unit(employee_id×user_email) → 직원 단위 �
         days: [['2026-09-01', dayValues({ input_tokens: 5, output_tokens: 1 })]]
       })]
     ])
-    const employees = foldToEmployees(byUnit)
+    const employees = foldToEmployees(byUnit, new Map())
     expect(employees.size).toBe(1)
     const emp = employees.get('emp:hopegiver')
     expect(emp.days.get('2026-09-01').input_tokens).toBe(105) // 두 계정 합산
@@ -219,7 +219,7 @@ describe('foldToEmployees — unit(employee_id×user_email) → 직원 단위 �
     const byUnit = new Map([
       [unitKeyOf(null, 'public@malgnsoft.com'), unit({ employeeId: null, userEmail: 'public@malgnsoft.com', days: [['2026-09-01', dayValues({ input_tokens: 50 })]] })]
     ])
-    const employees = foldToEmployees(byUnit)
+    const employees = foldToEmployees(byUnit, new Map())
     const emp = employees.get('grp:public@malgnsoft.com')
     expect(emp).toBeDefined()
     expect(emp.identitySource).toBe('group_account')
@@ -230,7 +230,7 @@ describe('foldToEmployees — unit(employee_id×user_email) → 직원 단위 �
     const byUnit = new Map([
       [unitKeyOf(null, null), unit({ days: [['2026-09-01', dayValues({ input_tokens: 7 })]] })]
     ])
-    const employees = foldToEmployees(byUnit)
+    const employees = foldToEmployees(byUnit, new Map())
     expect(employees.size).toBe(1)
     expect(employees.get('unk:').identitySource).toBe('unknown')
     expect(groupAccountsOf(employees.get('unk:'))).toEqual([]) // 계정 자체가 없으므로 빈 배열
@@ -245,7 +245,7 @@ describe('mergeD1AndPromUsers — D1 users.employee_id 컬럼이 병합 축(usag
     const byUnit = new Map([
       [unitKeyOf('malgn', 'public@malgnsoft.com'), unit({ employeeId: 'malgn', userEmail: 'public@malgnsoft.com', days: [['2026-09-01', dayValues({ input_tokens: 42 })]] })]
     ])
-    const rows = mergeD1AndPromUsers(d1Users, byUnit)
+    const rows = mergeD1AndPromUsers(d1Users, byUnit, new Map())
     expect(rows).toHaveLength(1)
     expect(rows[0].row_key).toBe('emp:malgn')
     expect(rows[0].employee_id).toBe('malgn')
@@ -254,7 +254,7 @@ describe('mergeD1AndPromUsers — D1 users.employee_id 컬럼이 병합 축(usag
 
   it('employee_id가 NULL(미연동)인 D1 사용자는 d1only: 행으로 사용량 0으로 뜬다(§7.1 신규 추가 행)', () => {
     const d1Users = [{ id: 'u1', email: 'djkim@malgnsoft.com', name: '김덕조', role: 'administrator', status: 'active', employee_id: null }]
-    const rows = mergeD1AndPromUsers(d1Users, new Map())
+    const rows = mergeD1AndPromUsers(d1Users, new Map(), new Map())
     expect(rows).toHaveLength(1)
     expect(rows[0].row_key).toBe('d1only:u1')
     expect(rows[0].employee_id).toBeNull()
@@ -270,7 +270,7 @@ describe('mergeD1AndPromUsers — D1 users.employee_id 컬럼이 병합 축(usag
     const byUnit = new Map([
       [unitKeyOf('dup', 'dup@malgnsoft.com'), unit({ employeeId: 'dup', userEmail: 'dup@malgnsoft.com', days: [['2026-09-01', dayValues({ input_tokens: 999 })]] })]
     ])
-    const rows = mergeD1AndPromUsers(d1Users, byUnit)
+    const rows = mergeD1AndPromUsers(d1Users, byUnit, new Map())
     const u1Row = rows.find((r) => r.user_id === 'u1')
     const u2Row = rows.find((r) => r.user_id === 'u2')
     expect(u1Row.total_tokens).toBe(999)
@@ -283,7 +283,7 @@ describe('mergeD1AndPromUsers — D1 users.employee_id 컬럼이 병합 축(usag
     const byUnit = new Map([
       [unitKeyOf('claude', 'public@malgnsoft.com'), unit({ employeeId: 'claude', userEmail: 'public@malgnsoft.com', names: ['김도형'], days: [['2026-09-01', dayValues({ input_tokens: 88 })]] })]
     ])
-    const rows = mergeD1AndPromUsers(d1Users, byUnit)
+    const rows = mergeD1AndPromUsers(d1Users, byUnit, new Map())
     const promOnlyRow = rows.find((r) => r.source === 'prometheus_only')
     expect(promOnlyRow).toBeDefined()
     expect(promOnlyRow.employee_id).toBe('claude')
@@ -300,7 +300,7 @@ describe('mergeD1AndPromUsers — D1 users.employee_id 컬럼이 병합 축(usag
       const byUnit = new Map([
         [unitKeyOf('public', 'public@malgnsoft.com'), unit({ employeeId: 'public', userEmail: 'public@malgnsoft.com', names: ['이진화'], days: [['2026-09-01', dayValues({ input_tokens: 10 })]] })]
       ])
-      const rows = mergeD1AndPromUsers(d1Users, byUnit)
+      const rows = mergeD1AndPromUsers(d1Users, byUnit, new Map())
       expect(rows[0].observed_employee_name).toBe('이진화')
       expect(rows[0].observed_name_mismatch).toBe(true)
     })
@@ -310,7 +310,7 @@ describe('mergeD1AndPromUsers — D1 users.employee_id 컬럼이 병합 축(usag
       const byUnit = new Map([
         [unitKeyOf('hopegiver', 'dev@malgnsoft.com'), unit({ employeeId: 'hopegiver', userEmail: 'dev@malgnsoft.com', names: ['하근호'], days: [['2026-09-01', dayValues({ input_tokens: 10 })]] })]
       ])
-      const rows = mergeD1AndPromUsers(d1Users, byUnit)
+      const rows = mergeD1AndPromUsers(d1Users, byUnit, new Map())
       expect(rows[0].observed_name_mismatch).toBe(false)
     })
 
@@ -319,9 +319,257 @@ describe('mergeD1AndPromUsers — D1 users.employee_id 컬럼이 병합 축(usag
       const byUnit = new Map([
         [unitKeyOf('hopegiver', 'dev@malgnsoft.com'), unit({ employeeId: 'hopegiver', userEmail: 'dev@malgnsoft.com', days: [['2026-09-01', dayValues({ input_tokens: 10 })]] })]
       ])
-      const rows = mergeD1AndPromUsers(d1Users, byUnit)
+      const rows = mergeD1AndPromUsers(d1Users, byUnit, new Map())
       expect(rows[0].observed_employee_name).toBeNull()
       expect(rows[0].observed_name_mismatch).toBe(false)
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 공용 워크스테이션 축(docs/design/usage-shared-workstation-axes.md) — "employee_id 라벨이 있으면
+// 곧 개인"이라는 가정을 관리자 등록 레지스트리로 뒤집는다. 실측 3건(claude/malgn/public)은
+// employee_id·employee_name 라벨이 1인분처럼 찍히지만 여러 명이 쓰는 공용 PC다.
+// ---------------------------------------------------------------------------
+function sharedRow({ employeeId, label = null, note = null }) {
+  return { employee_id: employeeId, label, note, registered_by: null, created_at: '2026-09-08T02:00:00.000Z', updated_at: '2026-09-08T02:00:00.000Z' }
+}
+
+function sumTotalTokens(rows) {
+  return rows.reduce((acc, r) => acc + r.total_tokens, 0)
+}
+
+describe('공용 워크스테이션 축 — 분류·표시·총합 보존', () => {
+  const CLAUDE_UNIT_KEY = unitKeyOf('claude', 'ai@malgnsoft.com')
+  function claudeByUnit(tokens = 88) {
+    return new Map([
+      [CLAUDE_UNIT_KEY, unit({ employeeId: 'claude', userEmail: 'ai@malgnsoft.com', names: ['김도형'], days: [['2026-09-01', dayValues({ input_tokens: tokens })]] })]
+    ])
+  }
+
+  // 완료판정 ⑥ — row_key 계약 잠금. PM 판정1(2026-09-08): 설계 초안의 shr: 재키잉은 채택하지
+  // 않는다. row_key는 정렬 tie-break 키이자 프런트 v-for :key 계약값이고, employees.get('emp:'+id)
+  // 조회에 묶인 지점이 3곳이다. 나중에 누가 "고치려고" 접두사를 바꾸면 이 테스트가 막는다.
+  it('[계약 잠금] 공용으로 등록돼도 row_key는 emp:<id> 그대로다 — shr: 재키잉을 하지 않는다', () => {
+    expect(rowKeyOf('claude', 'ai@malgnsoft.com')).toBe('emp:claude')
+
+    const employees = foldToEmployees(claudeByUnit(), new Map([['claude', sharedRow({ employeeId: 'claude' })]]))
+    expect([...employees.keys()]).toEqual(['emp:claude'])
+    expect(employees.get('emp:claude').identitySource).toBe('shared_workstation')
+
+    const rows = mergeD1AndPromUsers([], claudeByUnit(), new Map([['claude', sharedRow({ employeeId: 'claude' })]]))
+    expect(rows[0].row_key).toBe('emp:claude')
+  })
+
+  it('레지스트리에 있으면 identity_source가 shared_workstation, 없으면 employee_id다(신규 행 필드·source 값 추가 없음)', () => {
+    const notShared = foldToEmployees(claudeByUnit(), new Map()).get('emp:claude')
+    expect(notShared.identitySource).toBe('employee_id')
+    expect(notShared.isShared).toBe(false)
+
+    const shared = foldToEmployees(claudeByUnit(), new Map([['claude', sharedRow({ employeeId: 'claude', label: '3층 공용 PC' })]])).get('emp:claude')
+    expect(shared.identitySource).toBe('shared_workstation')
+    expect(shared.isShared).toBe(true)
+    expect(shared.sharedLabel).toBe('3층 공용 PC')
+
+    // 공용 행의 source는 여전히 prometheus_only다 — 프런트가 source를 5곳에서 분기하므로 배포 갭
+    // 구간에 옛 SPA가 깨지지 않도록 값 자체를 늘리지 않는다(설계 §3.4).
+    const rows = mergeD1AndPromUsers([], claudeByUnit(), new Map([['claude', sharedRow({ employeeId: 'claude' })]]))
+    expect(rows[0].source).toBe('prometheus_only')
+    expect(rows[0].identity_source).toBe('shared_workstation')
+  })
+
+  it('sharedById 인자를 빠뜨리면 TypeError — 조용히 "전부 개인"(현행 버그)으로 되돌아가지 않는다(S11)', () => {
+    expect(() => foldToEmployees(claudeByUnit())).toThrow(TypeError)
+    expect(() => foldToEmployees(claudeByUnit(), null)).toThrow(TypeError)
+    expect(() => foldToEmployees(claudeByUnit(), { claude: {} })).toThrow(TypeError) // 평범한 객체도 거부
+    expect(() => foldToEmployees(claudeByUnit(), new Map())).not.toThrow() // "비어 있다"는 명시적으로 표현
+  })
+
+  // 완료판정 ⑧ — 공용 행 표시 이름. 관측 이름("김도형")을 주 이름으로 쓰면 이번 사고의 원인이
+  // 그대로 되살아난다(관리자가 개인 관측치로 오해 → 개인 계정에 연결).
+  it('[표시 이름] 공용 행의 name은 라벨(없으면 employee_id)이고 관측 employee_name이 아니다 — 관측 이름은 observed_employee_name에 남는다', () => {
+    const withLabel = mergeD1AndPromUsers([], claudeByUnit(), new Map([['claude', sharedRow({ employeeId: 'claude', label: '3층 공용 PC' })]]))
+    expect(withLabel[0].name).toBe('3층 공용 PC')
+    expect(withLabel[0].name).not.toBe('김도형')
+    expect(withLabel[0].observed_employee_name).toBe('김도형') // 정보를 지우지 않는다(표시 우선순위만 바꾼다)
+
+    // S14 — 라벨이 없으면 employee_id로 폴백한다. 관측 이름으로는 절대 폴백하지 않는다.
+    const noLabel = mergeD1AndPromUsers([], claudeByUnit(), new Map([['claude', sharedRow({ employeeId: 'claude' })]]))
+    expect(noLabel[0].name).toBe('claude')
+    expect(noLabel[0].observed_employee_name).toBe('김도형')
+
+    // 등록 전에는 기존 규칙대로 관측 이름이 표시된다(이 변경이 바꾸는 것은 등록된 축뿐이다).
+    const unregistered = mergeD1AndPromUsers([], claudeByUnit(), new Map())
+    expect(unregistered[0].name).toBe('김도형')
+  })
+
+  // 완료판정 ⑦ — 공용 값을 보유한 d1_user 행(직접 DB 조작 등으로만 생기는 모순 상태, S6).
+  it('[오귀속 차단] 공용 값을 보유한 회원 행은 사용량 0 + shared_workstation_conflict 경고이고, 공용 행이 별도로 존재한다', () => {
+    const d1Users = [{ id: 'u1', email: 'djkim@malgnsoft.com', name: '김덕조', role: 'administrator', status: 'active', employee_id: 'claude' }]
+    const rows = mergeD1AndPromUsers(d1Users, claudeByUnit(88), new Map([['claude', sharedRow({ employeeId: 'claude' })]]))
+
+    const userRow = rows.find((r) => r.user_id === 'u1')
+    expect(userRow.total_tokens).toBe(0) // 여러 명의 합계가 이 사람 개인 사용량으로 표시되지 않는다
+    expect(userRow.group_accounts).toEqual([])
+    expect(userRow.identity_source).toBe('shared_workstation')
+    expect(userRow.shared_workstation_conflict).toBe(true) // 조용히 0이 되지 않는다 — 이유가 응답에 실린다
+    // 이 행은 귀속되는 관측 축이 없으므로(엔트리를 consume하지 않는다) 미연동 회원과 같은
+    // d1only: 관례를 쓴다 — emp:claude는 아래 실관측 공용 행이 가져간다(유일성, 아래 전용 테스트).
+    expect(userRow.row_key).toBe('d1only:u1')
+    expect(userRow.employee_id).toBe('claude') // 잘못 들고 있는 값 자체는 계속 보인다(관리자 진단용)
+
+    const sharedRowOut = rows.find((r) => r.source === 'prometheus_only')
+    expect(sharedRowOut).toBeDefined()
+    expect(sharedRowOut.employee_id).toBe('claude')
+    expect(sharedRowOut.total_tokens).toBe(88) // 값 자체는 사라지지 않는다
+    expect(sumTotalTokens(rows)).toBe(88)
+
+    // 대조군: 등록돼 있지 않으면 기존대로 그 회원 행이 관측치를 그대로 흡수한다(=이번에 막는 사고).
+    const unregistered = mergeD1AndPromUsers(d1Users, claudeByUnit(88), new Map())
+    expect(unregistered.find((r) => r.user_id === 'u1').total_tokens).toBe(88)
+    expect(unregistered.find((r) => r.user_id === 'u1').shared_workstation_conflict).toBe(false)
+    expect(unregistered.some((r) => r.source === 'prometheus_only')).toBe(false)
+  })
+
+  // row_key 유일성 회귀 잠금(docs/api.md §5.9.2 "응답 내 유일 키") — 공용 축을 d1_user 행이
+  // consume하지 않게 만들면서 같은 emp:<id>가 두 루프에서 각각 push되는 중복이 생겼던 자리다
+  // (프런트 v-for :key가 깨져 한 행만 렌더되는 것으로 실측 발견). 수치를 싣는 공용 관측 행이
+  // emp:<id>를 유지하는 것은 비협상이라, 수치 0인 회원 행이 d1only:로 비켜난다.
+  describe('[유일성 잠금] row_key는 공용 충돌 상태에서도 응답 내 유일하다', () => {
+    function duplicateKeys(rows) {
+      const seen = new Set()
+      const dups = []
+      for (const r of rows) {
+        if (seen.has(r.row_key)) dups.push(r.row_key)
+        seen.add(r.row_key)
+      }
+      return dups
+    }
+
+    it('공용 값을 보유한 회원 + 그 축의 실관측이 함께 있어도 row_key 중복이 없다(회원 행이 d1only:로 비켜난다)', () => {
+      const d1Users = [{ id: 'u1', email: 'djkim@malgnsoft.com', name: '김덕조', role: 'administrator', status: 'active', employee_id: 'claude' }]
+      const rows = mergeD1AndPromUsers(d1Users, claudeByUnit(88), new Map([['claude', sharedRow({ employeeId: 'claude' })]]))
+
+      expect(rows).toHaveLength(2) // 두 행이 실제로 모두 존재한다(중복 제거로 한 행을 없애지 않았다)
+      expect(duplicateKeys(rows)).toEqual([])
+      expect(rows.map((r) => r.row_key).sort()).toEqual(['d1only:u1', 'emp:claude'])
+      // 수치를 싣는 쪽이 emp: 계약을 유지한다(비협상) — 0인 쪽이 비켜났다.
+      expect(rows.find((r) => r.row_key === 'emp:claude').total_tokens).toBe(88)
+      expect(rows.find((r) => r.row_key === 'd1only:u1').total_tokens).toBe(0)
+    })
+
+    it('충돌 회원이 여러 명이어도(같은 공용 값을 두 명이 보유) 각자 d1only:<user_id>라 서로도 충돌하지 않는다', () => {
+      const d1Users = [
+        { id: 'u1', email: 'a@malgnsoft.com', name: 'A', role: 'employee', status: 'active', employee_id: 'claude' },
+        { id: 'u2', email: 'b@malgnsoft.com', name: 'B', role: 'employee', status: 'active', employee_id: 'claude' }
+      ]
+      const rows = mergeD1AndPromUsers(d1Users, claudeByUnit(88), new Map([['claude', sharedRow({ employeeId: 'claude' })]]))
+      expect(duplicateKeys(rows)).toEqual([])
+      expect(rows.map((r) => r.row_key).sort()).toEqual(['d1only:u1', 'd1only:u2', 'emp:claude'])
+      expect(sumTotalTokens(rows)).toBe(88) // 두 명 모두 0 — 88이 두 번 세어지지 않는다
+    })
+
+    it('등록 3건 + 미연동/그룹/미식별이 섞인 전체 fixture에서도, 등록 유·무 양쪽 모두 row_key 중복이 0이다', () => {
+      const d1Users = [
+        { id: 'u1', email: 'hopegiver@malgnsoft.com', name: '하근호', role: 'administrator', status: 'active', employee_id: 'hopegiver' },
+        { id: 'u2', email: 'djkim@malgnsoft.com', name: '김덕조', role: 'employee', status: 'active', employee_id: 'malgn' },
+        { id: 'u3', email: 'new@malgnsoft.com', name: '신입', role: 'employee', status: 'active', employee_id: null }
+      ]
+      const byUnit = new Map([
+        [unitKeyOf('hopegiver', 'dev@malgnsoft.com'), unit({ employeeId: 'hopegiver', userEmail: 'dev@malgnsoft.com', names: ['하근호'], days: [['2026-09-01', dayValues({ input_tokens: 100 })]] })],
+        [unitKeyOf('malgn', 'ai@malgnsoft.com'), unit({ employeeId: 'malgn', userEmail: 'ai@malgnsoft.com', names: ['김덕조'], days: [['2026-09-01', dayValues({ input_tokens: 200 })]] })],
+        [unitKeyOf('claude', 'claude@malgnsoft.com'), unit({ employeeId: 'claude', userEmail: 'claude@malgnsoft.com', names: ['김도형'], days: [['2026-09-01', dayValues({ input_tokens: 300 })]] })],
+        [unitKeyOf('claude', 'ai@malgnsoft.com'), unit({ employeeId: 'claude', userEmail: 'ai@malgnsoft.com', names: ['김도형'], days: [['2026-09-02', dayValues({ input_tokens: 5 })]] })],
+        [unitKeyOf('public', 'public@malgnsoft.com'), unit({ employeeId: 'public', userEmail: 'public@malgnsoft.com', names: ['이진화'], days: [['2026-09-01', dayValues({ input_tokens: 400 })]] })],
+        [unitKeyOf(null, 'sales@malgnsoft.com'), unit({ userEmail: 'sales@malgnsoft.com', days: [['2026-09-01', dayValues({ input_tokens: 9 })]] })],
+        [unitKeyOf(null, null), unit({ days: [['2026-09-01', dayValues({ input_tokens: 3 })]] })]
+      ])
+      const registry = new Map([
+        ['claude', sharedRow({ employeeId: 'claude' })],
+        ['malgn', sharedRow({ employeeId: 'malgn', label: '영업팀 공용 PC' })],
+        ['public', sharedRow({ employeeId: 'public' })]
+      ])
+
+      expect(duplicateKeys(mergeD1AndPromUsers(d1Users, byUnit, new Map()))).toEqual([])
+      const with3 = mergeD1AndPromUsers(d1Users, byUnit, registry)
+      expect(duplicateKeys(with3)).toEqual([])
+      // 충돌한 u2만 d1only:로 비켜나고, 충돌 없는 u1은 emp: 그대로다(변경이 최소 범위임을 잠근다).
+      expect(with3.find((r) => r.user_id === 'u2').row_key).toBe('d1only:u2')
+      expect(with3.find((r) => r.user_id === 'u1').row_key).toBe('emp:hopegiver')
+      expect(with3.find((r) => r.user_id === 'u3').row_key).toBe('d1only:u3')
+    })
+  })
+
+  // 완료판정 ⑤ — 총합 보존 회귀 가드. 등록/해제는 귀속만 옮기고 합계를 절대 바꾸지 않는다(§4.4).
+  it('[총합 보존] 레지스트리 유/무에 대해 Σ rows.total_tokens가 정확히 동일하다(귀속만 이동한다)', () => {
+    const d1Users = [
+      { id: 'u1', email: 'hopegiver@malgnsoft.com', name: '하근호', role: 'administrator', status: 'active', employee_id: 'hopegiver' },
+      { id: 'u2', email: 'djkim@malgnsoft.com', name: '김덕조', role: 'employee', status: 'active', employee_id: 'malgn' },
+      { id: 'u3', email: 'new@malgnsoft.com', name: '신입', role: 'employee', status: 'active', employee_id: null }
+    ]
+    const byUnit = new Map([
+      [unitKeyOf('hopegiver', 'dev@malgnsoft.com'), unit({ employeeId: 'hopegiver', userEmail: 'dev@malgnsoft.com', names: ['하근호'], days: [['2026-09-01', dayValues({ input_tokens: 100, output_tokens: 7 })]] })],
+      [unitKeyOf('malgn', 'ai@malgnsoft.com'), unit({ employeeId: 'malgn', userEmail: 'ai@malgnsoft.com', names: ['김덕조'], days: [['2026-09-01', dayValues({ input_tokens: 200, cache_read_tokens: 11 })]] })],
+      [unitKeyOf('claude', 'claude@malgnsoft.com'), unit({ employeeId: 'claude', userEmail: 'claude@malgnsoft.com', names: ['김도형'], days: [['2026-09-01', dayValues({ input_tokens: 300 })]] })],
+      [unitKeyOf('claude', 'ai@malgnsoft.com'), unit({ employeeId: 'claude', userEmail: 'ai@malgnsoft.com', names: ['김도형'], days: [['2026-09-02', dayValues({ input_tokens: 5 })]] })],
+      [unitKeyOf('public', 'public@malgnsoft.com'), unit({ employeeId: 'public', userEmail: 'public@malgnsoft.com', names: ['이진화'], days: [['2026-09-01', dayValues({ input_tokens: 400 })]] })],
+      [unitKeyOf(null, 'sales@malgnsoft.com'), unit({ userEmail: 'sales@malgnsoft.com', days: [['2026-09-01', dayValues({ input_tokens: 9 })]] })],
+      [unitKeyOf(null, null), unit({ days: [['2026-09-01', dayValues({ input_tokens: 3 })]] })]
+    ])
+    const registry = new Map([
+      ['claude', sharedRow({ employeeId: 'claude' })],
+      ['malgn', sharedRow({ employeeId: 'malgn', label: '영업팀 공용 PC' })],
+      ['public', sharedRow({ employeeId: 'public' })]
+    ])
+
+    const without = mergeD1AndPromUsers(d1Users, byUnit, new Map())
+    const with3 = mergeD1AndPromUsers(d1Users, byUnit, registry)
+
+    const expected = 100 + 7 + 200 + 11 + 300 + 5 + 400 + 9 + 3
+    expect(sumTotalTokens(without)).toBe(expected)
+    expect(sumTotalTokens(with3)).toBe(expected) // 어떤 등록/해제 조작으로도 총합은 변하지 않는다
+
+    // 귀속만 이동했다 — 'malgn'을 보유한 u2 행이 0이 되고 그만큼이 공용 행으로 옮겨간다.
+    expect(without.find((r) => r.user_id === 'u2').total_tokens).toBe(211)
+    expect(with3.find((r) => r.user_id === 'u2').total_tokens).toBe(0)
+    expect(with3.find((r) => r.row_key === 'emp:malgn' && r.source === 'prometheus_only').total_tokens).toBe(211)
+    // 공용 축 하나당 1행 — 서로 다른 공용 employee_id를 하나로 합치지 않는다(§4.4).
+    expect(with3.filter((r) => r.identity_source === 'shared_workstation' && r.source === 'prometheus_only')).toHaveLength(3)
+    // claude는 user_email 2개에 걸쳐도 1행 + group_accounts 2건이다(S12).
+    const claudeRow = with3.find((r) => r.row_key === 'emp:claude')
+    expect(claudeRow.total_tokens).toBe(305)
+    expect(claudeRow.group_accounts).toHaveLength(2)
+  })
+
+  describe('observed_name_matches_user — 발견 장치(§4.6, 분류에는 일절 관여하지 않는다)', () => {
+    const djkim = { id: 'u1', email: 'djkim@malgnsoft.com', name: '김덕조', role: 'employee', status: 'active', employee_id: 'djkim' }
+    function malgnByUnit(name = '김덕조') {
+      return new Map([
+        [unitKeyOf('malgn', 'ai@malgnsoft.com'), unit({ employeeId: 'malgn', userEmail: 'ai@malgnsoft.com', names: [name], days: [['2026-09-01', dayValues({ input_tokens: 10 })]] })]
+      ])
+    }
+
+    it('관측 이름과 같은 이름의 회원이 정확히 1명이고 그 회원이 다른 축에 연결돼 있으면 채워진다(실측: malgn↔김덕조/djkim)', () => {
+      const rows = mergeD1AndPromUsers([djkim], malgnByUnit(), new Map())
+      const promOnly = rows.find((r) => r.source === 'prometheus_only')
+      expect(promOnly.observed_name_matches_user).toEqual({ user_id: 'u1', email: 'djkim@malgnsoft.com', employee_id: 'djkim' })
+    })
+
+    it('동명이인이 2명이면 null — 사람을 지목할 수 없으면 지목하지 않는다(오탐 0 원칙)', () => {
+      const twin = { id: 'u2', email: 'djkim2@malgnsoft.com', name: '김덕조', role: 'employee', status: 'active', employee_id: 'djkim2' }
+      const rows = mergeD1AndPromUsers([djkim, twin], malgnByUnit(), new Map())
+      expect(rows.find((r) => r.source === 'prometheus_only').observed_name_matches_user).toBeNull()
+    })
+
+    it('이미 공용으로 등록된 행에서는 채우지 않는다(결론이 난 축이라 경고가 노이즈다)', () => {
+      const rows = mergeD1AndPromUsers([djkim], malgnByUnit(), new Map([['malgn', sharedRow({ employeeId: 'malgn' })]]))
+      expect(rows.find((r) => r.source === 'prometheus_only').observed_name_matches_user).toBeNull()
+    })
+
+    it('일치하는 회원이 없거나(claude↔김도형) d1_user 행이면 null', () => {
+      const rows = mergeD1AndPromUsers([djkim], claudeByUnit(), new Map())
+      expect(rows.find((r) => r.source === 'prometheus_only').observed_name_matches_user).toBeNull()
+      expect(rows.find((r) => r.user_id === 'u1').observed_name_matches_user).toBeNull()
     })
   })
 })
@@ -381,10 +629,14 @@ describe('getUsageOverviewHybrid — M-3 회귀(리뷰 2026-09-07): 스코프 �
   // readHybridSnapshot(server/dao/usage-prom-daily.js)의 db.batch() 응답 4개를 그대로 흉내낸다 —
   // stmts 내용은 보지 않고 고정 응답을 순서대로 돌려준다(SQL 자체는 DAO 계층 책임, 여기는
   // getUsageOverviewHybrid의 coveredDays/gapDays 판정 로직만 검증).
-  function fakeEnv({ validRows, coverageInRange, allCoverage, overall }) {
+  // sharedRows — usage_shared_workstations 전건 조회(server/dao/usage-shared-workstations.js
+  // listAll)는 bind 없이 곧바로 .all()을 부른다. getUsageOverviewHybrid가 이 조회를
+  // readHybridSnapshot과 병렬로 수행하므로 목이 .all()을 제공하지 않으면 요청 전체가 실패한다
+  // (fail-closed가 실제로 작동한다는 방증이기도 하다).
+  function fakeEnv({ validRows, coverageInRange, allCoverage, overall, sharedRows = [] }) {
     return {
       DB: {
-        prepare() { return { bind: () => ({}) } },
+        prepare() { return { bind: () => ({}), all: async () => ({ results: sharedRows }) } },
         async batch() {
           return [{ results: validRows }, { results: coverageInRange }, { results: allCoverage }, { results: [overall] }]
         }

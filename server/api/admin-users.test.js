@@ -14,6 +14,14 @@ const findByEmployeeIdMock = vi.fn()
 const insertMock = vi.fn()
 const buildUpdateEmployeeIdStatementMock = vi.fn()
 const buildRecordStatementIfPrecedingChangedMock = vi.fn()
+// 공용 워크스테이션 레지스트리 PK 단건 조회(usage_shared_workstations, migrations/0022) —
+// docs/design/usage-shared-workstation-axes.md §5.1의 409 SHARED_WORKSTATION 가드가 쓴다.
+const sharedFindByIdMock = vi.fn()
+
+vi.mock('../dao/usage-shared-workstations.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return { ...actual, findById: (...args) => sharedFindByIdMock(...args) }
+})
 
 vi.mock('../dao/users.js', async (importOriginal) => {
   const actual = await importOriginal()
@@ -52,12 +60,19 @@ function targetRow(overrides = {}) {
   return { id: TARGET_ID, email: 'djkim@malgnsoft.com', name: '김덕조', role: 'administrator', status: 'active', employee_id: 'djkim', created_at: '2026-01-01T00:00:00.000Z', ...overrides }
 }
 
+// c.env.DB는 batch만 있는 목이다 — DAO(usersDao/auditLogsDao/sharedWorkstationsDao)는 전부
+// vi.mock으로 대체돼 prepare를 호출하지 않는다. 공용 워크스테이션 가드가 추가되며 그 DAO도 함께
+// 대체했다(계약을 낮춘 것이 아니라, 라우트 로직만 D1 없이 검증한다는 이 파일의 기존 방침 그대로다).
 function putRequest(app, batch, body) {
   return app.request(
     `/api/admin/users/${TARGET_ID}/employee-id`,
     { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
     { DB: { batch } }
   )
+}
+
+function sharedRow(overrides = {}) {
+  return { employee_id: 'claude', label: '3층 공용 PC', note: null, registered_by: '01kadminulid', created_at: '2026-09-08T02:00:00.000Z', updated_at: '2026-09-08T02:00:00.000Z', ...overrides }
 }
 
 beforeEach(() => {
@@ -67,8 +82,10 @@ beforeEach(() => {
   insertMock.mockReset()
   buildUpdateEmployeeIdStatementMock.mockReset()
   buildRecordStatementIfPrecedingChangedMock.mockReset()
+  sharedFindByIdMock.mockReset()
   buildUpdateEmployeeIdStatementMock.mockReturnValue({ __kind: 'update-stmt' })
   buildRecordStatementIfPrecedingChangedMock.mockReturnValue({ id: 'audit-id', stmt: { __kind: 'audit-stmt' } })
+  sharedFindByIdMock.mockResolvedValue(null) // 기본: 공용 워크스테이션으로 등록되지 않은 값
 })
 
 describe('PUT /api/admin/users/:id/employee-id — 권한·검증', () => {
@@ -209,6 +226,126 @@ describe('PUT /api/admin/users/:id/employee-id — 409 충돌(무언의 이전 �
     expect(batch).toHaveBeenCalledTimes(1)
     // CAS 바인딩 값 확인 — WHERE employee_id IS ? 에 이 요청이 읽은 'djkim'이 그대로 들어갔다.
     expect(buildUpdateEmployeeIdStatementMock).toHaveBeenCalledWith(expect.anything(), TARGET_ID, 'malgn', 'djkim')
+  })
+})
+
+// docs/design/usage-shared-workstation-axes.md §5.1 — 등록된 공용 워크스테이션 축(여러 명이 함께
+// 쓰는 PC)을 개인 계정에 연결하면 그룹 전체 사용량이 한 사람의 개인 사용량으로 표시된다.
+// 강제 우회(force)를 두지 않는다: 정당한 연결이 필요하면 먼저 레지스트리에서 해제해야 한다.
+describe('PUT /api/admin/users/:id/employee-id — 409 SHARED_WORKSTATION(공용 축 연결 차단)', () => {
+  it('등록된 공용 값을 연결하려 하면 409 SHARED_WORKSTATION + details, batch 미호출, 감사 미기록', async () => {
+    findByIdMock.mockResolvedValue(targetRow({ employee_id: 'djkim' }))
+    sharedFindByIdMock.mockResolvedValue(sharedRow())
+    const app = makeApp()
+    const batch = vi.fn()
+
+    const res = await putRequest(app, batch, { employee_id: 'claude' })
+    const body = await res.json()
+
+    expect(res.status).toBe(409)
+    expect(body.error.code).toBe('SHARED_WORKSTATION')
+    expect(body.error.details).toEqual({
+      employee_id: 'claude',
+      label: '3층 공용 PC',
+      registered_at: '2026-09-08T02:00:00.000Z',
+      registered_by_user_id: '01kadminulid'
+    })
+    expect(batch).not.toHaveBeenCalled() // users 행 불변
+    expect(buildRecordStatementIfPrecedingChangedMock).not.toHaveBeenCalled() // 감사 증가 0
+    expect(sharedFindByIdMock).toHaveBeenCalledWith(expect.anything(), 'claude') // 정규화된 값으로 조회
+  })
+
+  it('force/confirm 같은 우회 플래그를 실어도 차단은 그대로다(우회 경로 없음)', async () => {
+    findByIdMock.mockResolvedValue(targetRow({ employee_id: 'djkim' }))
+    sharedFindByIdMock.mockResolvedValue(sharedRow())
+    const app = makeApp()
+    const batch = vi.fn()
+
+    const res = await putRequest(app, batch, { employee_id: 'claude', force: true, confirm: true })
+
+    expect(res.status).toBe(409)
+    expect((await res.json()).error.code).toBe('SHARED_WORKSTATION')
+    expect(batch).not.toHaveBeenCalled()
+  })
+
+  it('해제(null)는 현재 값이 공용 축이어도 항상 성공한다 — 잘못된 상태의 탈출구를 막지 않는다', async () => {
+    findByIdMock
+      .mockResolvedValueOnce(targetRow({ employee_id: 'claude' })) // 현재 값이 공용 축(모순 상태)
+      .mockResolvedValueOnce(targetRow({ employee_id: null }))
+    sharedFindByIdMock.mockResolvedValue(sharedRow()) // 등록돼 있어도
+    const app = makeApp()
+    const batch = vi.fn().mockResolvedValue([{ meta: { changes: 1 } }, { meta: { changes: 1 } }])
+
+    const res = await putRequest(app, batch, { employee_id: null })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.changed).toBe(true)
+    expect(body.user.employee_id).toBeNull()
+    expect(batch).toHaveBeenCalledTimes(1)
+    expect(sharedFindByIdMock).not.toHaveBeenCalled() // null은 레지스트리 조회 자체를 하지 않는다
+  })
+
+  it('레지스트리 조회가 실패하면 fail-open 하지 않는다 — 연결을 통과시키지 않고 5xx로 떨어진다', async () => {
+    findByIdMock.mockResolvedValue(targetRow({ employee_id: 'djkim' }))
+    sharedFindByIdMock.mockRejectedValue(new Error('D1_ERROR: connection lost'))
+    const app = makeApp()
+    app.onError((err, c) => c.json({ error: { code: 'INTERNAL_ERROR', message: err.message } }, 500))
+    const batch = vi.fn()
+
+    const res = await putRequest(app, batch, { employee_id: 'claude' })
+
+    expect(res.status).toBe(500)
+    expect(batch).not.toHaveBeenCalled() // 안전장치가 장애 시 자동으로 꺼지지 않는다
+    expect(findByEmployeeIdMock).not.toHaveBeenCalled()
+  })
+
+  it('공용 등록 + 타 사용자 보유가 동시에 성립하면 오류 우선순위가 결정적이다 — 항상 SHARED_WORKSTATION', async () => {
+    findByIdMock.mockResolvedValue(targetRow({ employee_id: 'djkim' }))
+    sharedFindByIdMock.mockResolvedValue(sharedRow())
+    findByEmployeeIdMock.mockResolvedValue({ id: 'other-user-id', email: 'jh.lee@malgnsoft.com' })
+    const app = makeApp()
+    const batch = vi.fn()
+
+    const res = await putRequest(app, batch, { employee_id: 'claude' })
+    const body = await res.json()
+
+    expect(res.status).toBe(409)
+    expect(body.error.code).toBe('SHARED_WORKSTATION') // CONFLICT가 아니다(먼저 할 조치가 등록 해제)
+    // 보유자 검사에 도달하지도 않는다 — 순서가 코드로 고정돼 있다.
+    expect(findByEmployeeIdMock).not.toHaveBeenCalled()
+    expect(batch).not.toHaveBeenCalled()
+  })
+
+  it('경합(사전 검사 통과 후 공용 등록됨) → UPDATE 0행 재판정으로 STALE_STATE가 아니라 SHARED_WORKSTATION', async () => {
+    findByIdMock.mockResolvedValue(targetRow({ employee_id: 'djkim' }))
+    findByEmployeeIdMock.mockResolvedValue(null)
+    sharedFindByIdMock
+      .mockResolvedValueOnce(null) // 사전 검사 시점: 아직 등록 안 됨(통과)
+      .mockResolvedValueOnce(sharedRow()) // 커밋 직전에 다른 관리자가 등록 → UPDATE WHERE NOT EXISTS가 0행
+    const app = makeApp()
+    const batch = vi.fn().mockResolvedValue([{ meta: { changes: 0 } }, { meta: { changes: 0 } }])
+
+    const res = await putRequest(app, batch, { employee_id: 'claude' })
+    const body = await res.json()
+
+    expect(res.status).toBe(409)
+    expect(body.error.code).toBe('SHARED_WORKSTATION')
+    expect(body.error.details.employee_id).toBe('claude')
+  })
+
+  it('등록되지 않은 값은 기존 경로 그대로 통과한다(등록 전까지 동작 무변경)', async () => {
+    findByIdMock
+      .mockResolvedValueOnce(targetRow({ employee_id: 'djkim' }))
+      .mockResolvedValueOnce(targetRow({ employee_id: 'malgn' }))
+    findByEmployeeIdMock.mockResolvedValue(null)
+    const app = makeApp()
+    const batch = vi.fn().mockResolvedValue([{ meta: { changes: 1 } }, { meta: { changes: 1 } }])
+
+    const res = await putRequest(app, batch, { employee_id: 'malgn' })
+
+    expect(res.status).toBe(200)
+    expect(batch).toHaveBeenCalledTimes(1)
   })
 })
 

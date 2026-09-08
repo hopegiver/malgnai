@@ -96,8 +96,26 @@ export async function findByEmployeeId(db, employeeId) {
  *  — 설계 §5.4가 기각한 것은 "클라이언트가 보내는" expected_current 필드다(프런트 계약 변경). 서버가
  *  자신이 방금 읽은 값을 그대로 WHERE에 되돌리는 이 방식은 프런트에 새 필드를 요구하지 않는다.
  *  `IS`는 SQLite에서 NULL을 안전하게 비교한다(employee_id가 NULL인 미연동 사용자도 `= ?`가 아니라
- *  `IS ?`라 정상 동작). */
+ *  `IS ?`라 정상 동작).
+ *
+ *  【공용 워크스테이션 원자 차단, docs/design/usage-shared-workstation-axes.md §5.2 방향 A】
+ *  WHERE에 `NOT EXISTS (SELECT 1 FROM usage_shared_workstations …)`를 추가했다. 라우트의 사전 검사
+ *  (409 SHARED_WORKSTATION)와 이 커밋 사이에 다른 관리자가 그 값을 공용으로 등록하는 경합 창이
+ *  있는데, 그 창을 **한 문장 안에서** 닫는다. 0행이 되면 원인이 두 가지(CAS 불일치 / 공용 등록)라
+ *  호출부가 레지스트리를 다시 읽어 409를 재판정한다(admin-users.js).
+ *  ⚠️ 이 UPDATE가 사용량 도메인 테이블(usage_shared_workstations)을 참조하는 이유는 **원자성**
+ *     하나뿐이다 — 애플리케이션 계층 사전 검사만으로는 이 경합을 닫을 수 없다. 다른 곳에서
+ *     users DAO가 사용량 스키마에 의존하게 만들지 말 것(읽기 경로는 여전히 완전히 분리돼 있다).
+ *  ⚠️ 해제(employeeId === null)는 이 조건을 통과한다(`? IS NULL` 분기) — 잘못된 상태에서 빠져나오는
+ *     경로를 절대 막지 않는다(레거시 탈출구).
+ *  바인딩은 번호 파라미터(?NNN) 대신 같은 값을 반복 바인딩한다 — D1 드라이버의 번호 파라미터 지원에
+ *  기대지 않고 순수 위치 파라미터만 쓴다. */
 export function buildUpdateEmployeeIdStatement(db, id, employeeId, previousValue) {
   const now = new Date().toISOString()
-  return db.prepare('UPDATE users SET employee_id = ?, updated_at = ? WHERE id = ? AND employee_id IS ?').bind(employeeId, now, id, previousValue)
+  return db.prepare(
+    `UPDATE users SET employee_id = ?, updated_at = ?
+      WHERE id = ?
+        AND employee_id IS ?
+        AND (? IS NULL OR NOT EXISTS (SELECT 1 FROM usage_shared_workstations w WHERE w.employee_id = ?))`
+  ).bind(employeeId, now, id, previousValue, employeeId, employeeId)
 }

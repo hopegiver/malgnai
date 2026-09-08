@@ -4,8 +4,9 @@
 // docs/design/usage-employee-identity.md가 식별 축(employee_id) 개정분의 정본이다.
 import { runQueriesInWaves, withRouteBudget, PROM_CACHE_TTL_SECONDS } from './prom-client.js'
 import { readHybridSnapshot } from '../dao/usage-prom-daily.js'
+import * as sharedWorkstationsDao from '../dao/usage-shared-workstations.js'
 import { todayUTCString as sharedTodayUTCString, addDaysUTC } from './utc-day.js'
-import { employeeIdMatcher, isPromSafeEmployeeId, decodeEmployeeName, resolveEmployeeScope, pickDisplayName } from './usage-identity.js'
+import { employeeIdMatcher, isPromSafeEmployeeId, decodeEmployeeName, resolveEmployeeScope, pickDisplayName, pickSharedWorkstationName } from './usage-identity.js'
 
 // 집계식 정본 — 이 상수 하나에서만 모든 PromQL이 생성된다(설계 G3 "안전 임계값 정본 단일화").
 // increase(): Prometheus 관용구, 회사 Grafana와 동일 계산(전환 목적에 부합). 세션 첫 샘플 과소집계는
@@ -477,7 +478,19 @@ function addValuesInto(acc, v) {
 }
 
 /** rowKey 규칙(§5.1): employee_id 있으면 emp:<id>, 없고 user_email만 있으면 grp:<email>, 둘 다
- *  없으면 unk:(최대 1행) — 응답 내 유일 키이자 tie-break 키(row_key)의 정본이다. */
+ *  없으면 unk:(최대 1행) — 응답 내 유일 키이자 tie-break 키(row_key)의 정본이다.
+ *
+ *  ⚠️ 비협상(usage-shared-workstation-axes.md PM 판정1, 2026-09-08) — **공용 워크스테이션 축도
+ *  `emp:<id>` 그대로다.** 설계 초안의 `shr:<id>` 재키잉은 채택하지 않았다: `row_key`는 정렬
+ *  tie-break 키이자 프런트 `v-for :key` 계약값이고, `employees.get('emp:'+id)` 조회에 묶인 지점이
+ *  3곳(usage-prom.js의 mergeD1AndPromUsers·getUserDrilldown, usage.js의 /me)이라 접두사를 바꾸면
+ *  그 계약이 함께 흔들린다. 대신 오귀속은 mergeD1AndPromUsers가 **등록된 공용 축을 d1_user 행으로
+ *  consume하지 않는 것**으로 막는다(아래) — 총합은 보존되고 공용 축은 별도 행으로 남는다.
+ *  나중에 이 함수를 `shr:` 재키잉으로 "고치지" 말 것(usage-prom.test.js에 잠금 테스트가 있다).
+ *
+ *  그 대신 유일성은 반대쪽에서 지킨다: consume되지 않은 짝(공용 값을 보유한 회원의 d1_user 행)은
+ *  `emp:` 대신 `d1only:<user_id>`를 쓴다(mergeD1AndPromUsers 참고). 이 함수는 관측 엔트리(byUnit)
+ *  전용이라 그 예외를 알 필요가 없다 — 여기서 sharedById를 보게 만들지 말 것. */
 export function rowKeyOf(employeeId, userEmail) {
   if (employeeId) return `emp:${employeeId}`
   if (userEmail) return `grp:${userEmail}`
@@ -486,17 +499,36 @@ export function rowKeyOf(employeeId, userEmail) {
 
 /** byUnit → Map<rowKey, EmployeeEntry>. EmployeeEntry.days는 계정을 합산해 직원×날짜로 접은 것 —
  *  기존 userDayRows()/userTotals()가 손대지 않고 그대로 동작한다(둘 다 entry.days만 본다).
- *  EmployeeEntry.accounts는 계정별 기간 합계만 갖는다(group_accounts 응답에 필요한 전부). */
-export function foldToEmployees(byUnit) {
+ *  EmployeeEntry.accounts는 계정별 기간 합계만 갖는다(group_accounts 응답에 필요한 전부).
+ *
+ *  sharedById(usage-shared-workstation-axes.md §4.1): Map<employee_id, row> — 관리자 등록
+ *  레지스트리(usage_shared_workstations). **필수 인자다.** 기본값 `new Map()`을 주지 않는 이유:
+ *  인자를 빠뜨린 호출이 조용히 현행 버그 동작("employee_id 라벨이 있으면 곧 개인")으로 되돌아가고,
+ *  그 실패는 개인 문의가 올 때까지 아무도 모른다. 호출부가 4곳뿐이고 전부 스모크 경로라 시끄럽게
+ *  실패해 즉시 발견되는 쪽을 택한다(설계 S11). 레지스트리가 비어 있음을 뜻하려면 명시적으로
+ *  `new Map()`을 넘긴다. */
+export function foldToEmployees(byUnit, sharedById) {
+  if (!(sharedById instanceof Map)) {
+    throw new TypeError('foldToEmployees(byUnit, sharedById): sharedById must be a Map (pass new Map() for "registry is empty")')
+  }
   const employees = new Map()
   for (const unit of byUnit.values()) {
     const rowKey = rowKeyOf(unit.employeeId, unit.userEmail)
+    const shared = unit.employeeId ? sharedById.get(unit.employeeId) || null : null
     let emp = employees.get(rowKey)
     if (!emp) {
       emp = {
         rowKey,
         employeeId: unit.employeeId || null,
-        identitySource: unit.employeeId ? 'employee_id' : (unit.userEmail ? 'group_account' : 'unknown'),
+        // identity_source에 값 1개(shared_workstation)를 추가한다. 기존 source("d1_user"/
+        // "prometheus_only") 값은 늘리지 않는다 — 프런트가 source를 5곳에서 분기 중이라 배포 갭
+        // 구간에 옛 SPA가 새 값을 else로 떨어뜨린다(설계 §3.4). identity_source는 프런트 소비처가
+        // 0이라 값 추가가 안전하다.
+        identitySource: unit.employeeId
+          ? (shared ? 'shared_workstation' : 'employee_id')
+          : (unit.userEmail ? 'group_account' : 'unknown'),
+        isShared: !!shared,
+        sharedLabel: shared ? (shared.label || null) : null,
         employeeNames: new Set(),
         accounts: new Map(),
         days: new Map()
@@ -544,15 +576,29 @@ export function groupAccountsOf(emp) {
  *  붙임)이 발생하면 그 행의 관측 이름이 D1 이름과 달라지므로 관리자가 즉시 알아챌 수 있다. D1
  *  사용자에 매칭되지 않는 관측치(허브 계정이 없거나 employee_id가 아직 아무에게도 연결되지 않은
  *  경우)는 employees Map에서 소비되지 않은 채 남아 아래 두 번째 루프에서 prometheus_only 행으로
- *  분리된다 — 값이 사라지지 않고 총합이 보존된다(§7.1). */
-export function mergeD1AndPromUsers(d1Users, byUnit) {
-  const employees = foldToEmployees(byUnit)
+ *  분리된다 — 값이 사라지지 않고 총합이 보존된다(§7.1).
+ *
+ *  【공용 워크스테이션 축, usage-shared-workstation-axes.md】 sharedById에 등록된 employee_id는
+ *  **어떤 회원 행도 consume하지 못한다.** 즉 그 값을 users.employee_id로 보유한 사용자가 있어도
+ *  (직접 DB 조작 등으로만 생기는 모순 상태 — 쓰기 경로는 §5.1·§5.2가 막는다) 그 사용자 행의
+ *  사용량은 0이고 group_accounts는 비며, 관측 엔트리는 두 번째 루프에서 별도 행으로 나온다.
+ *  결과적으로 **Σ행 = Σ엔트리 = Σunit** 이 그대로 유지되고(귀속만 이동), 여러 명의 합계가 한 사람의
+ *  개인 사용량으로 표시되는 일이 구조적으로 일어나지 않는다. 그 사용자 행에는
+ *  shared_workstation_conflict:true 경고를 실어 "조용히 0"이 되지 않게 한다.
+ *  이때 그 사용자 행의 row_key만 `d1only:<user_id>`가 된다 — 같은 `emp:<id>`가 두 루프에서 각각
+ *  push돼 응답 내 유일 키 계약(docs/api.md §5.9.2)이 깨지는 것을 막는 유일한 조정 지점이다. */
+export function mergeD1AndPromUsers(d1Users, byUnit, sharedById) {
+  const employees = foldToEmployees(byUnit, sharedById)
   const rows = []
   const consumedRowKeys = new Set()
+  const nameIndex = buildD1NameIndex(d1Users)
 
   for (const u of d1Users) {
     const empId = u.employee_id || null
-    const emp = empId ? employees.get(`emp:${empId}`) : null
+    const shared = empId ? sharedById.get(empId) || null : null
+    // 공용 축이면 employees.get() 조회 자체를 하지 않는다 — 엔트리를 consume하지 않아야 두 번째
+    // 루프에서 공용 행으로 반드시 나오고(총합 보존), 이 회원 행에는 남의 사용량이 붙지 않는다.
+    const emp = empId && !shared ? employees.get(`emp:${empId}`) : null
     if (emp) consumedRowKeys.add(emp.rowKey)
 
     const totals = emp ? userTotals(emp) : zeroTotals()
@@ -564,13 +610,28 @@ export function mergeD1AndPromUsers(d1Users, byUnit) {
     const name = pickDisplayName({ d1Name: u.name, employeeNames: emp ? emp.employeeNames : null, employeeId: empId })
 
     rows.push({
-      row_key: empId ? `emp:${empId}` : `d1only:${u.id}`,
+      // row_key 유일성(docs/api.md §5.9.2 "응답 내 유일 키") — 공용 충돌 상태(shared)에서 이 회원
+      // 행은 `emp:<id>`를 쓸 수 없다: 그 축의 관측 엔트리를 consume하지 않으므로 아래 두 번째 루프가
+      // 같은 `emp:<id>`를 반드시 한 번 더 push해 키가 중복된다(실측: 프런트 v-for :key가 깨져 한 행만
+      // 렌더, 정렬 tie-break도 두 행을 구분하지 못한다). 수치를 싣는 쪽(공용 관측 행)이 `emp:<id>`를
+      // 유지하는 것은 비협상이므로(PM 판정1) 조정은 수치가 0인 이쪽이 받는다 — 이 코드베이스가 이미
+      // "귀속되는 관측 축이 없는 D1 사용자"에 쓰는 `d1only:<user_id>` 관례를 그대로 적용한다. 공용
+      // 충돌 회원은 실제로 그 상태다(사용량 0, group_accounts []): employee_id 컬럼 값은 들고 있지만
+      // 그 축의 관측치는 이 행에 귀속되지 않는다. `d1only:`는 user_id가 PK라 그 자체로 유일하고
+      // Prometheus 유래 행이 절대 쓰지 않는 접두사라 두 루프 사이 충돌이 원천적으로 불가능하다.
+      // employee_id 필드와 shared_workstation_conflict 플래그는 그대로 실린다 — 관리자는 "이 회원이
+      // 어떤 값을 잘못 들고 있는지"를 row_key가 아니라 그 두 필드로 본다.
+      row_key: empId && !shared ? `emp:${empId}` : `d1only:${u.id}`,
       user_id: u.id,
       employee_id: empId,
-      identity_source: empId ? 'employee_id' : null,
+      identity_source: empId ? (shared ? 'shared_workstation' : 'employee_id') : null,
       name, email: u.email, role: u.role, status: u.status, source: 'd1_user',
       observed_employee_name: observedName,
       observed_name_mismatch: observedNameMismatch,
+      observed_name_matches_user: null, // prometheus_only 행 전용 신호(아래) — d1_user 행에는 항상 null
+      // 발생하면 안 되는 상태의 가시화(설계 S6) — 이 회원의 연동 값이 공용 축으로 등록돼 있어
+      // 사용량이 귀속되지 않는다. 숫자가 0인 이유를 화면이 설명할 수 있어야 한다.
+      shared_workstation_conflict: !!shared,
       group_accounts: groupAccounts,
       ...totals,
       tool_calls: null, tool_errors: null, retries: null, turns: null, api_calls: null
@@ -581,7 +642,12 @@ export function mergeD1AndPromUsers(d1Users, byUnit) {
     const totals = userTotals(emp)
     const groupAccounts = groupAccountsOf(emp)
     const observedName = pickDisplayName({ d1Name: null, employeeNames: emp.employeeNames, employeeId: null })
-    const name = pickDisplayName({ d1Name: null, employeeNames: emp.employeeNames, employeeId: emp.employeeId })
+    // 공용 축의 표시 이름은 등록 라벨 || employee_id — 관측 이름("김도형")을 쓰지 않는다(§4.1-3).
+    // 그 표시가 바로 이번 사고의 원인이라 폴백조차 두지 않는다(S14). 관측 이름은
+    // observed_employee_name에 그대로 남는다.
+    const name = emp.isShared
+      ? pickSharedWorkstationName({ label: emp.sharedLabel, employeeId: emp.employeeId })
+      : pickDisplayName({ d1Name: null, employeeNames: emp.employeeNames, employeeId: emp.employeeId })
     rows.push({
       row_key: rowKey,
       user_id: null,
@@ -590,12 +656,46 @@ export function mergeD1AndPromUsers(d1Users, byUnit) {
       name, email: null, role: null, status: 'unregistered', source: 'prometheus_only',
       observed_employee_name: observedName,
       observed_name_mismatch: false,
+      observed_name_matches_user: emp.isShared ? null : matchObservedNameToUser(nameIndex, observedName, emp.employeeId),
+      shared_workstation_conflict: false, // 이 행은 회원 행이 아니다 — 충돌 개념 자체가 없다
       group_accounts: groupAccounts,
       ...totals,
       tool_calls: null, tool_errors: null, retries: null, turns: null, api_calls: null
     })
   }
   return rows
+}
+
+/** 이름 충돌 경고(§4.6)용 인메모리 인덱스 — d1Users를 name(트림, 원문 대소문자 그대로) 기준으로
+ *  묶는다. D1 왕복 0회(listAll() 결과 재사용). 같은 이름이 2명 이상이면 배열 길이로 그 사실을
+ *  그대로 들고 있다가 아래에서 "지목 불가"로 처리한다. */
+function buildD1NameIndex(d1Users) {
+  const index = new Map()
+  for (const u of d1Users) {
+    const key = typeof u.name === 'string' ? u.name.trim() : ''
+    if (!key) continue
+    const bucket = index.get(key)
+    if (bucket) bucket.push(u)
+    else index.set(key, [u])
+  }
+  return index
+}
+
+/** 미연결 관측 행의 관측 이름이 **이미 다른 축에 연결된 회원의 이름과 정확히 일치**하는지 —
+ *  "이 관측치가 사실은 그 사람의 공용 PC일 수 있다"는 발견 신호다(설계 §2.3의 결정적 장치 1,
+ *  자동 판정을 기각한 자리를 메운다). 휴리스틱이 아니라 D1 사실의 대조이며 **분류에 일절 관여하지
+ *  않는다**(identity_source·rowKey·집계 어디에도 영향 없음, 순수 표시용).
+ *  - 정확히 1명일 때만 채운다. 동명이인 2명 이상이면 null — 사람을 지목할 수 없으면 지목하지 않는다.
+ *  - 그 회원의 employee_id가 이 행의 값과 같으면 null(정상 연결이라 경고할 것이 없다).
+ *  - 공용으로 이미 등록된 행에서는 호출하지 않는다(결론이 난 축이라 경고가 노이즈다). */
+function matchObservedNameToUser(nameIndex, observedName, employeeId) {
+  if (!observedName) return null
+  const bucket = nameIndex.get(observedName.trim())
+  if (!bucket || bucket.length !== 1) return null
+  const u = bucket[0]
+  const holderEmployeeId = u.employee_id || null
+  if (!holderEmployeeId || holderEmployeeId === employeeId) return null
+  return { user_id: u.id, email: u.email || null, employee_id: holderEmployeeId }
 }
 
 // ---------------------------------------------------------------------------
@@ -710,11 +810,16 @@ function mergeModelMaps(tokensByModel, costByModel) {
  *  employee_id로 사용자를 역조회하지 않는다, 그냥 매처에 넣을 뿐). */
 export async function getUserDrilldown(env, { from, to, employeeId, refresh }) {
   if (!isPromSafeEmployeeId(employeeId)) {
-    return { notInMetrics: true, rows: [], totals: { ...zeroTotals(), active_time_seconds: 0 }, groupAccounts: [], byModel: [], unknownTypes: new Set(), meta: aggregateCacheMeta([]) }
+    return { notInMetrics: true, sharedWorkstation: false, rows: [], totals: { ...zeroTotals(), active_time_seconds: 0 }, groupAccounts: [], byModel: [], unknownTypes: new Set(), meta: aggregateCacheMeta([]) }
   }
 
   const matchers = [employeeIdMatcher(employeeId)]
-  const overview = await getUsageOverview(env, { from, to, refresh, matchers })
+  // 레지스트리는 D1 단일 조회라 상류 왕복과 병렬로 읽는다(레이턴시 증가 0). 조회가 실패하면 예외가
+  // 그대로 전파돼 500이 된다 — 빈 Map으로 계속 진행하지 않는다(fail-closed, 설계 S10).
+  const [overview, sharedById] = await Promise.all([
+    getUsageOverview(env, { from, to, refresh, matchers }),
+    sharedWorkstationsDao.loadMap(env.DB)
+  ])
 
   // m-1 — getUsageOverview 호출(첫 웨이브) 완료 후 다시 Date.now()를 부른다. by_model 등은 일별
   // day_at 그리드로 병합되지 않아(모델·비용 합계는 grain이 다름) todayDayAt 불일치 리스크는 없지만,
@@ -736,8 +841,13 @@ export async function getUserDrilldown(env, { from, to, employeeId, refresh }) {
   // matchers가 employee_id="<employeeId>" 하나뿐이라 overview.byUnit에는 그 직원의 unit(계정별)만
   // 남는다 — foldToEmployees로 접어 단일 일자별 합계(entry.days) + 계정별 기간합계(group_accounts)를
   // 함께 얻는다(§7.3 "응답에 employee_id·group_accounts를 totals와 같은 최상위 레벨에 추가").
-  const employees = foldToEmployees(overview.byUnit)
-  const entry = employees.get(`emp:${employeeId}`)
+  const employees = foldToEmployees(overview.byUnit, sharedById)
+  const folded = employees.get(`emp:${employeeId}`)
+  // 2차 방어(usage-shared-workstation-axes.md) — 이 축이 공용으로 등록돼 있으면 개인 드릴다운으로
+  // 값을 내보내지 않는다. 1차 방어는 라우트의 조기 반환(server/api/usage.js)이고, 이 검사는 그
+  // 분기가 실수로 빠지거나 새 호출부가 생겼을 때의 최종 방어선이다. rowKey를 shr:로 바꾸지 않기로
+  // 했으므로(PM 판정1) 키 미스 대신 이 명시적 검사가 그 역할을 한다.
+  const entry = folded && folded.isShared ? null : folded
   const rows = entry ? userDayRows(entry) : []
   const totals = entry ? userTotals(entry) : zeroTotals()
   totals.active_time_seconds = activeTimeSeconds
@@ -745,6 +855,7 @@ export async function getUserDrilldown(env, { from, to, employeeId, refresh }) {
 
   return {
     notInMetrics: !entry,
+    sharedWorkstation: !!(folded && folded.isShared),
     rows,
     totals,
     groupAccounts,
@@ -887,6 +998,9 @@ export async function getUsageOverviewHybrid(env, { from, to, refresh, employeeI
     const guardClampedTo = to > guardTodayStr ? guardTodayStr : to
     return {
       byUnit: new Map(),
+      // byUnit이 비어 있어 분류할 대상 자체가 없다 — 빈 Map은 "레지스트리를 못 읽었다"가 아니라
+      // "접을 unit이 없다"는 뜻이므로 fail-closed 원칙(S10)에 어긋나지 않는다.
+      sharedById: new Map(),
       unknownTypes: new Set(),
       cacheMeta: aggregateCacheMeta([]),
       dataStart: null,
@@ -903,7 +1017,13 @@ export async function getUsageOverviewHybrid(env, { from, to, refresh, employeeI
   const yesterday = addDaysUTC(todayStr, -1)
   const cacheTo = isToday ? yesterday : clampedTo // 오늘은 캐시에 존재할 수 없다(W1)
 
-  const snapshot = await readHybridSnapshot(env.DB, from, cacheTo, AGG_MODE, NORM_VERSION, scope.employeeId)
+  // 공용 워크스테이션 레지스트리는 롤업 캐시 조회와 **병렬로** 읽는다(둘 다 D1 — 왕복 추가 없음,
+  // usage-shared-workstation-axes.md §4.1). 조회가 실패하면 예외가 그대로 전파돼 500이 된다:
+  // 빈 Map으로 계속 진행하면 공용 축이 조용히 개인 축으로 되살아나 오귀속이 발생한다(fail-closed, S10).
+  const [snapshot, sharedById] = await Promise.all([
+    readHybridSnapshot(env.DB, from, cacheTo, AGG_MODE, NORM_VERSION, scope.employeeId),
+    sharedWorkstationsDao.loadMap(env.DB)
+  ])
 
   const cacheByUnit = new Map()
   mergeCacheRows(cacheByUnit, snapshot.validRows)
@@ -1014,6 +1134,9 @@ export async function getUsageOverviewHybrid(env, { from, to, refresh, employeeI
 
   return {
     byUnit: combined,
+    // 호출부(/users 목록, /me)가 foldToEmployees/mergeD1AndPromUsers에 그대로 넘긴다 — 같은 요청
+    // 안에서 캐시 구간과 라이브 구간이 **같은 레지스트리 스냅샷**으로 분류되도록 여기서 한 번만 읽는다.
+    sharedById,
     unknownTypes,
     cacheMeta,
     dataStart: snapshot.dataStart,

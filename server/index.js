@@ -17,6 +17,7 @@ import { runUsageRollup, ROLLUP_CRON_BUDGET_MS } from './lib/usage-rollup.js'
 import oauthRouter, { registerWellKnownRoutes } from './api/oauth.js'
 import sessionsRouter from './api/sessions.js'
 import usageRouter, { adminUsage as adminUsageRouter } from './api/usage.js'
+import adminSharedWorkstationsRouter from './api/admin-shared-workstations.js'
 
 const webApp = new Hono()
 
@@ -38,6 +39,9 @@ webApp.route('/api/admin/catalog', adminCatalogRouter)
 webApp.route('/api/oauth', oauthRouter)
 webApp.route('/api/sessions', sessionsRouter)
 webApp.route('/api/usage', usageRouter)
+// 더 구체적인 경로를 먼저 등록한다 — adminUsageRouter에는 /shared-workstations 라우트가 없어
+// 현재는 충돌하지 않지만, 나중에 그 라우터에 와일드카드가 생겨도 이 경로가 가려지지 않게 한다.
+webApp.route('/api/admin/usage/shared-workstations', adminSharedWorkstationsRouter)
 webApp.route('/api/admin/usage', adminUsageRouter)
 
 webApp.get('/api/health', (c) => c.json({ ok: true }))

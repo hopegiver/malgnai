@@ -147,7 +147,10 @@
               </div>
               <div class="mb-2 small text-muted">{{ createdUser.email }}</div>
               <div class="d-flex align-items-center gap-2">
-                <code class="flex-grow-1 p-2 bg-canvas border border-hairline rounded text-mono" style="font-size:0.9rem; word-break:break-all;">{{ createdUser.temp_password }}</code>
+                <!-- 필드명은 서버 계약이 정본이다(docs/api.md §5.6 · server/api/admin-users.js —
+                     `temporary_password`). 평문은 어디에도 저장되지 않아 이 한 번을 놓치면 해당
+                     계정은 재조회 수단이 없다. 이름을 임의로 줄여 쓰지 말 것. -->
+                <code class="flex-grow-1 p-2 bg-canvas border border-hairline rounded text-mono" style="font-size:0.9rem; word-break:break-all;">{{ createdUser.temporary_password }}</code>
                 <button type="button" class="btn btn-sm btn-outline-secondary flex-shrink-0" @click="copyTempPassword">
                   <i class="bi" :class="tempPwCopied ? 'bi-check-lg' : 'bi-clipboard'"></i>
                 </button>
@@ -183,7 +186,23 @@
             </div>
             <div class="small text-faint mb-3">소문자·숫자·<code>._%+-</code>만 사용, 최대 64자. 제안값: {{ editModal.suggestion || '(이메일에서 도출 불가)' }}</div>
 
-            <div v-if="editModal.error" class="alert alert-danger py-2 small mb-3">
+            <!-- 409는 두 종류이고 관리자가 먼저 해야 할 조치가 다르다(docs/api.md §5.9.6):
+                 CONFLICT = 다른 회원의 연동 해제, SHARED_WORKSTATION = 공용 워크스테이션 등록 해제.
+                 후자는 여러 명이 함께 쓰는 PC의 축이라 개인에게 붙이면 그룹 전체 사용량이 한 사람의
+                 개인 사용량으로 잘못 표시된다. 자동 해제 버튼은 만들지 않는다 — 선해제는 관리자가
+                 사용량 화면에서 의도적으로 한 번 더 조작해야 한다(2단계 요구를 무력화하지 않는다). -->
+            <div v-if="editModal.sharedConflict" class="alert alert-danger py-2 small mb-3">
+              <i class="bi bi-pc-display me-1"></i>
+              <code>{{ editModal.sharedConflict.employee_id }}</code>는
+              <strong>공용 워크스테이션({{ editModal.sharedConflict.label || editModal.sharedConflict.employee_id }})</strong>으로 등록된 축이라 개인 계정에 연결할 수 없습니다.
+              여러 명이 함께 쓰는 PC라 그룹 전체 사용량이 이 회원 한 사람의 사용량으로 표시됩니다.
+              <div class="mt-1">
+                정말 이 회원의 개인 축이라면 <strong>먼저 사용량 통계 화면의 “공용 워크스테이션 관리”에서 이 축의 등록을 해제한 뒤</strong> 다시 저장하세요.
+                <router-link to="/admin/usage" class="ms-1">사용량 통계로 이동</router-link>
+              </div>
+              <div class="text-faint mt-1" v-if="editModal.sharedConflict.registered_at">등록일 {{ formatDate(editModal.sharedConflict.registered_at) }}</div>
+            </div>
+            <div v-else-if="editModal.error" class="alert alert-danger py-2 small mb-3">
               {{ editModal.error }}
               <div v-if="editModal.conflict" class="mt-1">
                 이미 <strong>{{ editModal.conflict.conflict_email }}</strong> 사용자가 이 값을 쓰고 있습니다. 먼저 그 사용자의 연동을 해제해야 합니다(자동 이전은 지원하지 않습니다).
@@ -239,7 +258,7 @@ export default {
 
       // 연동 아이디 편집 모달 상태(§5·§7.3-A). canUndo는 직전 성공 응답의 previous_employee_id로
       // 되돌리기 1회를 제공하기 위한 플래그 — 값 자체는 lastPrevious에 보관한다.
-      editModal: { open: false, target: null, value: '', suggestion: '', saving: false, error: '', conflict: null, warnings: [], lastPrevious: undefined, canUndo: false },
+      editModal: { open: false, target: null, value: '', suggestion: '', saving: false, error: '', conflict: null, sharedConflict: null, warnings: [], lastPrevious: undefined, canUndo: false },
     }
   },
   computed: {
@@ -323,8 +342,8 @@ export default {
       this.createdUser = data?.data ?? data
     },
     async copyTempPassword() {
-      if (!this.createdUser?.temp_password) return
-      const ok = await copyToClipboard(this.createdUser.temp_password)
+      if (!this.createdUser?.temporary_password) return
+      const ok = await copyToClipboard(this.createdUser.temporary_password)
       this.tempPwCopied = ok
       if (ok) setTimeout(() => { this.tempPwCopied = false }, 2000)
     },
@@ -345,6 +364,7 @@ export default {
         saving: false,
         error: '',
         conflict: null,
+        sharedConflict: null,
         warnings: [],
         lastPrevious: undefined,
         canUndo: false,
@@ -371,12 +391,20 @@ export default {
       this.editModal.saving = true
       this.editModal.error = ''
       this.editModal.conflict = null
+      this.editModal.sharedConflict = null
       const { data, error } = await useApi(`/api/admin/users/${target.id}/employee-id`, {
         method: 'PUT',
         body: { employee_id: employeeId },
       })
       this.editModal.saving = false
       if (error) {
+        // 409 SHARED_WORKSTATION(§5.9.6)은 "공용 등록 해제가 먼저"라는 별도 안내로 분기한다.
+        if (error.code === 'SHARED_WORKSTATION') {
+          this.editModal.sharedConflict = (error.details && error.details.employee_id)
+            ? error.details
+            : { employee_id: employeeId, label: null, registered_at: null }
+          return
+        }
         this.editModal.error = (error && error.message) || '연동 아이디 변경에 실패했습니다.'
         if (error && error.details && error.details.conflict_email) this.editModal.conflict = error.details
         return
@@ -409,6 +437,7 @@ export default {
     },
     userRoleMeta,
     userStatusMeta,
+    formatDate,
   },
 }
 </script>
