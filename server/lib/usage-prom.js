@@ -5,7 +5,7 @@
 import { runQueriesInWaves, withRouteBudget, PROM_CACHE_TTL_SECONDS } from './prom-client.js'
 import { readHybridSnapshot } from '../dao/usage-prom-daily.js'
 import * as sharedWorkstationsDao from '../dao/usage-shared-workstations.js'
-import { todayDayAt, dayAtOfMs, dayStartMs, addDays } from './day-boundary.js'
+import { todayDayAt, dayAtOfMs, dayStartMs, addDays, DAY_OFFSET_MINUTES } from './day-boundary.js'
 import { employeeIdMatcher, isPromSafeEmployeeId, decodeEmployeeName, resolveEmployeeScope, pickDisplayName, pickSharedWorkstationName } from './usage-identity.js'
 
 // 집계식 정본 — 이 상수 하나에서만 모든 PromQL이 생성된다(설계 G3 "안전 임계값 정본 단일화").
@@ -216,6 +216,56 @@ function pointsOf(series) {
 }
 
 // ---------------------------------------------------------------------------
+// KST 앵커 런타임 가드(reviewer M-4/R-1, 승인됨) — A안(그리드 앵커를 KST 자정으로 옮긴 전환, §6.1)은
+// "상류가 query_range의 start를 step 배수로 내림 정렬하지 않는다"는 실측 관측에 의존한다 — 계약이
+// 아니다. 상류가 Mimir/Thanos/VictoriaMetrics류로 교체돼 정렬을 시작하면 promTimestampToDayAt이
+// 검증 없이 그 타임스탬프를 받아 값은 총합 보존된 채 day_at 라벨만 9시간 밀린 UTC 버킷으로 조용히
+// 되돌아간다 — 캐시·라이브가 함께 밀리므로 이음매 불연속조차 안 생기는 무증상 오류다(설계 §6.3
+// "절대 허용하면 안 되는" 상태). 이 가드는 탐지만 하고 절대 보정하지 않는다 — 조용한 보정은 같은
+// 종류의 무증상 오류를 다시 만든다(이건 경보이지 자동복구가 아니다).
+//
+// 배치 근거: runOverviewSpecsAndMerge()는 라이브(getUsageOverview/getUsageOverviewHybrid) 경로와
+// Cron 적재(fetchCompletedDayGrid) 경로가 그대로 공유하는 유일한 그리드 병합 지점이다(§19.3-4 이음매
+// 불변식과 동일한 이유로 이미 공유되고 있었다). 여기 한 곳에 두면 그 경로들을 따로 훑지 않고도 양쪽이
+// 함께 덮인다 — day-boundary.js(경계 산술 자체)는 건드리지 않는다(탐지 전용, 계산 로직 무변경).
+//
+// 오프셋 상수는 day-boundary.js의 DAY_OFFSET_MINUTES 정본에서 유도한다(이 파일 밖에서 +9h/54000을
+// 다시 조립하지 않는다는 그 파일의 비협상 규칙을 그대로 따른다) — KST 자정의 UTC 초단위 나머지는
+// 86400 - DAY_OFFSET_MINUTES*60(=54000)이다.
+const KST_ANCHOR_REMAINDER_SECONDS = (86400 - DAY_OFFSET_MINUTES * 60) % 86400
+
+let gridAnchorWarned = false // 프로세스당 1회만 console.error(요청마다 도배 금지) — 탐지 자체(반환값)는
+// 매 그리드 요청마다 계속 일어난다. 값이 misaligned인 동안 계속 meta에 실려야 운영자가 언제든 화면에서
+// 확인할 수 있다 — 억제되는 것은 로그 한 줄뿐이다.
+
+function firstGridPointSeconds(gridSeriesData) {
+  for (const series of gridSeriesData || []) {
+    const points = pointsOf(series)
+    if (points.length) return points[0][0] // 첫 시계열의 첫 포인트만 본다 — 전체 순회 없음(런타임 비용 0).
+  }
+  return null
+}
+
+/** 그리드(query_range) 응답의 첫 타임스탬프가 KST 자정 앵커(mod 86400 === 54000)를 벗어났는지만
+ *  본다. 시계열이 비어 있으면(0건 응답) 판단할 근거가 없으므로 false — 그 자체는 usage-rollup.js의
+ *  "확인된 0" 로직이 이미 별도로 다룬다. */
+function detectGridAnchorMismatch(gridSeriesData) {
+  const t = firstGridPointSeconds(gridSeriesData)
+  if (t == null) return false
+  const misaligned = ((t % 86400) + 86400) % 86400 !== KST_ANCHOR_REMAINDER_SECONDS
+  if (misaligned && !gridAnchorWarned) {
+    gridAnchorWarned = true
+    console.error(
+      '[usage-prom] grid timestamp is not KST-anchored (mod 86400 !== ' + KST_ANCHOR_REMAINDER_SECONDS + ') — ' +
+      '상류가 query_range start를 정렬하기 시작했을 수 있다(A안 실측 가정 붕괴). day_at 라벨이 9시간 ' +
+      '밀린 UTC 버킷으로 조용히 되돌아갈 위험 — 자동 보정하지 않았다, 확인 필요.',
+      t
+    )
+  }
+  return misaligned
+}
+
+// ---------------------------------------------------------------------------
 // 사용자 엔트리 키 구조(usage-employee-identity.md §5.1) — 병합은 "관측 단위 그대로"(unit:
 // employee_id×user_email 쌍), 응답 조립 직전에만 foldToEmployees()로 직원 단위로 접는다. 두 단계로
 // 나누는 이유: group_accounts(그룹 계정별 사용량)를 캐시 구간에서도 재현하려면 (직원 × 계정 × 날짜)
@@ -356,7 +406,7 @@ async function runOverviewSpecsAndMerge(env, { grid, today, refresh, matchers, b
     idx.sessionsToday = specs.push(sessionsTodaySpec(today, refresh, matchers, profile)) - 1
     idx.costToday = specs.push(costTodaySpec(today, refresh, matchers, profile)) - 1
   }
-  if (!specs.length) return []
+  if (!specs.length) return { results: [], gridAnchorMismatch: false }
 
   const results = await runQueriesInWaves(env, specs)
   // m-1 — 이 today 버킷의 day_at은 반드시 "이 grid/today 창을 계산할 때 쓴 그 nowMs" 기준이어야
@@ -364,6 +414,10 @@ async function runOverviewSpecsAndMerge(env, { grid, today, refresh, matchers, b
   // nowMs)와 항상 같은 값을 넘겨받는다 — 여기서 다시 Date.now()를 부르지 않는다.
   // 변수명은 day-boundary.js가 export하는 함수명 todayDayAt과 충돌하므로 todayLabel로 둔다.
   const todayLabel = todayDayAt(nowMs)
+
+  // KST 앵커 런타임 가드 — grid 응답이 있을 때만 검사한다(today instant 질의는 그리드 앵커 개념이
+  // 없다, time=단일 시각). 라이브·Cron 양쪽이 이 함수를 공유하므로 여기 한 곳이 양쪽을 덮는다.
+  const gridAnchorMismatch = grid ? detectGridAnchorMismatch(results[idx.tokensGrid].data) : false
 
   if (grid) {
     mergeTokens(byUnit, unknownTypes, results[idx.tokensGrid].data, false)
@@ -375,7 +429,7 @@ async function runOverviewSpecsAndMerge(env, { grid, today, refresh, matchers, b
     mergeSingleField(byUnit, results[idx.sessionsToday].data, 'session_count', roundNonNegative, true, todayLabel)
     mergeSingleField(byUnit, results[idx.costToday].data, 'cost_usd', truncateCost, true, todayLabel)
   }
-  return results
+  return { results, gridAnchorMismatch }
 }
 
 /** /summary, /users, /users/:id 공용 — unit(employee_id×user_email)×일 그리드를 Prometheus에서
@@ -389,8 +443,8 @@ export async function getUsageOverview(env, { from, to, refresh, matchers = [] }
   const today = todayPartialWindow(to, nowMs)
   const byUnit = new Map()
   const unknownTypes = new Set()
-  const results = await runOverviewSpecsAndMerge(env, { grid, today, refresh, matchers, byUnit, unknownTypes, nowMs })
-  return { byUnit, unknownTypes, meta: aggregateCacheMeta(results), rawResults: results }
+  const { results, gridAnchorMismatch } = await runOverviewSpecsAndMerge(env, { grid, today, refresh, matchers, byUnit, unknownTypes, nowMs })
+  return { byUnit, unknownTypes, meta: aggregateCacheMeta(results), rawResults: results, gridAnchorMismatch }
 }
 
 /** Cron 적재 전용(설계 §18.4) — 완결일 그리드만 질의(오늘 부분일 없음), profile='cron'으로
@@ -401,9 +455,9 @@ export async function fetchCompletedDayGrid(env, { from, to, matchers = [] } = {
   const grid = dayGridWindow(from, to, nowMs)
   const byUnit = new Map()
   const unknownTypes = new Set()
-  if (!grid) return { byUnit, unknownTypes }
-  await runOverviewSpecsAndMerge(env, { grid, today: null, refresh: false, matchers, byUnit, unknownTypes, profile: 'cron', nowMs })
-  return { byUnit, unknownTypes }
+  if (!grid) return { byUnit, unknownTypes, gridAnchorMismatch: false }
+  const { gridAnchorMismatch } = await runOverviewSpecsAndMerge(env, { grid, today: null, refresh: false, matchers, byUnit, unknownTypes, profile: 'cron', nowMs })
+  return { byUnit, unknownTypes, gridAnchorMismatch }
 }
 
 export function zeroTotals() {
@@ -826,7 +880,7 @@ function mergeModelMaps(tokensByModel, costByModel) {
  *  employee_id로 사용자를 역조회하지 않는다, 그냥 매처에 넣을 뿐). */
 export async function getUserDrilldown(env, { from, to, employeeId, refresh }) {
   if (!isPromSafeEmployeeId(employeeId)) {
-    return { notInMetrics: true, sharedWorkstation: false, rows: [], totals: { ...zeroTotals(), active_time_seconds: 0 }, groupAccounts: [], byModel: [], unknownTypes: new Set(), meta: aggregateCacheMeta([]) }
+    return { notInMetrics: true, sharedWorkstation: false, rows: [], totals: { ...zeroTotals(), active_time_seconds: 0 }, groupAccounts: [], byModel: [], unknownTypes: new Set(), meta: aggregateCacheMeta([]), gridAnchorMismatch: false }
   }
 
   const matchers = [employeeIdMatcher(employeeId)]
@@ -877,7 +931,10 @@ export async function getUserDrilldown(env, { from, to, employeeId, refresh }) {
     groupAccounts,
     byModel: mergeModelMaps(tokensByModel, costByModel),
     unknownTypes: overview.unknownTypes,
-    meta: aggregateCacheMeta([...overview.rawResults, ...results2])
+    meta: aggregateCacheMeta([...overview.rawResults, ...results2]),
+    // KST 앵커 가드 — by_model/active_time(results2)는 instant 질의라 그리드 앵커 개념이 없다. 이
+    // 드릴다운의 그리드 부분은 getUsageOverview(overview)가 이미 검사했으므로 그 결과를 그대로 옮긴다.
+    gridAnchorMismatch: overview.gridAnchorMismatch
   }
 }
 
@@ -1024,7 +1081,8 @@ export async function getUsageOverviewHybrid(env, { from, to, refresh, employeeI
       segments: { cached: null, live: null },
       gapDays: allDaysInRange(from, guardClampedTo),
       rollup: { cached_through: null, last_sync_at: null, agg_mode: AGG_MODE },
-      liveUnavailable: false
+      liveUnavailable: false,
+      gridAnchorMismatch: false // 상류 질의 자체를 하지 않았다 — 검사 대상이 없다.
     }
   }
 
@@ -1072,6 +1130,7 @@ export async function getUsageOverviewHybrid(env, { from, to, refresh, employeeI
   let liveUnknown = new Set()
   let liveResults = []
   let liveErr = null
+  let liveGridAnchorMismatch = false
 
   // usage-employee-identity.md §6.2 I1 — scoped인데 safe가 아니면(§4.4 라벨 인젝션 위험 문자, 실무상
   // 거의 발생하지 않지만 방어선은 항상 켜져 있어야 한다) 라이브 질의 자체를 생략한다. matchers를
@@ -1089,7 +1148,9 @@ export async function getUsageOverviewHybrid(env, { from, to, refresh, employeeI
       // "죽었을 때"보다 "느리기만 할 때" 더 나쁜 응답이 나가는 역설이 여기서 생겼다. 예산 타이머를
       // 라이브 질의 promise 하나에만 걸고, 초과분은 즉시 아래 catch에서 liveErr로 흡수해 캐시
       // 구간은 그대로 살린다(§9.4 2단계 "캐시가 있으면 200 + live_unavailable").
-      liveResults = await withRouteBudget(runOverviewSpecsAndMerge(env, { grid, today: todayW, refresh, matchers: scope.matchers, byUnit: liveByUnit, unknownTypes: liveUnknown, nowMs }))
+      const merged = await withRouteBudget(runOverviewSpecsAndMerge(env, { grid, today: todayW, refresh, matchers: scope.matchers, byUnit: liveByUnit, unknownTypes: liveUnknown, nowMs }))
+      liveResults = merged.results
+      liveGridAnchorMismatch = merged.gridAnchorMismatch
     } catch (err) {
       if (err && err.name === 'UpstreamError') {
         liveErr = err
@@ -1160,6 +1221,10 @@ export async function getUsageOverviewHybrid(env, { from, to, refresh, employeeI
     segments: { cached: segmentsCached, live: segmentsLive },
     gapDays,
     rollup: { cached_through: cachedThrough, last_sync_at: snapshot.lastSyncAt, agg_mode: AGG_MODE },
-    liveUnavailable
+    liveUnavailable,
+    // KST 앵커 가드(reviewer M-4/R-1) — 라이브 질의가 실제로 그리드를 받은 경우만 의미가 있다.
+    // 라이브가 실패했으면(liveUnavailable) 검사할 응답 자체가 없으므로 false로 둔다 — "탐지 못 함"을
+    // "정상"으로 위장하는 게 아니라, 이 요청은 애초에 검사 대상이 아니었다는 뜻이다.
+    gridAnchorMismatch: liveUnavailable ? false : liveGridAnchorMismatch
   }
 }

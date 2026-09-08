@@ -31,7 +31,8 @@ const {
   daySummaryRows,
   zeroTotals,
   getUsageOverviewHybrid,
-  getUsageOverview
+  getUsageOverview,
+  fetchCompletedDayGrid
 } = await import('./usage-prom.js')
 const { runQueriesInWaves } = await import('./prom-client.js')
 
@@ -174,6 +175,81 @@ describe('M-3 회귀 — KST 자정을 넘겨 UTC 날짜와 KST 날짜가 갈리
       expect(entry.days.has('2026-09-08')).toBe(false) // UTC 오늘로 잘못 붙으면 여기서 걸린다
     } finally {
       vi.useRealTimers()
+    }
+  })
+})
+
+// 런타임 가드(reviewer M-4/R-1, 승인됨) — KST 앵커 그리드(A안)는 "상류가 query_range의 start를 step
+// 배수로 내림 정렬하지 않는다"는 실측 관측에 의존한다(계약이 아니다). 상류가 정렬을 시작하면
+// promTimestampToDayAt이 검증 없이 그 타임스탬프를 받아 값은 총합 보존된 채 day_at 라벨만 9시간 밀린
+// UTC 버킷으로 조용히 되돌아간다 — 캐시·라이브가 함께 밀려 이음매 불연속조차 안 생기는 무증상 오류다.
+// 아래는 그 사실이 gridAnchorMismatch로 탐지되고(오탐 없이), console.error가 요청마다 도배되지 않고
+// 딱 1회만 찍히는지를 검증한다. runOverviewSpecsAndMerge가 라이브(getUsageOverview)와 Cron 적재
+// (fetchCompletedDayGrid) 양쪽의 유일한 공유 병합 지점이므로, getUsageOverview 경로 하나만 스텁으로
+// 태워도 두 경로에 공통으로 적용되는 탐지 로직 자체를 검증하는 셈이다 — fetchCompletedDayGrid 쪽은
+// 별도 테스트로 "그 반환값에도 실제로 실린다"만 다시 확인한다(로직 중복 검증이 아니라 배선 검증).
+describe('KST 앵커 런타임 가드(reviewer M-4/R-1) — 탐지만 하고 절대 보정하지 않는다', () => {
+  const FROM = '2026-08-01'
+  const TO = '2026-08-07'
+  const grid = dayGridWindow(FROM, TO, NOW)
+  const fakeMeta = () => ({ hit: true, age_seconds: 0, ttl_seconds: 60, stale: false, fetched_at: new Date().toISOString(), refresh_throttled: false })
+
+  function gridResults(firstTimestampSec) {
+    const series = { metric: { employee_id: 'self', user_email: 'self@malgnsoft.com', type: 'input' }, values: [[firstTimestampSec, '10']] }
+    return [
+      { data: [series], meta: fakeMeta() }, // tokensGrid
+      { data: [], meta: fakeMeta() },       // sessionsGrid
+      { data: [], meta: fakeMeta() }        // costGrid
+    ]
+  }
+
+  it('전제: 완결 구간 그리드는 KST 자정 앵커(mod 86400 === 54000) 위에 있다', () => {
+    expect(grid.start % 86400).toBe(54000)
+  })
+
+  it('KST 앵커에 정렬된 정상 응답은 가드가 발동하지 않는다(오탐 없음) — gridAnchorMismatch:false, console.error 미호출', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      runQueriesInWaves.mockResolvedValueOnce(gridResults(grid.start))
+      const result = await getUsageOverview({}, { from: FROM, to: TO, refresh: false })
+      expect(result.gridAnchorMismatch).toBe(false)
+      expect(errSpy).not.toHaveBeenCalled()
+    } finally {
+      errSpy.mockRestore()
+    }
+  })
+
+  it('상류가 UTC 자정으로 정렬한 응답(mod 86400 === 0, 현실적인 정렬 사고 케이스)은 가드가 발동한다 — gridAnchorMismatch:true + console.error 1회, 두 번째 요청부터는 로그 도배 없이 값만 계속 true', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const utcMidnight = grid.start - 54000 // KST 자정(54000) → UTC 자정(mod 0)으로 정렬됐다고 가정
+      expect(utcMidnight % 86400).toBe(0)
+
+      runQueriesInWaves.mockResolvedValueOnce(gridResults(utcMidnight))
+      const result1 = await getUsageOverview({}, { from: FROM, to: TO, refresh: false })
+      expect(result1.gridAnchorMismatch).toBe(true)
+      expect(errSpy).toHaveBeenCalledTimes(1)
+
+      // 요청마다 도배하지 않는다(요구사항) — 같은 프로세스 안에서 두 번째 misaligned 요청은 탐지값은
+      // 계속 true로 노출하되(조용히 사라지지 않는다), console.error는 다시 찍지 않는다.
+      runQueriesInWaves.mockResolvedValueOnce(gridResults(utcMidnight))
+      const result2 = await getUsageOverview({}, { from: FROM, to: TO, refresh: false })
+      expect(result2.gridAnchorMismatch).toBe(true)
+      expect(errSpy).toHaveBeenCalledTimes(1) // 여전히 1회 — 도배 없음
+    } finally {
+      errSpy.mockRestore()
+    }
+  })
+
+  it('Cron 적재 경로(fetchCompletedDayGrid)도 같은 공유 함수를 거치므로 반환값에 gridAnchorMismatch가 그대로 실린다(배선 확인)', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const utcMidnight = grid.start - 54000
+      runQueriesInWaves.mockResolvedValueOnce(gridResults(utcMidnight))
+      const result = await fetchCompletedDayGrid({}, { from: FROM, to: TO })
+      expect(result.gridAnchorMismatch).toBe(true)
+    } finally {
+      errSpy.mockRestore()
     }
   })
 })

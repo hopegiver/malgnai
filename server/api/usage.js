@@ -132,7 +132,11 @@ function buildHybridMeta(range, hybrid) {
     segments: hybrid.segments,
     gap_days: hybrid.gapDays,
     rollup: hybrid.rollup,
-    live_unavailable: hybrid.liveUnavailable
+    live_unavailable: hybrid.liveUnavailable,
+    // KST 앵커 런타임 가드(reviewer M-4/R-1) — 상류 그리드 응답이 KST 자정 앵커(day-boundary.js
+    // §6.1 A안)를 벗어나면 true. 탐지 전용, 값 자체는 절대 보정하지 않는다(server/lib/usage-prom.js
+    // detectGridAnchorMismatch 참고).
+    day_boundary_anchor_mismatch: !!hybrid.gridAnchorMismatch
   }
 }
 
@@ -157,6 +161,7 @@ function buildSkippedIdentityMeta(range, flags) {
     gap_days: [],
     rollup: { cached_through: null, last_sync_at: null, agg_mode: AGG_MODE },
     live_unavailable: false,
+    day_boundary_anchor_mismatch: false, // 상류 질의 자체를 하지 않았다 — 검사 대상이 없다.
     ...flags
   }
 }
@@ -181,7 +186,10 @@ function buildDrilldownMeta(range, drilldown, overall) {
     segments: { cached: null, live: { from: range.from, to: range.to } },
     gap_days: [],
     rollup: { cached_through: null, last_sync_at: overall.lastSyncAt, agg_mode: AGG_MODE },
-    live_unavailable: false
+    live_unavailable: false,
+    // KST 앵커 가드 — 이 라우트는 전 구간 라이브라 drilldown.gridAnchorMismatch(getUsageOverview가
+    // 검사)를 그대로 옮긴다(buildHybridMeta와 동일한 필드명·의미).
+    day_boundary_anchor_mismatch: !!drilldown.gridAnchorMismatch
   }
 }
 
