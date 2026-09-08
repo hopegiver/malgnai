@@ -25,9 +25,11 @@ import * as sharedWorkstationsDao from '../dao/usage-shared-workstations.js'
 import { requireAdmin } from '../middleware/jwt-auth.js'
 import { withRouteBudget } from '../lib/prom-client.js'
 import { runUsageRollup, ROLLUP_REQUEST_BUDGET_MS, REQUEST_CHUNK_RESERVE_MS } from '../lib/usage-rollup.js'
-// m-2 수정(리뷰 2026-09-03) — todayUTC/addDaysUTC를 이 파일에서 다시 구현하지 않고
-// server/lib/utc-day.js(정본)를 그대로 쓴다(이전에는 usage-prom.js/usage-rollup.js와 함께 3벌 복제).
-import { todayUTCString as todayUTC, addDaysUTC } from '../lib/utc-day.js'
+// m-2 수정(리뷰 2026-09-03) — todayDayAt/addDays를 이 파일에서 다시 구현하지 않고
+// server/lib/day-boundary.js(정본, KST 전환 후)를 그대로 쓴다(이전에는 usage-prom.js/usage-rollup.js와
+// 함께 3벌 복제). KST 전환(docs/design/usage-kst-day-boundary.md) — "오늘"의 기본값이 KST 자정
+// 기준으로 바뀐다.
+import { todayDayAt, addDays } from '../lib/day-boundary.js'
 import { isPromSafeEmployeeId } from '../lib/usage-identity.js'
 import {
   AGG_MODE,
@@ -59,7 +61,10 @@ function parseLimit(c, fallback = 20, max = 100) {
 }
 
 // §5.8 관리자 사용량 드릴다운 공통 — from/to 형식·기본값(§5.8.0). YYYY-MM-DD 아니면 에러, 둘 다
-// 생략 시 최근 30일(to=오늘 UTC, from=to-29일), 한쪽만 주면 나머지만 기본값 적용, from>to면 에러.
+// 생략 시 최근 30일(to=오늘 KST, from=to-29일), 한쪽만 주면 나머지만 기본값 적용, from>to면 에러.
+// KST 전환(docs/design/usage-kst-day-boundary.md §11 docs/api.md:103) — "오늘"의 기준이 UTC에서
+// KST로 바뀌었다. YYYY-MM-DD 형식 검증(isValidCalendarDate) 자체는 순수 라벨 산술이라 시간대와
+// 무관하므로 무변경이다.
 const ADMIN_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 // 정규식은 자릿수 형식만 보고 달력상 실재 여부는 보지 않는다(M-2) — 2026-13-01·9999-99-99처럼
@@ -80,8 +85,8 @@ function resolveAdminRange(c) {
   if (rawTo && (!ADMIN_DATE_RE.test(rawTo) || !isValidCalendarDate(rawTo))) {
     return { error: 'to must be in YYYY-MM-DD format' }
   }
-  const to = rawTo || todayUTC()
-  const from = rawFrom || addDaysUTC(to, -29)
+  const to = rawTo || todayDayAt()
+  const from = rawFrom || addDays(to, -29)
   if (from > to) return { error: 'from must not be after to' }
   return { from, to }
 }

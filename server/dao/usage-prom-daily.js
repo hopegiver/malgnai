@@ -14,6 +14,10 @@
  *  usage-prom.js의 getUsageOverviewHybrid가 라이브 병합과 동일한 Map<unitKey,Map<day,values>> 구조로
  *  꽂아 넣을 수 있고(§19.4), agg_mode/norm_version이 현재값과 다른 날(재적재 대상)을 조인 조건으로
  *  자연스럽게 배제할 수 있다(SUM 집계로는 이 배제를 사후에 다시 걸러야 해 이중 로직이 된다).
+ *  norm_version(§38 조인 조건)은 KST 전환(usage-kst-day-boundary.md §3) 이후 "값 정규화 규칙"뿐
+ *  아니라 "일 경계 정의(UTC 자정 vs KST 자정)"까지 함께 관장한다 — v1(UTC 경계) 시절 행은 이
+ *  조인에서 자동 배제되고, 재적재 전까지 gap_days로 정직하게 보고된다(값 산술로 UTC→KST 변환하지
+ *  않는다, 재질의 외의 길이 없다는 설계 §3의 결론).
  *  coverageInRange: 설계 §17.5 SQL③ 그대로(구간 내 커버리지 마커 — gap_days/segments.cached 판정용) +
  *  identity_version(M-3 수정, 리뷰 2026-09-07) — usage-prom.js가 스코프 조회(employeeIdFilter가
  *  있는 호출)에서 이 값이 현재 IDENTITY_VERSION과 다른 날을 coveredDays에서 제외해 gap_days로

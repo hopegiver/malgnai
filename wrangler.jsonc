@@ -70,9 +70,12 @@
   // scheduled 핸들러가 server/lib/catalog-sync.js의 syncCatalog()를 호출한다. 매일 18:00 UTC
   // (KST 03:00) — 트래픽 낮은 새벽 시간대, GitHub 미인증 60req/h 한도와도 무관(하루 1회뿐).
   //
-  // "0 1 * * *"는 사용량 Prometheus 롤업 캐시 적재(신규, docs/design/usage-prometheus-realtime.md
-  // §18.1·§11.1) — 01:00 UTC 주 적재 + 기존 18:00 UTC 회차가 보조 재시도를 겸한다. ⚠️ 이 두
-  // 문자열은 server/index.js의 scheduled(controller,…) 분기 문자열과 공백까지 정확히 일치해야
+  // "0 1 * * *"는 사용량 Prometheus 롤업 캐시 적재(docs/design/usage-prometheus-realtime.md
+  // §18.1·§11.1). KST 전환(docs/design/usage-kst-day-boundary.md §4, 2026-09-08) 이후 day_at 경계가
+  // KST 자정(=UTC 15:00)이 되면서 두 회차의 주/보조 역할이 뒤바뀌었다 — 18:00 UTC(KST 03:00, KST
+  // 자정 이후 +3h)가 이제 **주 적재**, 01:00 UTC(KST 10:00, +10h)가 **보조 재시도**다. 문자열 값
+  // 자체는 바꾸지 않았다(스케줄 변경 없이 W1 불변식이 그대로 보존됨, §4 "단순함이 이긴다"). ⚠️ 이
+  // 두 문자열은 server/index.js의 scheduled(controller,…) 분기 문자열과 공백까지 정확히 일치해야
   // 한다(Cloudflare 공식 요구 — 한쪽만 바꾸면 그 회차는 조용히 아무것도 하지 않는다).
   "triggers": {
     "crons": ["0 18 * * *", "0 1 * * *"]

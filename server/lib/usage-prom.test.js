@@ -2,8 +2,21 @@
 // 핵심 불변식(이음매 W1/W2, off-by-one, gap_days 정직성, PromQL 인젝션 방지)은 이전에 전부 정적
 // 추론으로만 검증돼 있었다. 외부 네트워크·D1 의존 없이 도는 순수 함수만 대상으로 한다(통합/E2E는
 // 이번 범위 밖 — PM 지시).
-import { describe, it, expect } from 'vitest'
-import {
+import { describe, it, expect, vi } from 'vitest'
+import { todayDayAt } from './day-boundary.js'
+
+// M-3 회귀(리뷰 2026-09-08, usage-kst-day-boundary.md) — usage-prom.js는 './prom-client.js'의
+// runQueriesInWaves로 상류를 부른다. 아래 "[핵심]" 테스트만 이 함수를 스텁으로 대체해 네트워크 없이
+// getUsageOverview()의 instant(오늘 부분일) 병합 경로를 끝까지 태운다 — 나머지 export(PROM_CACHE_TTL_
+// SECONDS 등)는 실제 구현 그대로 둔다.
+vi.mock('./prom-client.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return { ...actual, runQueriesInWaves: vi.fn() }
+})
+
+const {
+  AGG_MODE,
+  NORM_VERSION,
   promTimestampToDayAt,
   dayGridWindow,
   todayPartialWindow,
@@ -17,46 +30,65 @@ import {
   mergeD1AndPromUsers,
   daySummaryRows,
   zeroTotals,
-  getUsageOverviewHybrid
-} from './usage-prom.js'
+  getUsageOverviewHybrid,
+  getUsageOverview
+} = await import('./usage-prom.js')
+const { runQueriesInWaves } = await import('./prom-client.js')
 
-const NOW = Date.parse('2026-09-03T10:00:00Z') // 화요일, 오늘=2026-09-03(UTC) 고정
+// 화요일, 10:00Z — KST 자정 경계(15:00Z)보다 한참 이르므로 KST 전환 후에도 todayDayAt(NOW)는
+// 여전히 '2026-09-03'이다(UTC 날짜와 KST 날짜가 우연히 같은 시각을 골랐다, KST 전환 §6.1).
+const NOW = Date.parse('2026-09-03T10:00:00Z')
 
-describe('promTimestampToDayAt — off-by-one 매핑(설계 §4.2)', () => {
-  it('버킷 정각(자정)은 그 전날로 매핑된다', () => {
+describe('promTimestampToDayAt — off-by-one 매핑(설계 §4.2, KST 전환 §6.1)', () => {
+  it('버킷 정각(UTC 자정)은 그 전날로 매핑된다 — KST 오프셋과 무관하게 여전히 성립(경계에서 먼 임의 시각)', () => {
     const t = Date.parse('2026-09-03T00:00:00Z') / 1000
     expect(promTimestampToDayAt(t)).toBe('2026-09-02')
   })
 
-  it('버킷 마지막 초(다음날 자정 1초 전)도 같은 전날로 매핑된다 — 하루 안에서 결과가 흔들리지 않는다', () => {
-    const t = Date.parse('2026-09-03T23:59:59Z') / 1000
+  // KST 전환(usage-kst-day-boundary.md §10-B8, §13) — 이 파일의 진짜 경계는 UTC 자정(00:00Z)이
+  // 아니라 KST 자정(=15:00Z)이다. 아래 두 테스트는 그 경계 바로 옆(14:59:59Z/15:00:00Z)에서
+  // "하루 밀림"이 정확히 일어나는지를 검증한다 — 옛 테스트는 UTC 자정 부근(23:59:59Z/00:00:00Z)을
+  // 썼는데, KST 전환 후에는 그 지점이 더 이상 실제 경계가 아니라서 "하루 밀림" 명제 자체가 거짓이
+  // 된다(23:59:59Z는 이미 다음 KST 날짜의 한복판이다).
+  it('KST 자정(=15:00Z) 1초 전은 그 전날(KST)로 매핑된다', () => {
+    const t = Date.parse('2026-09-03T14:59:59Z') / 1000
     expect(promTimestampToDayAt(t)).toBe('2026-09-02')
   })
 
-  it('자정을 한 틱 넘기면(다음날 00:00:00) 매핑도 정확히 하루만 밀린다', () => {
-    const before = Date.parse('2026-09-03T23:59:59Z') / 1000
-    const after = Date.parse('2026-09-04T00:00:00Z') / 1000
+  it('KST 자정(=15:00Z) 정각을 한 틱 넘기면 매핑도 정확히 하루만 밀린다 — 1초 차이로 다른 날짜', () => {
+    const before = Date.parse('2026-09-03T14:59:59Z') / 1000
+    const after = Date.parse('2026-09-03T15:00:00Z') / 1000
     expect(promTimestampToDayAt(before)).toBe('2026-09-02')
     expect(promTimestampToDayAt(after)).toBe('2026-09-03')
   })
 })
 
-describe('dayGridWindow — 완결일 그리드 경계(설계 §4.2·§4.3)', () => {
-  it('from=to=오늘이면 완결된 버킷이 없어 null(오늘분은 별도 instant 질의로 얹는다)', () => {
+describe('dayGridWindow — 완결일 그리드 경계(설계 §4.2·§4.3, KST 앵커 전환 §6.1 A안)', () => {
+  it('from=to=오늘(KST)이면 완결된 버킷이 없어 null(오늘분은 별도 instant 질의로 얹는다)', () => {
     expect(dayGridWindow('2026-09-03', '2026-09-03', NOW)).toBeNull()
   })
 
-  it('to가 오늘이면(to+1일이 오늘을 넘으므로) end가 "오늘 00:00Z"로 클램프된다', () => {
+  it('to가 오늘이면(to+1일이 오늘을 넘으므로) end가 "KST 오늘 자정"(=전날 15:00Z)으로 클램프된다', () => {
     const grid = dayGridWindow('2026-08-30', '2026-09-03', NOW)
-    const todayStartSec = Date.parse('2026-09-03T00:00:00Z') / 1000
-    expect(grid.end).toBe(todayStartSec)
+    const kstTodayStartSec = Date.parse('2026-09-02T15:00:00Z') / 1000
+    expect(grid.end).toBe(kstTodayStartSec)
   })
 
-  it('완전한 과거 구간은 start/end가 정확히 하루(+1일) 밀려서 계산된다', () => {
+  it('완전한 과거 구간은 start/end가 KST 자정(=매일 15:00Z) 앵커에서 정확히 하루(+1일) 밀려서 계산된다', () => {
     const grid = dayGridWindow('2026-08-01', '2026-08-07', NOW)
-    expect(grid.start).toBe(Date.parse('2026-08-02T00:00:00Z') / 1000)
-    expect(grid.end).toBe(Date.parse('2026-08-08T00:00:00Z') / 1000)
+    expect(grid.start).toBe(Date.parse('2026-08-01T15:00:00Z') / 1000)
+    expect(grid.end).toBe(Date.parse('2026-08-07T15:00:00Z') / 1000)
     expect(grid.step).toBe(86400)
+  })
+
+  // 완료판정(usage-kst-day-boundary.md §10-B7) — A안(KST 앵커 그리드) 채택의 정의 그 자체: 그리드
+  // start/end는 항상 KST 자정(=UTC 15:00) 위에 있어야 한다. 상류 step 정렬 게이트 실측은 사람이
+  // 배포 후 눈으로 확인할 몫이지만(설계 §6.3, §10-F22), 이 앵커 산술 자체는 여기서 결정론적으로
+  // 잠근다.
+  it('start와 end 둘 다 KST 자정 위에 있다(mod 86400 === 54000, 15:00Z = 54000초)', () => {
+    const grid = dayGridWindow('2026-08-01', '2026-08-07', NOW)
+    expect(grid.start % 86400).toBe(54000)
+    expect(grid.end % 86400).toBe(54000)
   })
 })
 
@@ -65,12 +97,15 @@ describe('todayPartialWindow — 오늘 부분일 경계(설계 §4.3, M-2 TTL �
     expect(todayPartialWindow('2026-09-02', NOW)).toBeNull()
   })
 
-  it('to가 오늘이면 60초 버킷으로 내림된 time/rangeSeconds를 반환', () => {
+  it('to가 오늘이면 60초 버킷으로 내림된 time/rangeSeconds를 반환(KST 자정 기준)', () => {
     const win = todayPartialWindow('2026-09-03', NOW)
     expect(win).not.toBeNull()
     // NOW=10:00:00Z는 이미 60초 배수라 버킷 경계와 정확히 일치한다.
     expect(win.time).toBe(Math.floor(NOW / 1000))
-    expect(win.rangeSeconds).toBe(10 * 3600) // 자정부터 10:00:00까지
+    // KST 전환(§6.1) — 경과시간은 이제 UTC 자정이 아니라 KST 자정(=전날 15:00Z)부터다.
+    // 2026-09-02T15:00:00Z → 2026-09-03T10:00:00Z(NOW) = 19시간. 회귀 방지: UTC 계산이 남아 있으면
+    // 이 값이 10시간(10*3600)으로 잘못 나온다(설계 §10-B9).
+    expect(win.rangeSeconds).toBe(19 * 3600)
   })
 
   it('같은 60초 버킷 안의 서로 다른 nowMs는 완전히 같은 time/rangeSeconds를 낸다(M-2 캐시 키 안정성)', () => {
@@ -87,6 +122,59 @@ describe('todayPartialWindow — 오늘 부분일 경계(설계 §4.3, M-2 TTL �
     const winA = todayPartialWindow('2026-09-03', nowA)
     const winB = todayPartialWindow('2026-09-03', nowB)
     expect(winB.time - winA.time).toBe(60)
+  })
+})
+
+// M-3 회귀(리뷰 2026-09-08, usage-kst-day-boundary.md M-3) — 위 NOW(2026-09-03T10:00:00Z)는 UTC
+// 날짜와 KST 날짜가 우연히 같은 시각이라(주석 참고) 이 파일의 그리드/부분일 테스트는 전부 그 경로를
+// 겨냥하지 못한다. 아래는 UTC 날짜('2026-09-08')와 KST 날짜('2026-09-09')가 실제로 갈리는 시각에서만
+// 재현되는 경계를 겨냥한다.
+describe('M-3 회귀 — KST 자정을 넘겨 UTC 날짜와 KST 날짜가 갈리는 시각(usage-kst-day-boundary.md M-3)', () => {
+  // KST 2026-09-09 01:00 = UTC 2026-09-08 16:00.
+  const NOW_KST_EARLY = Date.parse('2026-09-08T16:00:00Z')
+
+  it('전제: todayDayAt(NOW_KST_EARLY)는 KST 오늘("2026-09-09")이지 UTC 오늘("2026-09-08")이 아니다', () => {
+    expect(todayDayAt(NOW_KST_EARLY)).toBe('2026-09-09')
+  })
+
+  it('(a) dayGridWindow — 이 시각에도 그리드 끝은 KST 자정(=전날 15:00Z)으로 클램프된다', () => {
+    const grid = dayGridWindow('2026-09-08', '2026-09-09', NOW_KST_EARLY)
+    expect(grid).not.toBeNull()
+    // UTC로 계산했다면 "오늘 UTC"는 이미 '2026-09-08'이라 end가 하루 더 전으로(08-07 15:00Z 부근으로)
+    // 잘못 클램프됐을 것 — KST 계산이면 '2026-09-09' KST 자정(=이 시각)에서 클램프된다.
+    expect(grid.end).toBe(Date.parse('2026-09-08T15:00:00Z') / 1000)
+  })
+
+  it('(a) todayPartialWindow — 경과시간이 KST 자정 이후 1시간(3600초)이다(UTC 계산이면 16시간=57600초가 된다)', () => {
+    const win = todayPartialWindow('2026-09-09', NOW_KST_EARLY)
+    expect(win).not.toBeNull()
+    expect(win.rangeSeconds).toBe(3600)
+  })
+
+  // (b) — 핵심. runOverviewSpecsAndMerge(getUsageOverview 경유)를 상류 스텁으로 실제로 태워, instant
+  // (오늘 부분일) 결과에 붙는 day_at이 KST 오늘인지를 단언한다. 이 경로를 도는 테스트가 이전에는 0개였다
+  // — todayLabel = todayDayAt(nowMs)(usage-prom.js:366)가 new Date(nowMs).toISOString().slice(0,10)로
+  // "단순화"돼도 위 (a) 두 테스트는 여전히 통과하지만(그 함수들은 todayLabel을 안 씀) 이 테스트는 실패한다.
+  it('[핵심] getUsageOverview의 instant 병합 결과 day_at이 KST 오늘("2026-09-09")이다 — todayLabel이 UTC로 되돌아가면 이 테스트가 실패해야 한다', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW_KST_EARLY)
+    try {
+      const fakeMeta = () => ({ hit: true, age_seconds: 0, ttl_seconds: 60, stale: false, fetched_at: new Date().toISOString(), refresh_throttled: false })
+      runQueriesInWaves.mockResolvedValueOnce([
+        { data: [{ metric: { employee_id: 'self', user_email: 'self@malgnsoft.com', type: 'input' }, value: [Math.floor(NOW_KST_EARLY / 1000), '55'] }], meta: fakeMeta() },
+        { data: [], meta: fakeMeta() },
+        { data: [], meta: fakeMeta() }
+      ])
+
+      const result = await getUsageOverview({}, { from: '2026-09-09', to: '2026-09-09', refresh: false })
+
+      const entry = result.byUnit.get(unitKeyOf('self', 'self@malgnsoft.com'))
+      expect(entry).toBeDefined()
+      expect(entry.days.has('2026-09-09')).toBe(true) // KST 오늘로 붙어야 한다
+      expect(entry.days.has('2026-09-08')).toBe(false) // UTC 오늘로 잘못 붙으면 여기서 걸린다
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -623,8 +711,11 @@ describe('getUsageOverviewHybrid — requireEmployeeScope 안전망(usage-employ
 })
 
 describe('getUsageOverviewHybrid — M-3 회귀(리뷰 2026-09-07): 스코프 조회는 레거시(identity_version 불일치) 날짜를 "확정 0"이 아니라 gap으로 보고한다', () => {
-  const HYBRID_AGG_MODE = 'increase'
-  const HYBRID_NORM_VERSION = 'v1'
+  // KST 전환(usage-kst-day-boundary.md §3) 이후 NORM_VERSION이 'v1'→'v2'로 승격됐다 — 이 테스트가
+  // 검증하려는 것은 identity_version 판정(§9.1)이지 norm_version 승격 자체가 아니므로, 실제
+  // getUsageOverviewHybrid가 보는 것과 항상 같은 값이 되도록 하드코딩 대신 정본 상수를 그대로 쓴다.
+  const HYBRID_AGG_MODE = AGG_MODE
+  const HYBRID_NORM_VERSION = NORM_VERSION
 
   // readHybridSnapshot(server/dao/usage-prom-daily.js)의 db.batch() 응답 4개를 그대로 흉내낸다 —
   // stmts 내용은 보지 않고 고정 응답을 순서대로 돌려준다(SQL 자체는 DAO 계층 책임, 여기는

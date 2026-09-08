@@ -22,6 +22,9 @@ function forbiddenError(message, code) {
   return e
 }
 
+// KST 전환 범위 밖(docs/design/usage-kst-day-boundary.md §2 "이 권고가 깨지는 조건") — WBS
+// 날짜(due_date 등)는 day_at(사용량 KST 경계)과 무관하고 인라인 1줄이라 day-boundary.js를 가져다
+// 쓸 근거가 없다. UTC 그대로 둔다.
 function todayDate() {
   return new Date().toISOString().slice(0, 10)
 }

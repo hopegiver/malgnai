@@ -5,7 +5,7 @@
 import { runQueriesInWaves, withRouteBudget, PROM_CACHE_TTL_SECONDS } from './prom-client.js'
 import { readHybridSnapshot } from '../dao/usage-prom-daily.js'
 import * as sharedWorkstationsDao from '../dao/usage-shared-workstations.js'
-import { todayUTCString as sharedTodayUTCString, addDaysUTC } from './utc-day.js'
+import { todayDayAt, dayAtOfMs, dayStartMs, addDays } from './day-boundary.js'
 import { employeeIdMatcher, isPromSafeEmployeeId, decodeEmployeeName, resolveEmployeeScope, pickDisplayName, pickSharedWorkstationName } from './usage-identity.js'
 
 // 집계식 정본 — 이 상수 하나에서만 모든 PromQL이 생성된다(설계 G3 "안전 임계값 정본 단일화").
@@ -15,7 +15,16 @@ export const AGG_MODE = 'increase'
 
 // 값 정규화 로직 버전(설계 §4.6·§17.3) — 정규화 규칙(반올림·클램프·필드 매핑 등)이 바뀌면 올린다.
 // usage_prom_sync_days.norm_version과 비교해 옛 규칙으로 적재된 날짜를 재적재 대상으로 간주한다.
-export const NORM_VERSION = 'v1'
+//
+// KST 전환(docs/design/usage-kst-day-boundary.md §3 Q2 A안, 2026-09-08) — v1→v2 승격은 "일 경계
+// 정의(day_at의 하루가 UTC 자정~자정인지 KST 자정~자정인지)"까지 이 값이 관장하도록 의미를
+// 넓힌 것이다. 마이그레이션·스키마 변경은 없다: 읽기 판정(computeCachedThrough,
+// usage-prom-daily.js readHybridSnapshot의 JOIN)이 agg_mode+norm_version 일치만 보므로, 버전을
+// 올리는 순간 v1(UTC 경계) 시절 행 전체가 조회에서 자동 배제되고 usage-rollup.js isValidMarker도
+// 같은 이유로 그 날짜들을 결손으로 재탐지해 KST 경계로 재적재한다. 옛 v1 행은 삭제하지 않는다 —
+// 지평(ROLLUP_HORIZON_DAYS) 밖으로 나가면 조회되지 않는 사표로 남을 뿐이고, 코드를 롤백하면
+// NORM_VERSION도 v1로 돌아가 그 행이 즉시 다시 읽힌다(무손실 롤백, §9).
+export const NORM_VERSION = 'v2'
 
 // 식별·표시 속성 버전(usage-employee-identity.md §9.1 신규) — employee_id 축·employee_name 디코드
 // 등 "누구의 값인가"를 관장한다. 측정값 자체(NORM_VERSION)와 분리한 이유: NORM_VERSION을 올리면
@@ -32,6 +41,8 @@ const LIVE_MAX_COMPLETE_DAYS = 2
 
 export const UNAVAILABLE_FIELDS = ['tool_calls', 'tool_errors', 'retries', 'turns', 'api_calls']
 
+// 1일(ms) — day-boundary.js가 관리하는 "일 경계 자체"(KST 00:00 앵커)와는 별개로, 여기서는
+// 그리드 간격(step)·1일 오프셋 계산에만 쓰는 순수 상수다.
 const DAY_MS = 86400000
 
 const METRICS = {
@@ -101,37 +112,40 @@ function exprActiveTime(duration, matchers) {
 // ⚠️ rev.2: 아래 함수들은 라이브 경로와 Cron 적재 경로(fetchCompletedDayGrid)가 그대로 공유한다
 // (설계 §19.3-4, §21.1 "유지" 목록) — usage-rollup.js에 유사 계산을 새로 쓰지 말 것.
 //
+// ⚠️ KST 전환(docs/design/usage-kst-day-boundary.md §0/§6) — day_at 버킷의 정의가
+// `[D-1 15:00Z, D 15:00Z)` = KST 자정~자정으로 바뀌었다(A안: 그리드 앵커 자체를 KST 자정으로
+// 옮긴다, 상류 step 정렬 실측 게이트 통과). 앵커 계산은 전부 server/lib/day-boundary.js의
+// dayStartMs/dayAtOfMs/todayDayAt로만 하고, 이 파일에서 `T00:00:00Z`나 `+9`를 다시 조립하지 않는다
+// (§1-a 6곳 전수 이동 대상 — 하나라도 빠뜨리면 같은 KST 하루가 두 라벨로 쪼개지는 "라벨 분열"이
+// 이음매에서만 나타난다).
+//
 // m-1 수정(리뷰 2026-09-03): 이 아래 함수들은 모두 "지금"을 나타내는 nowMs를 인자로 받는다(기본값
 // Date.now() — 단독 호출/테스트 편의용일 뿐, 한 요청 처리 도중에는 절대 기본값에 기대지 말 것).
-// 이전에는 각 함수가 각자 `new Date()`/`Date.now()`를 다시 불러 한 요청 안에서 UTC 자정을 걸치면
+// 이전에는 각 함수가 각자 `new Date()`/`Date.now()`를 다시 불러 한 요청 안에서 날짜 경계를 걸치면
 // (드물지만) "오늘"의 값이 함수마다 갈릴 수 있었다(예: 그리드는 아직 어제를 오늘로 보는데 부분일
 // 질의는 이미 다음날로 넘어감). 호출부(getUsageOverview/fetchCompletedDayGrid/getUsageOverviewHybrid/
 // getUserDrilldown)가 각자 진입 시점에 nowMs를 한 번만 고정해 하위 함수 전체에 그대로 넘긴다 —
 // 실패 모드 자체는 이중계상이 아니라 "오늘이 정직하게 gap_days로 빠지는 것"이라 심각도는 낮았지만
 // (원인 자체를 없앤다).
 // ---------------------------------------------------------------------------
-function todayStartUTCms(nowMs = Date.now()) {
-  const now = new Date(nowMs)
-  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+function todayStartMs(nowMs = Date.now()) {
+  return dayStartMs(todayDayAt(nowMs))
 }
-
-// m-2 — todayUTCString/addDaysUTC는 이제 이 파일에서 재정의하지 않고 server/lib/utc-day.js(정본)를
-// 그대로 쓴다. 로컬 이름을 유지해 아래 호출부를 그대로 두었다(재사용은 import 한 줄로 충분).
-const todayUTCString = sharedTodayUTCString
 
 function allDaysInRange(from, to) {
   const days = []
-  for (let d = from; d <= to; d = addDaysUTC(d, 1)) days.push(d)
+  for (let d = from; d <= to; d = addDays(d, 1)) days.push(d)
   return days
 }
 
 /** query_range 평가시각 t는 t-1일의 값이므로(§4.2) 그리드 시작/끝을 하루 밀어 요청한다.
- *  end는 "오늘 00:00Z"를 넘지 않게 클램프 — 오늘분은 별도 instant 질의(§4.3)로 얹는다.
- *  완결된 날짜 버킷이 없으면(예: from=to=오늘) null. */
+ *  end는 "KST 오늘 00:00"(=dayStartMs(todayDayAt(nowMs)))을 넘지 않게 클램프 — 오늘분은 별도
+ *  instant 질의(§4.3)로 얹는다. 완결된 날짜 버킷이 없으면(예: from=to=오늘) null.
+ *  KST 전환(§6.1): start/end는 이제 항상 "KST 자정"(=매일 15:00Z, mod 86400 === 54000) 앵커다. */
 export function dayGridWindow(from, to, nowMs = Date.now()) {
-  const todayMs = todayStartUTCms(nowMs)
-  const startMs = Date.parse(`${from}T00:00:00Z`) + DAY_MS
-  const rawEndMs = Date.parse(`${to}T00:00:00Z`) + DAY_MS
+  const todayMs = todayStartMs(nowMs)
+  const startMs = dayStartMs(from) + DAY_MS
+  const rawEndMs = dayStartMs(to) + DAY_MS
   const endMs = Math.min(rawEndMs, todayMs)
   if (startMs > endMs) return null
   return { start: Math.floor(startMs / 1000), end: Math.floor(endMs / 1000), step: 86400 }
@@ -152,22 +166,22 @@ function nowBucketSeconds(nowMs = Date.now()) {
   return Math.floor(nowMs / bucketMs) * PROM_CACHE_TTL_SECONDS
 }
 
-/** to가 오늘보다 과거면 오늘분 질의 자체를 생략(질의 예산 절약, §4.3). */
+/** to가 KST 오늘보다 과거면 오늘분 질의 자체를 생략(질의 예산 절약, §4.3). */
 export function todayPartialWindow(to, nowMs = Date.now()) {
-  const todayStr = todayUTCString(nowMs)
+  const todayStr = todayDayAt(nowMs)
   if (to < todayStr) return null
-  const startSec = Math.floor(todayStartUTCms(nowMs) / 1000)
+  const startSec = Math.floor(todayStartMs(nowMs) / 1000)
   const bucketSec = nowBucketSeconds(nowMs)
   const rangeSeconds = Math.max(1, bucketSec - startSec)
   return { time: bucketSec, rangeSeconds }
 }
 
-/** by_model/active_time 등 "일별 아닌 기간 합계" instant 질의용 — from 00:00Z부터 min(to+1일, now)까지.
- *  "now"가 상한으로 걸리는 경우(to가 오늘 이후로 클램프될 때)만 TTL 버킷으로 내림한다 — to가 과거
- *  구간이면 endMs는 이미 날짜 경계로 고정돼 있어 버킷팅이 필요도, 영향도 없다. */
+/** by_model/active_time 등 "일별 아닌 기간 합계" instant 질의용 — from의 KST 00:00부터
+ *  min(to+1일, now)까지. "now"가 상한으로 걸리는 경우(to가 오늘 이후로 클램프될 때)만 TTL 버킷으로
+ *  내림한다 — to가 과거 구간이면 endMs는 이미 날짜 경계로 고정돼 있어 버킷팅이 필요도, 영향도 없다. */
 function periodTotalWindow(from, to, nowMs = Date.now()) {
-  const startMs = Date.parse(`${from}T00:00:00Z`)
-  const rawEndMs = Date.parse(`${to}T00:00:00Z`) + DAY_MS
+  const startMs = dayStartMs(from)
+  const rawEndMs = dayStartMs(to) + DAY_MS
   const bucketMs = nowBucketSeconds(nowMs) * 1000
   const endMs = Math.min(rawEndMs, bucketMs)
   const rangeSeconds = Math.max(1, Math.floor((endMs - startMs) / 1000))
@@ -189,9 +203,10 @@ export function truncateCost(strVal) {
   return Math.floor(Math.max(0, n) * 10000) / 10000
 }
 
-/** increase()는 t-1일의 값이므로 응답 타임스탬프를 하루 되돌려 day_at으로 매핑(§4.2). */
+/** increase()는 t-1일의 값이므로 응답 타임스탬프를 하루 되돌려 day_at(KST)으로 매핑(§4.2, §6.1) —
+ *  t는 항상 KST 자정(=매일 15:00Z) 앵커이므로 dayAtOfMs(t-1d)가 그대로 KST 일 라벨이 된다. */
 export function promTimestampToDayAt(tSeconds) {
-  return new Date(tSeconds * 1000 - DAY_MS).toISOString().slice(0, 10)
+  return dayAtOfMs(tSeconds * 1000 - DAY_MS)
 }
 
 function pointsOf(series) {
@@ -347,7 +362,8 @@ async function runOverviewSpecsAndMerge(env, { grid, today, refresh, matchers, b
   // m-1 — 이 today 버킷의 day_at은 반드시 "이 grid/today 창을 계산할 때 쓴 그 nowMs" 기준이어야
   // 한다. 호출부(runOverviewSpecsAndMerge를 호출하기 전 todayPartialWindow(to, nowMs)를 만든 바로 그
   // nowMs)와 항상 같은 값을 넘겨받는다 — 여기서 다시 Date.now()를 부르지 않는다.
-  const todayDayAt = todayUTCString(nowMs)
+  // 변수명은 day-boundary.js가 export하는 함수명 todayDayAt과 충돌하므로 todayLabel로 둔다.
+  const todayLabel = todayDayAt(nowMs)
 
   if (grid) {
     mergeTokens(byUnit, unknownTypes, results[idx.tokensGrid].data, false)
@@ -355,9 +371,9 @@ async function runOverviewSpecsAndMerge(env, { grid, today, refresh, matchers, b
     mergeSingleField(byUnit, results[idx.costGrid].data, 'cost_usd', truncateCost, false)
   }
   if (today) {
-    mergeTokens(byUnit, unknownTypes, results[idx.tokensToday].data, true, todayDayAt)
-    mergeSingleField(byUnit, results[idx.sessionsToday].data, 'session_count', roundNonNegative, true, todayDayAt)
-    mergeSingleField(byUnit, results[idx.costToday].data, 'cost_usd', truncateCost, true, todayDayAt)
+    mergeTokens(byUnit, unknownTypes, results[idx.tokensToday].data, true, todayLabel)
+    mergeSingleField(byUnit, results[idx.sessionsToday].data, 'session_count', roundNonNegative, true, todayLabel)
+    mergeSingleField(byUnit, results[idx.costToday].data, 'cost_usd', truncateCost, true, todayLabel)
   }
   return results
 }
@@ -941,7 +957,7 @@ function computeCachedThrough(allCoverage, aggMode, normVersion) {
     if (row.day_at !== expected) break
     if (row.agg_mode !== aggMode || row.norm_version !== normVersion) break
     cachedThrough = row.day_at
-    expected = addDaysUTC(row.day_at, 1)
+    expected = addDays(row.day_at, 1)
   }
   return cachedThrough
 }
@@ -952,7 +968,7 @@ function computeCachedThrough(allCoverage, aggMode, normVersion) {
 export function computeLiveCompleteWindow({ from, anchor, coveredDays, maxDays }) {
   if (anchor < from) return null
   const days = []
-  for (let cursor = anchor; cursor >= from && days.length < maxDays; cursor = addDaysUTC(cursor, -1)) {
+  for (let cursor = anchor; cursor >= from && days.length < maxDays; cursor = addDays(cursor, -1)) {
     if (coveredDays.has(cursor)) break
     days.unshift(cursor)
   }
@@ -967,7 +983,8 @@ export function computeGapDays(from, to, coveredDays, liveCoveredDays) {
 }
 
 /** /summary·/users 공용 하이브리드 조회(설계 §19.4 정본) — 완결일은 D1 롤업 캐시(usage_prom_daily),
- *  "오늘"(UTC)이 요청 범위에 포함될 때만 라이브를 시도한다. 완전 과거 범위(to < 오늘)는 라이브를
+ *  "오늘"(KST 전환 이후 KST 자정 기준, docs/design/usage-kst-day-boundary.md §0)이 요청 범위에 포함될
+ *  때만 라이브를 시도한다. 완전 과거 범위(to < 오늘)는 라이브를
  *  전혀 부르지 않는다 — "오늘만 라이브"(architecture.md §0 결정29 개정)를 문자 그대로 지키고, 트레일링
  *  결손 보정(§20.2)은 "지금이 오늘"일 때만 의미가 있는 실시간 지연 보정이지 임의 과거 요청의 결손을
  *  메우는 장치가 아니다(중간 결손은 항상 gap_days로만 보고, §20.2 "중간 결손").
@@ -994,7 +1011,7 @@ export async function getUsageOverviewHybrid(env, { from, to, refresh, employeeI
   const scope = resolveEmployeeScope(employeeId)
 
   if (requireEmployeeScope && !scope.scoped) {
-    const guardTodayStr = todayUTCString(nowMs)
+    const guardTodayStr = todayDayAt(nowMs)
     const guardClampedTo = to > guardTodayStr ? guardTodayStr : to
     return {
       byUnit: new Map(),
@@ -1011,10 +1028,10 @@ export async function getUsageOverviewHybrid(env, { from, to, refresh, employeeI
     }
   }
 
-  const todayStr = todayUTCString(nowMs)
+  const todayStr = todayDayAt(nowMs)
   const clampedTo = to > todayStr ? todayStr : to // §19.4 미래 클램프
   const isToday = clampedTo === todayStr
-  const yesterday = addDaysUTC(todayStr, -1)
+  const yesterday = addDays(todayStr, -1)
   const cacheTo = isToday ? yesterday : clampedTo // 오늘은 캐시에 존재할 수 없다(W1)
 
   // 공용 워크스테이션 레지스트리는 롤업 캐시 조회와 **병렬로** 읽는다(둘 다 D1 — 왕복 추가 없음,

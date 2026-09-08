@@ -42,6 +42,9 @@ function esc(v) {
   return String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 }
 
+// KST 전환 범위 밖(docs/design/usage-kst-day-boundary.md §2 "이 권고가 깨지는 조건") — 이 날짜는
+// day_at(사용량 KST 경계)과 무관한 CLAUDE.md 템플릿 치환값이고 인라인 1줄이라 day-boundary.js를
+// 가져다 쓸 근거가 없다. UTC 그대로 둔다.
 function today() {
   return new Date().toISOString().slice(0, 10)
 }

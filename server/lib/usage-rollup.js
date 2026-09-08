@@ -9,14 +9,20 @@
 import { AGG_MODE, NORM_VERSION, IDENTITY_VERSION, fetchCompletedDayGrid } from './usage-prom.js'
 import { UpstreamError } from './prom-client.js'
 import * as usagePromDailyDao from '../dao/usage-prom-daily.js'
-// m-2 수정(리뷰 2026-09-03) — todayUTCString/addDaysUTC를 이 파일에서 다시 구현하지 않고
-// server/lib/utc-day.js(정본)를 그대로 쓴다. 이전에는 이 파일이 자체 복제본을 갖고 있었는데,
-// 하필 이 복제본이 W1 불변식(Cron이 오늘을 롤업 대상에서 빼는 경계)을 판정하는 데 쓰였다.
-import { todayUTCString, addDaysUTC } from './utc-day.js'
+// m-2 수정(리뷰 2026-09-03) — todayDayAt/addDays를 이 파일에서 다시 구현하지 않고
+// server/lib/day-boundary.js(정본, KST 전환 후)를 그대로 쓴다. 이전에는 이 파일이 자체 복제본을
+// 갖고 있었는데, 하필 이 복제본이 W1 불변식(Cron이 오늘을 롤업 대상에서 빼는 경계)을 판정하는 데
+// 쓰였다. KST 전환(docs/design/usage-kst-day-boundary.md §4)으로 "오늘"의 정의가 KST 자정 기준으로
+// 바뀌었지만 W1 불변식 자체는 스케줄이 아니라 todayDayAt()의 정의에서 나오므로 자동으로 보존된다.
+import { todayDayAt, addDays } from './day-boundary.js'
 
 // 적재 정책 상수 단일 정본(설계 §18.4 표) — 값을 바꿀 때는 이 파일만 고치면 된다.
+// KST 전환(usage-kst-day-boundary.md §5) — day_at 창이 UTC 대비 9시간 더 과거를 보므로, 상류
+// 보관경계(~37일)에 걸친 날짜의 "부분 보관일 과소집계" 위상이 9시간 앞당겨진다. 40−37=3일의 지평
+// 여유가 이 0.375일 이동을 흡수하므로 값 자체는 그대로 둔다(신규 리스크가 아니라 기존 리스크의
+// 위상 이동, earliestActivityDay 가드가 "확인된 0"과 "모름"을 계속 구분해준다).
 export const ROLLUP_HORIZON_DAYS = 40 // 상류 실데이터 ~37일 + 여유. 그보다 과거는 결손 탐지 대상에서 뺀다.
-export const ROLLUP_TRAILING_RESCAN_DAYS = 3 // 최근 3일은 매번 덮어쓴다(지연 도착·경계 스미어 흡수, R11).
+export const ROLLUP_TRAILING_RESCAN_DAYS = 3 // 최근 3 KST일은 매번 덮어쓴다(지연 도착·경계 스미어 흡수, R11).
 export const ROLLUP_CHUNK_DAYS = 7 // 실측 query_range 7일 step=1d ≈5.0초(R9), 상류 30초 벽에서 충분히 멀다.
 export const ROLLUP_CRON_BUDGET_MS = 8 * 60 * 1000 // 플랫폼 상한 15분의 절반(나머지는 카탈로그 동기화 몫+여유).
 
@@ -45,29 +51,35 @@ export const REQUEST_CHUNK_RESERVE_MS = 26000 // 관리자 수동 트리거 전�
  *  usage-employee-identity.md §9.1 신규 — 레거시 employee_id='' 행(마이그레이션 0019 보존 이전분,
  *  identity_version='v0')을 지평(ROLLUP_HORIZON_DAYS) 안에서 자동 재적재 대상으로 잡는다. 읽기
  *  판정(readHybridSnapshot의 JOIN, computeCachedThrough)은 agg_mode+norm_version만 보고
- *  identity_version은 보지 않는다 — 그래야 재적재 전에도 레거시 날짜가 미식별 행으로 계속 보인다. */
+ *  identity_version은 보지 않는다 — 그래야 재적재 전에도 레거시 날짜가 미식별 행으로 계속 보인다.
+ *  norm_version 비교에는 KST 전환(usage-kst-day-boundary.md §3 A안)도 함께 실린다 — NORM_VERSION이
+ *  'v1'→'v2'로 승격되면서 옛 UTC 경계로 적재된 행이 이 판정에서 자동으로 결손 취급된다. */
 function isValidMarker(row) {
   return !!row && row.agg_mode === AGG_MODE && row.norm_version === NORM_VERSION && row.identity_version === IDENTITY_VERSION
 }
 
 /** 설계 §18.4 ① 대상 날짜 산출 — trailing(최근 ROLLUP_TRAILING_RESCAN_DAYS일, 무조건 재적재) ⊎
- *  missing(그 이전 ~ ROLLUP_HORIZON_DAYS일 전까지, 결손인 날만). 반환은 최신→과거 순, 중복 없음. */
-export async function computeTargetDays(db) {
-  const today = todayUTCString()
-  const yesterday = addDaysUTC(today, -1)
-  const horizonStart = addDaysUTC(today, -ROLLUP_HORIZON_DAYS)
-  const trailingStart = addDaysUTC(today, -ROLLUP_TRAILING_RESCAN_DAYS)
+ *  missing(그 이전 ~ ROLLUP_HORIZON_DAYS일 전까지, 결손인 날만). 반환은 최신→과거 순, 중복 없음.
+ *  nowMs(usage-kst-day-boundary.md §10-C12~14 신규) — "오늘"(KST)을 판정하는 기준 시각. 기본값
+ *  Date.now()는 단독 호출/테스트 편의용일 뿐이고, runUsageRollup()은 진입 시점에 한 번 고정한 nowMs를
+ *  그대로 넘긴다(usage-prom.js의 다른 시간창 함수들이 이미 따르는 m-1 패턴과 정합) — 그래야 KST
+ *  경계를 걸치는 크론 회차를 결정론적으로(고정 Date.parse(...) 시각으로) 테스트할 수 있다. */
+export async function computeTargetDays(db, nowMs = Date.now()) {
+  const today = todayDayAt(nowMs)
+  const yesterday = addDays(today, -1)
+  const horizonStart = addDays(today, -ROLLUP_HORIZON_DAYS)
+  const trailingStart = addDays(today, -ROLLUP_TRAILING_RESCAN_DAYS)
 
   const coverage = await usagePromDailyDao.selectCoverageRange(db, horizonStart, yesterday)
   const byDay = new Map(coverage.map((r) => [r.day_at, r]))
 
   const targets = []
   const seen = new Set()
-  for (let d = yesterday; d >= trailingStart; d = addDaysUTC(d, -1)) {
+  for (let d = yesterday; d >= trailingStart; d = addDays(d, -1)) {
     targets.push(d)
     seen.add(d)
   }
-  for (let d = addDaysUTC(trailingStart, -1); d >= horizonStart; d = addDaysUTC(d, -1)) {
+  for (let d = addDays(trailingStart, -1); d >= horizonStart; d = addDays(d, -1)) {
     if (seen.has(d)) continue
     if (!isValidMarker(byDay.get(d))) {
       targets.push(d)
@@ -84,7 +96,7 @@ function groupIntoChunks(targetDays) {
   const chunks = []
   let cur = []
   for (const d of asc) {
-    if (cur.length && (cur.length >= ROLLUP_CHUNK_DAYS || addDaysUTC(cur[cur.length - 1], 1) !== d)) {
+    if (cur.length && (cur.length >= ROLLUP_CHUNK_DAYS || addDays(cur[cur.length - 1], 1) !== d)) {
       chunks.push(cur)
       cur = []
     }
@@ -130,6 +142,9 @@ function rowsFromByUnit(byUnit, dayAt) {
  *  결손 탐지한다. */
 export async function runUsageRollup(env, { budgetMs = ROLLUP_CRON_BUDGET_MS, reserveMs = CHUNK_RESERVE_MS } = {}) {
   const startedAt = Date.now()
+  const nowMs = startedAt // 진입 시점에 한 번만 고정 — computeTargetDays()의 "오늘"(KST) 판정에
+  // 그대로 넘긴다(usage-prom.js의 다른 시간창 함수들과 같은 m-1 패턴). 이 값을 아래에서 다시
+  // Date.now()로 재조회하지 않는다.
   const deadline = startedAt + budgetMs
 
   if (!env.GRAFANA_BASE_URL || !env.GRAFANA_PROM_DATASOURCE_UID || !env.GRAFANA_API_TOKEN) {
@@ -137,7 +152,7 @@ export async function runUsageRollup(env, { budgetMs = ROLLUP_CRON_BUDGET_MS, re
     return { committed_days: [], remaining_gap_days: [], elapsed_ms: 0, budget_exhausted: false, skipped: 'not_configured' }
   }
 
-  const targets = await computeTargetDays(env.DB)
+  const targets = await computeTargetDays(env.DB, nowMs)
   const chunks = groupIntoChunks(targets)
   const committedDays = []
   let budgetExhausted = false

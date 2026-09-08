@@ -276,15 +276,20 @@ function pairingStatusMeta(status) {
 }
 
 /**
- * isoDaysAgo — n일 전 날짜를 'YYYY-MM-DD'로 반환. app/pages/usage.vue가 원래 자기 <script> 안에
- * 로컬로 갖고 있던 것과 동일한 계산식(그 파일은 손대지 않고 그대로 둠 — 동작 불변). 관리자 사용량
- * 화면들(UsagePeriodPreset 컴포넌트 포함)이 "오늘"의 정의를 어긋나지 않게 공유하려고 여기 추가.
- * toISOString()이 항상 UTC로 직렬화하므로 docs/api.md §5.8.0의 "날짜 축은 UTC" 요구와도 맞는다.
+ * isoDaysAgo — n일 전 날짜를 'YYYY-MM-DD'로 반환(브라우저 로컬 캘린더 기준). 사용자는 전원
+ * 한국에서 접속해 브라우저 로컬타임 = KST이고, 서버의 사용량 하루 경계도 KST다
+ * (docs/design/usage-kst-day-boundary.md §7). 예전 구현은 `setDate`(로컬)로 n일을 뺀 뒤
+ * `toISOString()`(UTC)으로 직렬화해 두 시간대를 혼용했다 — KST 00~09시 구간에서는 UTC 날짜가
+ * 아직 전날이라 "오늘"이 하루 전으로 계산되는 버그가 있었다. 지금은 로컬 연/월/일 필드를 직접
+ * 조립해 시간대를 하나로 고정한다. app/pages/usage.vue도 예전에는 이 계산식을 자기 파일 안에
+ * 복제해 갖고 있었으나(로컬+UTC 혼용 버그도 그대로 복제) 이 함수로 통합했다 — 관리자 사용량
+ * 화면들(UsagePeriodPreset 컴포넌트 포함)과 usage.vue가 모두 이 함수 하나만 공유한다.
  */
 function isoDaysAgo(n) {
   const d = new Date()
   d.setDate(d.getDate() - n)
-  return d.toISOString().slice(0, 10)
+  const pad = (v) => String(v).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
 /** 사용량 화면 공통 기간 프리셋 3종(docs/api.md §5.8.0 — 서버에 range enum을 두지 않고 프런트가
@@ -361,7 +366,8 @@ function usageErrorMessage(error) {
   return { message, retryable: true }
 }
 
-/** 'YYYY-MM-DD' from~to(포함, UTC 기준) 사이 날짜를 빠짐없이 나열. 관리자 전사 사용량 차트가
+/** 'YYYY-MM-DD' from~to(포함) 사이 날짜를 빠짐없이 나열 — 라벨 문자열 산술이라 시간대와 무관하다
+ * (KST 전환 이후에도 무변경, docs/design/usage-kst-day-boundary.md §7 판정). 관리자 전사 사용량 차트가
  * meta.gap_days(결측일)를 0 막대가 아니라 결측으로 그리려면 날짜축을 서버 응답과 무관하게
  * 스스로 채워야 해서 필요(§12.1 — "결측을 0으로 그리면 거짓 표시"). */
 function enumerateUsageDays(from, to) {

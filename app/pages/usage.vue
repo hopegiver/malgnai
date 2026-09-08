@@ -1,7 +1,12 @@
 <template>
   <div>
-    <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
-      <h1 class="mb-0">사용량</h1>
+    <div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
+      <div>
+        <h1 class="mb-1">사용량</h1>
+        <div v-if="meta && meta.rollup && meta.rollup.last_sync_at" class="text-faint small">
+          롤업 마지막 집계 {{ formatDate(meta.rollup.last_sync_at) }}
+        </div>
+      </div>
       <div class="d-flex align-items-center gap-2">
         <input type="date" class="form-control form-control-sm" v-model="from" :max="to" style="width:auto">
         <span class="text-faint small">~</span>
@@ -186,11 +191,10 @@
 </template>
 
 <script>
-function isoDaysAgo(n) {
-  const d = new Date()
-  d.setDate(d.getDate() - n)
-  return d.toISOString().slice(0, 10)
-}
+// isoDaysAgo는 app/assets/js/utils.js의 전역 함수를 그대로 쓴다(예전에는 이 파일이 로컬+UTC
+// 혼용 버그가 있는 계산식을 자기 <script> 안에 복제해 갖고 있었으나, 서버 하루 경계가 KST로
+// 전환되며 그 버그가 KST 00~09시 구간의 "오늘"을 하루 전으로 잘못 계산하는 문제가 되어
+// utils.js 공용 함수로 통합했다 — docs/design/usage-kst-day-boundary.md §7).
 
 export default {
   title: '사용량 · malgnai-hub',
@@ -212,8 +216,8 @@ export default {
       meta: null, // GET /api/usage/me 응답 meta(from/to/gap_days 등, docs/api.md §5.9.5) — 일별
       // 그래프의 날짜축·결손일 표시에 쓴다. dailyRows만으로 v-for를 돌리면 결손일이 조용히
       // 사라져 "0"으로 오독되므로(§12.1과 동일 원칙), admin/usage/index.vue의 검증된
-      // gap-aware 그래프 패턴을 여기서도 재현한다(공유 컴포넌트로 추출하지 않는 이유는 이 파일
-      // 상단 isoDaysAgo 주석 참고 — usage.vue는 의도적으로 자기 파일 안에 로컬로 유지).
+      // gap-aware 그래프 패턴을 여기서도 재현한다(공유 컴포넌트로 추출하지 않고 이 파일 안에
+      // 유지 — 두 화면의 렌더 구조 차이가 아직 작아 추상화 비용이 이득보다 크다).
       sessions: [],
     }
   },

@@ -115,12 +115,18 @@ export default {
           .then((result) => console.log('[catalog-sync] cron sync done', JSON.stringify(result)))
           .catch((err) => console.error('[catalog-sync] cron sync failed', err))
       )
-      // 18:00 UTC 회차는 01:00 UTC 주 적재가 실패했을 때의 같은 날 보조 재시도를 겸한다(§18.1).
+      // KST 전환(docs/design/usage-kst-day-boundary.md §4) — day_at 경계가 KST 자정(=UTC 15:00)으로
+      // 바뀌면서 이 회차와 아래 '0 1 * * *' 회차의 주/보조 역할이 뒤바뀌었다. 18:00Z는 KST 03:00,
+      // 즉 KST 자정 이후 +3h로 그 날짜의 첫 크론 회차다 — 이제 이 회차가 **주 적재**를 맡는다(스케줄
+      // 문자열 자체는 변경하지 않는다, §4 "단순함이 이긴다" — W1 불변식은 스케줄이 아니라
+      // computeTargetDays()의 "오늘"(KST) 정의에서 나오므로 스케줄 변경 없이 자동 보존된다).
       ctx.waitUntil(
         runUsageRollup(env, { budgetMs: ROLLUP_CRON_BUDGET_MS })
           .catch((err) => console.error('[usage-rollup] cron run failed', err))
       )
     } else if (controller.cron === '0 1 * * *') {
+      // KST 전환 이후 이 회차(01:00Z=KST 10:00, KST 자정 이후 +10h)는 **보조 재시도**로 역할이
+      // 바뀐다 — 위 18:00Z 주 적재가 실패했을 때의 같은 KST 날짜 보조 재시도를 겸한다(§4).
       ctx.waitUntil(
         runUsageRollup(env, { budgetMs: ROLLUP_CRON_BUDGET_MS })
           .catch((err) => console.error('[usage-rollup] cron run failed', err))
