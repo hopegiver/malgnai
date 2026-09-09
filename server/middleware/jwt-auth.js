@@ -17,7 +17,14 @@ export const PUBLIC_PATHS = new Set([
   // 여기서는 전역 JWT 게이트만 우회시키고, 실제 인증은 server/api/sessions.js의
   // requireDeviceToken 미들웨어(mcp/device-auth.js 재사용)가 무조건 강제한다 — "무인증 통과"가
   // 아니라 "인증 방식이 다를 뿐"이다.
-  '/api/sessions'
+  '/api/sessions',
+  // Google 로그인(우리가 Google의 **클라이언트**인 축, server/api/auth-google.js) — 권한 근거는
+  // JWT가 아니라 "Google이 서명한 id_token + 사전 존재하는 활성 계정"이다(docs/design/
+  // google-oauth-login.md 결정4·§3). /api/oauth/authorize-context, /api/oauth/consent(제공자 축)와
+  // 혼동 금지 — 그쪽은 JWT 게이트를 그대로 유지한다.
+  '/api/auth/google/start',
+  '/api/auth/google/callback',
+  '/api/auth/google/exchange'
 ])
 
 export async function jwtAuthMiddleware(c, next) {

@@ -180,6 +180,9 @@ export default {
       }
     },
     signOut() {
+      // 무음 재로그인 억제(docs/design/google-oauth-login.md §4.3(e)-2) — 명시적 로그아웃은
+      // logout()과 공유되는 세션만료 경로와 달리 이 호출부에서만 일어나므로 여기서만 억제한다.
+      localStorage.setItem('mh_g_silent_off', '1')
       logout()
     },
   },

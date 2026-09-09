@@ -6,6 +6,7 @@ import { MalgnMcpAgent } from '../mcp/agent.js'
 import { corsMiddleware } from './middleware/cors.js'
 import { jwtAuthMiddleware } from './middleware/jwt-auth.js'
 import authRouter from './api/auth.js'
+import authGoogleRouter from './api/auth-google.js'
 import devicesRouter from './api/devices.js'
 import projectsRouter, { repositories as repositoriesRouter } from './api/projects.js'
 import eventsRouter from './api/events.js'
@@ -18,6 +19,7 @@ import oauthRouter, { registerWellKnownRoutes } from './api/oauth.js'
 import sessionsRouter from './api/sessions.js'
 import usageRouter, { adminUsage as adminUsageRouter } from './api/usage.js'
 import adminSharedWorkstationsRouter from './api/admin-shared-workstations.js'
+import * as googleLoginFlowsDao from './dao/google-login-flows.js'
 
 const webApp = new Hono()
 
@@ -28,6 +30,9 @@ webApp.use('/api/*', jwtAuthMiddleware)
 // webApp 최상위에 절대경로로 직접 등록(서브라우터에 넣지 않음).
 registerWellKnownRoutes(webApp)
 
+// 더 구체적인 경로를 먼저 등록한다(§index.js 하우스 규약, /api/admin/usage/shared-workstations와
+// 동일) — /api/auth/google/*(Google 로그인, 클라이언트 축)를 /api/auth/*(자체인증)보다 먼저.
+webApp.route('/api/auth/google', authGoogleRouter)
 webApp.route('/api/auth', authRouter)
 webApp.route('/api/devices', devicesRouter)
 webApp.route('/api/projects', projectsRouter)
@@ -124,12 +129,30 @@ export default {
         runUsageRollup(env, { budgetMs: ROLLUP_CRON_BUDGET_MS })
           .catch((err) => console.error('[usage-rollup] cron run failed', err))
       )
+      // google_login_flows 만료행 정리(docs/design/google-oauth-login.md 6.9, 보안점검 H1 처방) —
+      // 독립 ctx.waitUntil로 위 두 배치와 분리한다(Promise.all로 묶지 않는다, §18.3 규칙1). 유예를
+      // 24h→1h로 줄였다(플로우 TTL이 10분인데 그보다 훨씬 긴 유예를 남길 이유가 없다 — 공격 트래픽의
+      // 체류 시간을 최소화). 삭제 건수를 반드시 로깅한다(성공이든 실패든 조용히 넘어가지 않는다 —
+      // 이상 증가는 이 로그로 관측한다).
+      ctx.waitUntil(
+        googleLoginFlowsDao.deleteExpiredBefore(env.DB, new Date(Date.now() - 60 * 60 * 1000).toISOString())
+          .then((count) => console.log('[google-login-flows] expired sweep done', count))
+          .catch((err) => console.error('[google-login-flows] expired sweep failed', err))
+      )
     } else if (controller.cron === '0 1 * * *') {
       // KST 전환 이후 이 회차(01:00Z=KST 10:00, KST 자정 이후 +10h)는 **보조 재시도**로 역할이
       // 바뀐다 — 위 18:00Z 주 적재가 실패했을 때의 같은 KST 날짜 보조 재시도를 겸한다(§4).
       ctx.waitUntil(
         runUsageRollup(env, { budgetMs: ROLLUP_CRON_BUDGET_MS })
           .catch((err) => console.error('[usage-rollup] cron run failed', err))
+      )
+      // 보안점검 H1 처방 "크론 빈도를 올린다" — 새 cron 트리거를 추가하는 대신(스케줄 문자열은
+      // usage-rollup의 KST 경계 로직과 얽혀 있어 변경 위험이 크다, §4) 기존 2번째 회차에도 같은
+      // 스윕을 태워 하루 2회로 빈도만 올린다.
+      ctx.waitUntil(
+        googleLoginFlowsDao.deleteExpiredBefore(env.DB, new Date(Date.now() - 60 * 60 * 1000).toISOString())
+          .then((count) => console.log('[google-login-flows] expired sweep done', count))
+          .catch((err) => console.error('[google-login-flows] expired sweep failed', err))
       )
     } else {
       console.error('[scheduled] unknown cron trigger — no-op', controller.cron)

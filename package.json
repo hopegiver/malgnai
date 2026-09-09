@@ -21,6 +21,7 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "playwright": "^1.63.0",
     "vitest": "^3.0.0",
     "wrangler": "^4.0.0"
   }

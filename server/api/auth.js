@@ -2,22 +2,17 @@
 import { Hono } from 'hono'
 import * as usersDao from '../dao/users.js'
 import * as refreshTokensDao from '../dao/refresh-tokens.js'
-import { verifyPassword, hashPassword, signAccessToken, generateOpaqueToken, sha256Hex, REFRESH_TOKEN_TTL_SECONDS } from '../lib/tokens.js'
+import { verifyPassword, hashPassword, sha256Hex } from '../lib/tokens.js'
 import { rotateOrDetectReuse } from '../lib/rotating-token.js'
+// issueTokenPair는 server/lib/session-tokens.js로 추출됐다(docs/design/google-oauth-login.md 결정 5) —
+// Google 로그인(server/api/auth-google.js)과 100% 동일한 토큰을 발급하기 위한 공용 lib. 로직·상수·
+// DB 쓰기는 한 글자도 바뀌지 않았다(순수 이동, 시그니처만 (c,user)→(env,user)).
+import { issueWebTokenPair } from '../lib/session-tokens.js'
 
 const NAME_MAX_LENGTH = 100
 const NEW_PASSWORD_MIN_LENGTH = 10
 
 const auth = new Hono()
-
-async function issueTokenPair(c, user) {
-  const { token, expiresIn } = await signAccessToken(user, c.env.JWT_SECRET)
-  const rawRefresh = generateOpaqueToken()
-  const refreshHash = await sha256Hex(rawRefresh)
-  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString()
-  await refreshTokensDao.insert(c.env.DB, { userId: user.id, tokenHash: refreshHash, expiresAt })
-  return { token, expires_in: expiresIn, refresh_token: rawRefresh, refresh_expires_in: REFRESH_TOKEN_TTL_SECONDS }
-}
 
 auth.post('/login', async (c) => {
   const body = await c.req.json().catch(() => ({}))
@@ -33,7 +28,7 @@ auth.post('/login', async (c) => {
     return c.json({ error: { code: 'INVALID_CREDENTIALS', message: 'invalid email or password' } }, 401)
   }
 
-  const pair = await issueTokenPair(c, user)
+  const pair = await issueWebTokenPair(c.env, user)
   return c.json({ ...pair, must_change_password: !!user.must_change_password })
 })
 
@@ -72,7 +67,7 @@ auth.post('/refresh', async (c) => {
     return c.json({ error: { code: 'UNAUTHORIZED', message: 'account is not active' } }, 401)
   }
 
-  const pair = await issueTokenPair(c, user)
+  const pair = await issueWebTokenPair(c.env, user)
   return c.json(pair)
 })
 

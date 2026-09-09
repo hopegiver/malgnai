@@ -85,6 +85,19 @@ export async function findByEmployeeId(db, employeeId) {
   return db.prepare('SELECT * FROM users WHERE employee_id = ?').bind(employeeId).first()
 }
 
+/** Google 로그인 TOFU 링크(docs/design/google-oauth-login.md 결정 1 C5, migrations/0025) — CAS:
+ *  google_sub가 아직 NULL인 계정에만 채운다. changes>0이면 이번 로그인에서 처음 연결됐다는 뜻.
+ *  changes===0(동시 로그인 레이스 또는 이미 다른 값으로 연결됨)이면 호출부(server/api/auth-google.js)가
+ *  findById로 재조회해 C5(값 일치 여부)를 재평가한다. 다른 사용자가 이미 그 sub를 보유하면
+ *  idx_users_google_sub(부분 UNIQUE) 위반으로 이 UPDATE 자체가 예외를 던진다(sub_conflict — 호출부가
+ *  isUniqueConstraintError로 판별, admin-users.js:34와 동일 방식). */
+export async function linkGoogleSub(db, id, googleSub) {
+  const res = await db.prepare(
+    'UPDATE users SET google_sub = ?, updated_at = ? WHERE id = ? AND google_sub IS NULL'
+  ).bind(googleSub, new Date().toISOString(), id).run()
+  return res.meta.changes > 0
+}
+
 /** UPDATE 문 단일 빌더(§5.5 원자 커밋) — server/dao/audit-logs.js의 buildRecordStatement()가 만든
  *  감사 INSERT statement와 함께 호출부(server/api/admin-users.js)가 db.batch()로 원자 커밋한다.
  *  이 함수 자체는 실행(.run())하지 않는다 — batch 안에서만 실행돼야 "UPDATE 성공 + 감사로그 실패"
