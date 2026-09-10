@@ -198,40 +198,52 @@ authGoogle.get('/start', async (c) => {
     return redirectToLogin(c, { ge: 'upstream', gs: silentRequested })
   }
 
-  // ⓪ silent=1인데 120초 내 무음 시도 억제 쿠키가 이미 있으면 Google로 나가지 않는다(결정 6 루프 차단기).
-  if (silentRequested && getCookie(c, silentSuppressCookieName(c))) {
-    return redirectToLogin(c, { ge: 'silent_suppressed' })
+  // review R-03 처방 — 이 아래(D1 insert·쿠키 설정·authUrl 생성 포함)에서 예외가 나면 전역
+  // webApp.onError(server/index.js)가 JSON 500 본문을 그대로 반환해, 이 라우트의 다른 모든 실패
+  // 분기(레이트리밋·env 미설정·origin 불허 등)가 지키는 "에러는 전부 302 /login#ge="
+  // 계약(docs/design/google-oauth-login.md §3.1)을 이 경로만 깬다. 전환 전에는 로그인 화면에
+  // 자체 폼이 남아 있어 무해했지만, 지금은 기본 화면이 Google 버튼 단독이라 예외 1건이 곧
+  // 락아웃이 된다 — 예외를 삼키지 않고 로그는 남기되(server/index.js의 '[unhandled]' 패턴과
+  // 동일하게), 사용자에게는 다른 실패 분기와 동일한 302 폴백을 준다.
+  try {
+    // ⓪ silent=1인데 120초 내 무음 시도 억제 쿠키가 이미 있으면 Google로 나가지 않는다(결정 6 루프 차단기).
+    if (silentRequested && getCookie(c, silentSuppressCookieName(c))) {
+      return redirectToLogin(c, { ge: 'silent_suppressed' })
+    }
+
+    // ① env 확인 — client_id/secret/redirect_uri + 도메인 통제선 1개 이상. 없으면 fail-closed(결정 9).
+    if (!isGoogleConfigured(c.env)) {
+      return redirectToLogin(c, { ge: 'not_configured' })
+    }
+
+    // ② 요청 origin이 등록된 GOOGLE_REDIRECT_URI의 origin과 다르면 Google로 나가지 않는다(결정 7).
+    if (!isOriginAllowed(c.env, c.req.url)) {
+      return redirectToLogin(c, { ge: 'origin_not_allowed' })
+    }
+
+    // ③ state/nonce/verifier/binding/mode 생성 → google_login_flows INSERT(pending, 10분)
+    const state = generateOpaqueToken()
+    const nonce = generateOpaqueToken()
+    const codeVerifier = generateOpaqueToken()
+    const codeChallenge = await computeCodeChallengeS256(codeVerifier)
+    const bindingSecret = generateOpaqueToken()
+    const bindingHash = await sha256Hex(bindingSecret)
+    const mode = silentRequested ? 'silent' : 'interactive'
+    const expiresAt = new Date(Date.now() + FLOW_TTL_SECONDS * 1000).toISOString()
+
+    await googleLoginFlowsDao.insert(c.env.DB, { state, bindingHash, nonce, codeVerifier, redirectPath, mode, expiresAt })
+
+    setCookie(c, flowBindingCookieName(c), bindingSecret, cookieOpts(c, { maxAge: FLOW_TTL_SECONDS }))
+    if (silentRequested) {
+      setCookie(c, silentSuppressCookieName(c), '1', cookieOpts(c, { maxAge: SILENT_SUPPRESS_COOKIE_TTL_SECONDS }))
+    }
+
+    const authUrl = buildAuthorizationUrl(c.env, { state, nonce, codeChallenge, mode })
+    return c.redirect(authUrl, 302)
+  } catch (err) {
+    console.error('[auth-google] /start failed', err)
+    return redirectToLogin(c, { ge: 'upstream', gs: silentRequested })
   }
-
-  // ① env 확인 — client_id/secret/redirect_uri + 도메인 통제선 1개 이상. 없으면 fail-closed(결정 9).
-  if (!isGoogleConfigured(c.env)) {
-    return redirectToLogin(c, { ge: 'not_configured' })
-  }
-
-  // ② 요청 origin이 등록된 GOOGLE_REDIRECT_URI의 origin과 다르면 Google로 나가지 않는다(결정 7).
-  if (!isOriginAllowed(c.env, c.req.url)) {
-    return redirectToLogin(c, { ge: 'origin_not_allowed' })
-  }
-
-  // ③ state/nonce/verifier/binding/mode 생성 → google_login_flows INSERT(pending, 10분)
-  const state = generateOpaqueToken()
-  const nonce = generateOpaqueToken()
-  const codeVerifier = generateOpaqueToken()
-  const codeChallenge = await computeCodeChallengeS256(codeVerifier)
-  const bindingSecret = generateOpaqueToken()
-  const bindingHash = await sha256Hex(bindingSecret)
-  const mode = silentRequested ? 'silent' : 'interactive'
-  const expiresAt = new Date(Date.now() + FLOW_TTL_SECONDS * 1000).toISOString()
-
-  await googleLoginFlowsDao.insert(c.env.DB, { state, bindingHash, nonce, codeVerifier, redirectPath, mode, expiresAt })
-
-  setCookie(c, flowBindingCookieName(c), bindingSecret, cookieOpts(c, { maxAge: FLOW_TTL_SECONDS }))
-  if (silentRequested) {
-    setCookie(c, silentSuppressCookieName(c), '1', cookieOpts(c, { maxAge: SILENT_SUPPRESS_COOKIE_TTL_SECONDS }))
-  }
-
-  const authUrl = buildAuthorizationUrl(c.env, { state, nonce, codeChallenge, mode })
-  return c.redirect(authUrl, 302)
 })
 
 // ---------------------------------------------------------------------------
