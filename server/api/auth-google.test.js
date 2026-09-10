@@ -264,6 +264,37 @@ describe('GET /api/auth/google/start', () => {
     expect(flowCookie).toContain('Path=/api/auth/google')
   })
 
+  // review R-03 회귀 — D1 insert(또는 그 이후 어떤 동기 처리)가 예외를 던져도 전역
+  // webApp.onError(JSON 500)까지 새지 않고, 이 라우트의 다른 실패 분기와 동일하게 302
+  // /login#ge=upstream으로 폴백해야 한다(§3.1 "에러는 전부 302" 계약). 수정 전 코드에는
+  // try/catch가 없어 이 테스트는 실패한다(예외가 그대로 app.request() 밖으로 던져진다).
+  describe('R-03 — /start 핸들러 예외는 302 폴백으로 흡수된다', () => {
+    it('D1 insert가 예외를 던지면 upstream으로 302 리디렉트하고 예외를 서버 로그에 남긴다', async () => {
+      const app = makeApp()
+      const boom = new Error('D1 insert boom')
+      flowInsertMock.mockRejectedValueOnce(boom)
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      const res = await app.request('/api/auth/google/start', {}, ENV)
+
+      expect(res.status).toBe(302)
+      expect(res.headers.get('location')).toBe('/login#ge=upstream')
+      expect(spy).toHaveBeenCalledWith('[auth-google] /start failed', boom)
+      spy.mockRestore()
+    })
+
+    it('무음(silent=1) 요청 중 예외가 나면 gs=1을 실어 조용한 폴백으로 처리한다', async () => {
+      const app = makeApp()
+      flowInsertMock.mockRejectedValueOnce(new Error('D1 insert boom'))
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      const res = await app.request('/api/auth/google/start?silent=1', {}, ENV)
+
+      expect(res.headers.get('location')).toBe('/login#ge=upstream&gs=1')
+      spy.mockRestore()
+    })
+  })
+
   // ---------------------------------------------------------------------------
   // 레이트리밋(H1 처방 + review M-C/M-D/M-E 회귀) — GOOGLE_LOGIN_RL 바인딩. 리뷰가 지적한
   // "H1 최우선 처방(레이트리밋)만 회귀 테스트가 0건이다"(M-C)를 잠근다: 바인딩 있음/없음, 한도
