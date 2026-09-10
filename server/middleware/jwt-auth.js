@@ -24,7 +24,17 @@ export const PUBLIC_PATHS = new Set([
   // 혼동 금지 — 그쪽은 JWT 게이트를 그대로 유지한다.
   '/api/auth/google/start',
   '/api/auth/google/callback',
-  '/api/auth/google/exchange'
+  '/api/auth/google/exchange',
+  // POST /api/plugin-deploys/notify — claude-plugins CI(GitHub Actions)의 배포알림 인입.
+  // JWT도 device_token도 아닌 제3의 인증축(X-Plugin-Deploy-Key)이다(docs/design/
+  // plugin-deploy-notify.md §4, architecture.md §0 결정34) — 여기서는 전역 JWT 게이트만 우회시키고, 실제 인증은
+  // server/middleware/plugin-deploy-key.js의 requirePluginDeployKey가 무조건 강제한다.
+  // "무인증 통과"가 아니라 "인증 방식이 다를 뿐"이다(§sessions 항목과 동일 톤).
+  // ⚠️ 반드시 이 문자열(접미사 '/notify' 포함)만 넣는다 — 접미사 없는 '/api/plugin-deploys'를
+  // 넣으면 PUBLIC_PATHS가 경로 정확일치·메서드 무시(:31 `c.req.path`만 비교)라서
+  // GET /api/plugin-deploys(직원 JWT 조회)까지 함께 무인증이 되어버린다(설계 §3.2, 이 설계
+  // 최대의 함정). 경로를 아예 분리한 이유가 그것이다.
+  '/api/plugin-deploys/notify'
 ])
 
 export async function jwtAuthMiddleware(c, next) {

@@ -31,7 +31,16 @@ describe('PUBLIC_PATHS', () => {
     expect(PUBLIC_PATHS.has('/api/oauth/consent')).toBe(false)
   })
 
-  it('총 개수는 정확히 11개(기존 8 + Google 3, 의도치 않은 추가 없음)', () => {
-    expect(PUBLIC_PATHS.size).toBe(11)
+  // docs/design/plugin-deploy-notify.md §3.2 — 이 설계 최대의 함정 회귀 테스트. 접미사 없는
+  // '/api/plugin-deploys'가 잘못 추가되면 GET(직원 조회)까지 무인증이 되어버리는데, 이 저장소의
+  // PUBLIC_PATHS는 경로 정확일치(Set)라 접미사 포함 문자열만 정확히 있어야 그 사고가 안 난다.
+  it('plugin-deploys는 /notify 접미사가 붙은 인입 경로만 화이트리스트에 있다(조회 경로는 없다)', () => {
+    expect(PUBLIC_PATHS.has('/api/plugin-deploys/notify')).toBe(true)
+    expect(PUBLIC_PATHS.has('/api/plugin-deploys')).toBe(false)
+    expect(PUBLIC_PATHS.has('/api/plugin-deploys/')).toBe(false)
+  })
+
+  it('총 개수는 정확히 12개(기존 8 + Google 3 + plugin-deploys 1, 의도치 않은 추가 없음)', () => {
+    expect(PUBLIC_PATHS.size).toBe(12)
   })
 })

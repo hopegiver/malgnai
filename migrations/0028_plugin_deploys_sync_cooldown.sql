@@ -1,0 +1,29 @@
+-- Migration number: 0028 	 2026-09-10T00:00:00.000Z
+--
+-- plugin_deploys.sync_triggered_at — security 정밀검토 M-1 처방(라운드2, plugin-deploy-notify.md
+-- §2.3 보강). §2.3이 봉쇄를 주장한 "created===true 게이트가 재시도 증폭을 막는다"는 주장은
+-- 산술적으로 틀렸다: 공격자가 매 요청마다 version/commit_hash를 바꾸면 created는 매번 true가
+-- 되어 매번 syncCatalog()가 돈다. 카탈로그 스캔 대상 103개(agents 21+skills 40+knowledge 42)
+-- +tree 1회 = 요청당 약 104 GitHub 서브리퀘스트, 분당 10회 레이트리밋 허용 한도로도
+-- 1,040 req/분(62,400/시간)이라 GITHUB_TOKEN 시간당 5,000 한도를 5분 내 소진한다
+-- (cba03f3이 고친 사고의 재현 경로). 이를 막으려면 "언제 마지막으로 실제 sync를 걸었는가"라는,
+-- (plugin_name,version,commit_hash) 튜플과 무관한 **전역** 상태가 하나 필요하다.
+--
+-- 이 컬럼 하나로 그 상태를 derive한다(새 테이블/새 바인딩 없음, D1 단일 저장소 유지) —
+-- 값이 채워진 행 중 MAX(sync_triggered_at)이 "마지막으로 실제 sync를 트리거한 시각"이다.
+-- 전역(plugin_name 무관) 게이트인 이유: syncCatalog()가 소진하는 자원(GitHub API 요청 한도)은
+-- 어떤 (plugin,version,commit) 조합으로 트리거됐는지와 무관하게 계정 전체가 공유하므로,
+-- 공격자가 plugin_name까지 바꿔가며 조합을 새로 지어내도 이 게이트는 우회되지 않는다.
+--
+-- nullable로 둔다 — "이 배포알림이 실제로 sync를 걸었는지"를 표시하며 대부분 행은 NULL
+-- (cooldown에 걸려 skip됐거나애초에 created===false 재전송)이다. 값 형식은 received_at과 동일한
+-- ISO8601 문자열(서버 시각, server/api/plugin-deploys.js가 receivedAt 값을 그대로 기록한다).
+--
+-- MySQL과 달리 SQLite(D1)는 ADD COLUMN에 IF NOT EXISTS가 없다 — 일반 ADD COLUMN으로 작성한다.
+-- 마이그레이션 러너가 체크섬으로 1회만 실행함을 보장하므로 재실행 시 "duplicate column" 에러가
+-- 나도 별도 조치가 필요 없다(migrations/README.md 규약).
+--
+-- 0027이 아니라 별도 0028로 분리한 이유: 0027 DDL은 이 마이그레이션 작성 시점에 이미 로컬 D1에
+-- 적용되어 있었다(원격 미적용은 맞지만 로컬은 적용됨) — forward-only 규약을 로컬에서도 지키기
+-- 위해 기존 0027을 고치는 대신 새 파일로 추가한다.
+ALTER TABLE plugin_deploys ADD COLUMN sync_triggered_at TEXT;

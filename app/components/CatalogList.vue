@@ -2,7 +2,16 @@
   <div class="cat-list">
     <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
       <div>
-        <h1 class="mb-0">카탈로그</h1>
+        <div class="d-flex align-items-center gap-2">
+          <h1 class="mb-0">카탈로그</h1>
+          <!-- 최신 배포 버전 배지(§17). state.pluginDeploy가 null이면(=배포 기록 0건 또는 조회 실패)
+               아예 렌더하지 않는다 — 자리표시자도, "정보 없음"도 두지 않는다(§17.5.3). -->
+          <span
+            v-if="state.pluginDeploy"
+            class="badge cat-plugin-badge"
+            :title="`최근 배포 통보 ${formatRelative(state.pluginDeploy.received_at)}`"
+          >{{ state.pluginDeploy.plugin_name }} v{{ state.pluginDeploy.version }}</span>
+        </div>
         <small class="text-muted" v-if="!state.loading && !state.error">
           malgn-agent 플러그인 · {{ filteredItems.length }}개
         </small>
@@ -178,6 +187,9 @@ const state = Vue.reactive({
   syncing: false,
   syncMessage: '',
   syncError: false,
+  // 최신 배포 알림 1건(GET /api/plugin-deploys?plugin=…&limit=1의 data[0]) 또는 null.
+  // null = 배포 기록 0건 또는 조회 실패 → 헤더 배지를 렌더하지 않는다(설계 §17.5.3).
+  pluginDeploy: null,
 })
 
 const TYPES = [
@@ -185,6 +197,11 @@ const TYPES = [
   { value: 'skill', label: '스킬', icon: 'bi-lightning-charge' },
   { value: 'knowledge', label: '지식', icon: 'bi-book' },
 ]
+
+// 배지가 조회할 플러그인. ⚠️ 이 파일에는 같은 문자열이 두 군데 더 하드코딩돼 있다
+// (헤더 부제 "malgn-agent 플러그인 · N개", 전체 빈 상태 안내문). 플러그인 이름이 바뀌면
+// 이 상수와 그 두 곳을 **함께** 고칠 것 — 이번 증분에서 그 두 곳의 한국어 카피는 건드리지 않는다.
+const PLUGIN_NAME = 'malgn-agent'
 
 export default {
   name: 'CatalogList',
@@ -256,6 +273,9 @@ export default {
     async load() {
       this.state.loading = true
       this.state.error = false
+      // 배포 버전 배지는 목록과 **병렬**로, await하지 않고 던진다 — 배지는 장식이라
+      // 목록 렌더를 한 순간도 막아서는 안 된다(§17.2 "포기한 것"의 감당 방안 (a)).
+      this.loadPluginVersion()
       // type을 지정하지 않고 3종 전체를 한 번에 받아 탭은 클라이언트 필터로 처리한다(회사 카탈로그
       // 규모가 작아 요청 3번보다 1번이 낫고, 탭별 카운트 배지도 별도 호출 없이 바로 계산 가능).
       const { data, error } = await useApi('/api/catalog')
@@ -267,6 +287,13 @@ export default {
       }
       this.state.items = data?.data || []
       this.state.loaded = true
+    },
+    // 최신 배포 알림 1건. 실패해도 조용히 무시한다 — 배지가 빠질 뿐 목록 화면은 정상이며,
+    // state.error(카탈로그 에러 배너)를 절대 건드리지 않는다(§17.5.3).
+    async loadPluginVersion() {
+      const { data, error } = await useApi(`/api/plugin-deploys?plugin=${PLUGIN_NAME}&limit=1`)
+      if (error) return                                  // 이전에 성공한 값이 있으면 그대로 둔다(지우지 않는다)
+      this.state.pluginDeploy = data?.data?.[0] || null  // 빈 배열이면 null → 배지 미렌더
     },
     // 관리자 전용 수동 동기화(POST /api/admin/catalog/sync → server/lib/catalog-sync.js). 매일
     // 1회 cron으로도 자동 실행되지만, 레포에 새 agent/skill/knowledge를 올린 직후 기다리지 않고
@@ -439,4 +466,13 @@ export default {
   display: inline-flex; align-items: center; justify-content: center;
 }
 .cat-section-header-skeleton { width: 8rem; height: 1.0625rem; margin-bottom: 0.875rem; }
+
+/* 헤더의 플러그인 배포 버전 배지(§17). 같은 파일 .cat-tab-count/.cat-section-count와 동일한
+   토큰(ink-muted/canvas-soft/hairline/rounded-full)을 써서 "회색 pill" 언어를 유지한다. */
+.cat-plugin-badge {
+  font-size: 0.75rem; font-weight: 600; font-variant-numeric: tabular-nums;
+  color: var(--color-ink-muted); background-color: var(--color-canvas-soft);
+  border: 1px solid var(--color-hairline); border-radius: var(--rounded-full);
+  padding: 0.25rem 0.55rem;
+}
 </style>

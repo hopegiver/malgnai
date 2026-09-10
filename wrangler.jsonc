@@ -48,8 +48,19 @@
   // auth-google.js의 checkRateLimit()이 c.env.GOOGLE_LOGIN_RL 존재 여부로 가드하므로, 이 바인딩이
   // 아직 반영 전인 로컬/스테이징에서도 fail-open으로 정상 동작한다 — 그래서 배포 후 이 바인딩이
   // 실제로 붙었는지 배포 체크리스트로 반드시 확인할 것.
+  // PLUGIN_DEPLOY_RL — claude-plugins CI 배포알림(POST /api/plugin-deploys/notify) 전용
+  // 레이트리밋(docs/design/plugin-deploy-notify.md §9.2). 이 URL은 공개 저장소
+  // malgnsoft/claude-plugins의 워크플로 YAML에 그대로 적혀 인터넷에 노출되고, 서버리스에서는
+  // 인증 실패도 이미 과금된 뒤라는 이유로 넣는다(§9.1).
+  //
+  // ⚠️ namespace_id는 위 GOOGLE_LOGIN_RL 주석이 설명하는 대로 계정 전역 스코프다 — 기존 값
+  // "873909047174"를 재사용하면 Google 로그인 트래픽과 배포 알림이 같은 카운터를 공유해 서로를
+  // 막는다. 아래 값은 같은 파생 규칙("malgnai-hub:plugin-deploy-rl"의 sha256 앞 10자 hex를
+  // 10진수로 변환)으로 만든 이 바인딩 전용 값이다 — 다른 앱/바인딩에 복제할 때는 반드시 그
+  // 앱·바인딩 고유의 새 문자열로 다시 파생할 것.
   "ratelimits": [
-    { "name": "GOOGLE_LOGIN_RL", "namespace_id": "873909047174", "simple": { "limit": 20, "period": 60 } }
+    { "name": "GOOGLE_LOGIN_RL", "namespace_id": "873909047174", "simple": { "limit": 20, "period": 60 } },
+    { "name": "PLUGIN_DEPLOY_RL", "namespace_id": "725107757322", "simple": { "limit": 10, "period": 60 } }
   ],
 
   // app/(SPA)을 별도 Pages 배포 대신 Worker 정적 자산 바인딩으로 단일 배포(대표 지시,

@@ -19,6 +19,7 @@ import oauthRouter, { registerWellKnownRoutes } from './api/oauth.js'
 import sessionsRouter from './api/sessions.js'
 import usageRouter, { adminUsage as adminUsageRouter } from './api/usage.js'
 import adminSharedWorkstationsRouter from './api/admin-shared-workstations.js'
+import pluginDeploysRouter from './api/plugin-deploys.js'
 import * as googleLoginFlowsDao from './dao/google-login-flows.js'
 
 const webApp = new Hono()
@@ -41,6 +42,9 @@ webApp.route('/api/repositories', repositoriesRouter)
 webApp.route('/api/admin/users', adminUsersRouter)
 webApp.route('/api/catalog', catalogRouter)
 webApp.route('/api/admin/catalog', adminCatalogRouter)
+// claude-plugins CI 배포알림(§3.1) — 인입(POST /notify)은 PUBLIC_PATHS 우회 + 전용 키 인증,
+// 조회(GET /)는 이 라우터 등록 이전에 이미 통과한 전역 jwtAuthMiddleware가 적용된 상태다.
+webApp.route('/api/plugin-deploys', pluginDeploysRouter)
 webApp.route('/api/oauth', oauthRouter)
 webApp.route('/api/sessions', sessionsRouter)
 webApp.route('/api/usage', usageRouter)

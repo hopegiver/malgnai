@@ -59,6 +59,24 @@ export async function sha256Hex(raw) {
   return toHex(new Uint8Array(digest))
 }
 
+/** sha256Hex()의 hex 인코딩 이전 원시 바이트. plugin-deploy-key 축의 상수시간 비교(아래
+ *  timingSafeEqualSecret)가 hex 문자열 비교 경로를 새로 만들지 않고 바이트 축 하나로 통일하기
+ *  위해 쓴다(docs/design/plugin-deploy-notify.md §4.4). */
+async function sha256Bytes(raw) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw))
+  return new Uint8Array(digest)
+}
+
+/** 두 비밀 문자열을 상수시간 비교한다(plugin-deploy-key 축 전용, §4.4). 길이가 달라도 조기
+ *  반환하지 않는다 — SHA-256을 먼저 통과시키므로 비교 대상은 언제나 32바이트 고정이고,
+ *  따라서 "키 길이"조차 타이밍으로 새지 않는다(원문 직접 비교의 timingSafeEqualBytes 첫 줄
+ *  `a.length !== b.length` 조기반환 대비 이점 — 그 분기가 원문 길이를 누설한다). */
+export async function timingSafeEqualSecret(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  const [da, db] = await Promise.all([sha256Bytes(a), sha256Bytes(b)])
+  return timingSafeEqualBytes(da, db)
+}
+
 // ---------------------------------------------------------------------------
 // 관리자 신규 계정 생성 시 임시 비밀번호(사람이 읽고 옮겨적기 쉬운 형태) — 응답에 1회만 노출.
 // 혼동되는 문자(0/O, 1/l/I 등) 제외한 32자 세트, crypto.getRandomValues 기반.
