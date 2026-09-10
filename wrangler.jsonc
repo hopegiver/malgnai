@@ -78,7 +78,13 @@
   // 연결된다 — 구성 절차는 docs/runbook/grafana-cloudflare-dns-proxy.md.
   "vars": {
     "GRAFANA_BASE_URL": "https://otel.apiserver.kr",
-    "GRAFANA_PROM_DATASOURCE_UID": "cftfxno3cwm4gd"
+    "GRAFANA_PROM_DATASOURCE_UID": "cftfxno3cwm4gd",
+    // Google 로그인(docs/design/google-oauth-login.md §7.4·§9.2) — GOOGLE_CLIENT_ID/SECRET은
+    // secret이라 여기 없다(wrangler secret put으로만 주입). §7.3 판정 결과 A(malgnsoft.com은
+    // Google Workspace 도메인, 동의화면 Internal 확인됨) — GOOGLE_ALLOWED_EMAIL_DOMAIN(결과 B용
+    // 대체 통제선)은 쓰지 않는다.
+    "GOOGLE_REDIRECT_URI": "https://malgnai-hub.apiserver.kr/api/auth/google/callback",
+    "GOOGLE_ALLOWED_HD": "malgnsoft.com"
   },
 
   // 로컬 dev 서버 고유 포트 — wrangler 기본값(8787)은 다른 프로젝트도 미지정 시 같이 쓰는
