@@ -116,7 +116,7 @@ export default {
   async scheduled(controller, env, ctx) {
     if (controller.cron === '0 18 * * *') {
       ctx.waitUntil(
-        syncCatalog(env.DB)
+        syncCatalog(env.DB, env.GITHUB_TOKEN)
           .then((result) => console.log('[catalog-sync] cron sync done', JSON.stringify(result)))
           .catch((err) => console.error('[catalog-sync] cron sync failed', err))
       )

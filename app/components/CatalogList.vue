@@ -29,6 +29,22 @@
       {{ state.syncMessage }}
     </div>
 
+    <!-- 수동 업데이트 진행 모달: 앱 전역 커스텀 모달 톤(.modal-backdrop-custom/.modal-dialog-custom,
+         base.css — /admin/users.vue 등과 동일 패턴, Bootstrap Modal JS는 쓰지 않음)을 그대로 재사용한다.
+         진행 중 이탈 방지가 요구사항 핵심이라 닫기 버튼도, 백드롭 @click.self도, ESC 핸들러도 의도적으로
+         두지 않는다 — syncNow()가 try/finally로 state.syncing=false를 보장하므로 실패해도 반드시 사라진다. -->
+    <div v-if="state.syncing" class="modal-backdrop-custom">
+      <div class="modal-dialog-custom" style="width:360px;max-width:92vw;">
+        <div class="modal-content">
+          <div class="modal-body text-center py-4">
+            <span class="spinner-border text-primary mb-3" role="status" aria-hidden="true"></span>
+            <div class="fw-semibold mb-1">카탈로그를 업데이트하는 중입니다</div>
+            <div class="text-muted small">잠시만 기다려 주세요.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 타입 탭: 에이전트/스킬/지식을 별도 조회 -->
     <div class="cat-tabs-wrap mb-4">
       <ul class="nav cat-tabs" role="tablist">
@@ -259,19 +275,28 @@ export default {
       this.state.syncing = true
       this.state.syncMessage = ''
       this.state.syncError = false
-      const { data, error } = await useApi('/api/admin/catalog/sync', { method: 'POST' })
-      this.state.syncing = false
-      if (error) {
+      // try/finally로 state.syncing=false를 보장한다 — useApi가 예상 밖으로 throw하거나 load()가
+      // 실패해도 진행 모달이 화면에 영구히 남아 잠기는 최악의 상황을 막는다(백엔드 GitHub 403 원인
+      // 수정과 병행 진행 중이라 이 경로가 자주 실패 케이스를 만난다).
+      try {
+        const { data, error } = await useApi('/api/admin/catalog/sync', { method: 'POST' })
+        if (error) {
+          this.state.syncError = true
+          this.state.syncMessage = error?.message || '카탈로그 동기화에 실패했습니다.'
+          return
+        }
+        const scanned = data?.scanned ?? 0
+        const upserted = data?.itemsUpserted ?? 0
+        const versions = data?.versionsCreated ?? 0
+        const failures = data?.parseFailures?.length ?? 0
+        this.state.syncMessage = `동기화 완료 — ${scanned}개 스캔, ${upserted}개 갱신, ${versions}개 신규 버전${failures ? `, 파싱 실패 ${failures}건` : ''}`
+        await this.load()
+      } catch (e) {
         this.state.syncError = true
-        this.state.syncMessage = error?.message || '카탈로그 동기화에 실패했습니다.'
-        return
+        this.state.syncMessage = e?.message || '카탈로그 동기화 중 오류가 발생했습니다.'
+      } finally {
+        this.state.syncing = false
       }
-      const scanned = data?.scanned ?? 0
-      const upserted = data?.itemsUpserted ?? 0
-      const versions = data?.versionsCreated ?? 0
-      const failures = data?.parseFailures?.length ?? 0
-      this.state.syncMessage = `동기화 완료 — ${scanned}개 스캔, ${upserted}개 갱신, ${versions}개 신규 버전${failures ? `, 파싱 실패 ${failures}건` : ''}`
-      await this.load()
     },
     countByType(type) {
       return this.state.items.filter((it) => it.item_type === type).length

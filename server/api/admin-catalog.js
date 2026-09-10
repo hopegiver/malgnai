@@ -11,9 +11,11 @@ adminCatalog.use('*', requireAdmin)
 
 // POST /api/admin/catalog/sync — 즉시 동기화 실행, 결과 요약 반환(scanned/itemsUpserted/
 // versionsCreated/parseFailures). GitHub 쪽 에러(fetch 실패/중복 slug)는 전역 onError로
-// InternalError→500 / ConflictError→409 매핑된다.
+// InternalError→500 / ConflictError→409 매핑된다. GITHUB_TOKEN 시크릿이 설정돼 있으면
+// catalog-sync가 GitHub 요청에 인증 헤더를 싣는다(없으면 기존처럼 무인증 폴백) — 값 자체는
+// 로그·응답 어디에도 실리지 않는다.
 adminCatalog.post('/sync', async (c) => {
-  const result = await syncCatalog(c.env.DB)
+  const result = await syncCatalog(c.env.DB, c.env.GITHUB_TOKEN)
   return c.json(result)
 })
 
