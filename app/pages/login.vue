@@ -33,7 +33,7 @@
         <span class="fw-bold fs-6">malgnai-hub</span>
       </div>
       <h2 class="fw-bold mb-1" style="font-size:1.5rem;">로그인</h2>
-      <p class="text-muted mb-4" style="font-size:0.9375rem;">회사 이메일 계정으로 접속하세요.</p>
+      <p class="text-muted mb-4" style="font-size:0.9375rem;">{{ subtitle }}</p>
 
       <!-- 무음 재로그인(prompt=none) 왕복 중 스켈레톤 — docs/design/google-oauth-login.md §4.3(d).
            폼을 그리지 않은 채 이동하므로 "폼이 떴다가 사라지는" 플래시가 없다. -->
@@ -54,52 +54,65 @@
       </div>
 
       <template v-else>
-        <form @submit.prevent="submit">
-          <div class="mb-3">
-            <label class="form-label small fw-semibold" for="loginEmail">이메일</label>
-            <input
-              id="loginEmail"
-              ref="email"
-              v-model="email"
-              type="email"
-              class="form-control"
-              autocomplete="username"
-              :disabled="loading"
-              placeholder="name@malgnsoft.com"
-            />
+        <!-- 에러 배너 — 폼 **바깥**(카드 최상단)에 둔다. 기본 진입에서는 폼이 렌더되지 않으므로
+             배너가 폼 안에 있으면 Google 오류 문구를 보여줄 자리가 사라진다. -->
+        <div v-if="error" class="alert alert-danger py-2 small mb-3" role="alert">{{ error }}</div>
+
+        <!-- 자체 로그인 폼 — 기본 진입(/login)에서는 **렌더하지 않는다**(CSS로 감추는 것이 아니라 DOM에 없다).
+             드러나는 경우는 두 가지뿐이다:
+               (C) Google 경로가 서버에서 "사용 불가"로 판정된 오류코드로 돌아왔을 때(handleGoogleError)
+               (D) 운영자용 직접 진입 URL(/login?pw=1)
+             폼이 드러난 상태에서는 자체 로그인이 주 경로이므로 예전 레이아웃(폼 → 또는 → Google 보조버튼)을
+             그대로 복원한다. 구분선은 나눌 대상이 둘일 때만 존재한다. -->
+        <template v-if="showPasswordForm">
+          <form @submit.prevent="submit">
+            <div class="mb-3">
+              <label class="form-label small fw-semibold" for="loginEmail">이메일</label>
+              <input
+                id="loginEmail"
+                ref="email"
+                v-model="email"
+                type="email"
+                class="form-control"
+                autocomplete="username"
+                :disabled="loading"
+                placeholder="name@malgnsoft.com"
+              />
+            </div>
+
+            <div class="mb-3">
+              <label class="form-label small fw-semibold" for="loginPw">비밀번호</label>
+              <input
+                id="loginPw"
+                ref="pw"
+                v-model="password"
+                type="password"
+                class="form-control"
+                autocomplete="current-password"
+                :disabled="loading"
+                placeholder="비밀번호"
+              />
+            </div>
+
+            <button type="submit" class="btn btn-primary w-100" :disabled="submitDisabled">
+              <span v-if="loading" class="spinner-border spinner-border-sm me-2"></span>
+              {{ loading ? '확인 중…' : '로그인' }}
+            </button>
+          </form>
+
+          <div class="d-flex align-items-center gap-2 my-3">
+            <hr class="flex-grow-1 my-0 border-hairline">
+            <span class="text-muted small">또는</span>
+            <hr class="flex-grow-1 my-0 border-hairline">
           </div>
+        </template>
 
-          <div class="mb-3">
-            <label class="form-label small fw-semibold" for="loginPw">비밀번호</label>
-            <input
-              id="loginPw"
-              ref="pw"
-              v-model="password"
-              type="password"
-              class="form-control"
-              autocomplete="current-password"
-              :disabled="loading"
-              placeholder="비밀번호"
-            />
-          </div>
-
-          <div v-if="error" class="alert alert-danger py-2 small mb-3" role="alert">{{ error }}</div>
-
-          <button type="submit" class="btn btn-primary w-100" :disabled="submitDisabled">
-            <span v-if="loading" class="spinner-border spinner-border-sm me-2"></span>
-            {{ loading ? '확인 중…' : '로그인' }}
-          </button>
-        </form>
-
-        <div class="d-flex align-items-center gap-2 my-3">
-          <hr class="flex-grow-1 my-0 border-hairline">
-          <span class="text-muted small">또는</span>
-          <hr class="flex-grow-1 my-0 border-hairline">
-        </div>
-
+        <!-- 기본 상태에서 **유일한 주 CTA**(btn-primary). 폼이 드러난 상태에서는 주 CTA가 폼 제출
+             버튼이 되므로 보조 위계로 내려간다 — 한 화면에 primary 버튼이 둘이 되지 않게 한다. -->
         <button
           type="button"
-          class="btn btn-outline-secondary w-100 d-flex align-items-center justify-content-center gap-2"
+          class="btn w-100 d-flex align-items-center justify-content-center gap-2"
+          :class="showPasswordForm ? 'btn-outline-secondary' : 'btn-primary'"
           :disabled="loading"
           @click="goGoogleInteractive"
         >
@@ -113,6 +126,12 @@
 </template>
 
 <script>
+// Google 로그인이 **기본 수단**, 자체인증(이메일/비밀번호)은 폴백 + 킬스위치 대비용으로 존치.
+// 화면 기본 상태에는 Google 버튼 하나만 그리고, 자체 로그인 폼은 아래 두 경우에만 렌더한다:
+//   (C) Google 경로가 서버에서 사용 불가로 판정된 코드(not_configured/origin_not_allowed/upstream)
+//   (D) 운영자용 직접 진입 URL /login?pw=1 (기본 화면에 링크는 노출하지 않는다)
+// 백엔드(/api/auth/login)와 submit() 로직은 그대로다 — 바뀐 것은 렌더 조건과 시각 위계뿐이다.
+//
 // Google 로그인 병행 + 무음 재로그인(prompt=none) 구현.
 // 설계 정본: docs/design/google-oauth-login.md 결정 10 + §4.3(무음 재로그인 프런트 구현 지시서).
 // 3개 브라우저 저장소 키(§4.3.0): mh_g_linked(localStorage, 옵트인), mh_g_silent_tried(sessionStorage,
@@ -131,6 +150,10 @@ export default {
       silentPending: false,
       mustChangePasswordNotice: false,
       pendingRedirectPath: '/',
+      // Google이 기본 로그인 수단이므로 자체 로그인 폼은 **기본적으로 렌더하지 않는다**.
+      // true가 되는 곳은 두 군데뿐: mounted()의 ?pw=1 판정(D), handleGoogleError()의
+      // "Google 경로 사용 불가" 코드 판정(C = 킬스위치 실효성).
+      showPasswordForm: false,
       _silentTimeoutId: null,
     }
   },
@@ -138,11 +161,23 @@ export default {
     submitDisabled() {
       return this.loading || !this.email.trim() || !this.password
     },
+    // 폼 유무에 따라 안내 문구가 화면과 어긋나지 않게 맞춘다(폼이 없는데 "이메일 계정으로 접속"이라고
+    // 쓰면 입력할 곳이 없다).
+    subtitle() {
+      return this.showPasswordForm ? '회사 이메일 계정으로 접속하세요.' : '회사 Google 계정으로 접속하세요.'
+    },
   },
   mounted() {
     // 판정 순서(§3.4·§4.3.1) — ① 해시 처리(gh/ge) → ② 기존 유효 토큰 → ③ 무음 시도 판정 → ④ 폼 표시.
     // 이 순서를 바꾸면 무음 왕복에서 돌아온 사용자가 다시 무음으로 나가는 루프가 생긴다.
+    // ④의 "폼 표시"는 이제 조건부다 — 기본은 Google 버튼 단독이고, 폼은 ?pw=1(D)이나
+    // Google 사용 불가 코드(C)에서만 드러난다.
     const hashParams = this.parseHash()
+
+    // (D) 운영자용 직접 진입. 무음 판정보다 **먼저** 세운다 — 폼을 보러 들어온 요청이 Google로
+    // 튕겨나가면 킬스위치 상황에서 쓸 수 없는 경로가 된다.
+    const forcedForm = this.isPasswordFormForced()
+    if (forcedForm) this.showPasswordForm = true
 
     if (hashParams.has('gh')) {
       this.handleHandoff(hashParams.get('gh'))
@@ -150,7 +185,7 @@ export default {
     }
     if (hashParams.has('ge')) {
       this.handleGoogleError(hashParams.get('ge'), hashParams.get('gs') === '1')
-      this.$nextTick(() => this.$refs.email?.focus())
+      this.focusEmailIfVisible()
       return
     }
 
@@ -160,12 +195,12 @@ export default {
       return
     }
 
-    if (this.shouldAttemptSilent()) {
+    if (!forcedForm && this.shouldAttemptSilent()) {
       this.startSilentLogin()
       return
     }
 
-    this.$refs.email?.focus()
+    this.focusEmailIfVisible()
   },
   beforeUnmount() {
     if (this._silentTimeoutId) {
@@ -187,6 +222,20 @@ export default {
     redirectTarget() {
       const r = this.$route.query.redirect
       return typeof r === 'string' && r.startsWith('/') ? r : '/'
+    },
+
+    // (D) 긴급 진입 경로 — /login?pw=1 로 Google 버튼을 거치지 않고 자체 폼을 띄운다.
+    // 기본 진입 화면에는 이 경로로 가는 링크를 **일부러 노출하지 않는다**(상시 노출 여부는 사람이
+    // 결정할 사안). 나중에 노출하기로 하면 이 판정은 그대로 두고 템플릿에 링크 한 줄만 추가하면 된다.
+    isPasswordFormForced() {
+      return this.$route.query.pw === '1'
+    },
+
+    // 폼이 렌더되지 않은 상태에서는 $refs.email 자체가 없다. 포커스는 폼이 드러난 경우에만 의미가 있다.
+    focusEmailIfVisible() {
+      this.$nextTick(() => {
+        if (this.showPasswordForm) this.$refs.email?.focus()
+      })
     },
 
     // 저장소 접근은 전부 try/catch로 감싼다 — 예외가 나면 "시도하지 않는다"로 폴백한다(§4.3.0 fail-closed).
@@ -290,12 +339,14 @@ export default {
       // 동작이므로 §3.2 "조용한 폴백" 원칙을 여기까지 연장한다 — 배너 없이 조용히 폼을 보여준다.
       const wasSilentRoundTrip = this.safeGet(sessionStorage, 'mh_g_silent_tried') === '1'
       if (wasSilentRoundTrip && error?.code === 'INVALID_HANDOFF') {
-        this.$nextTick(() => this.$refs.email?.focus())
+        this.focusEmailIfVisible()
         return
       }
 
+      // 교환 실패는 Google 경로 자체가 죽은 것이 아니라 이번 코드가 만료·소비된 것이므로 폼을
+      // 드러내지 않는다 — 사용자는 Google 버튼으로 다시 시도하면 된다.
       this.error = this.exchangeErrorMessage(error)
-      this.$nextTick(() => this.$refs.email?.focus())
+      this.focusEmailIfVisible()
     },
 
     dismissMustChangePasswordNotice() {
@@ -322,6 +373,19 @@ export default {
       this.silentPending = false
       this.error = ''
 
+      // (C) 킬스위치 실효성 — 아래 세 코드는 "이 사용자의 이번 시도가 실패했다"가 아니라 "이 배포에서
+      // Google 경로가 지금 동작하지 않는다"는 뜻이다. 폼을 드러내지 않으면 사용자가 로그인할 수단이
+      // 통째로 사라지므로, 무음/인터랙티브 어느 갈래로 왔든 자체 로그인 폼을 노출한다.
+      //   not_configured     — env(CLIENT_ID/SECRET/REDIRECT_URI 또는 도메인 통제선) 미설정.
+      //                        곧 운영자가 당긴 킬스위치 그 자체다(architecture.md 결정33).
+      //   origin_not_allowed — 이 오리진에서는 Google 경로를 쓸 수 없다(workers.dev·프리뷰 배포).
+      //   upstream           — Google 토큰 엔드포인트 장애 등(§3.2). "잠시 후 다시" 안내만 남기면
+      //                        장애 지속 시간 내내 로그인이 막히므로 우회로를 함께 연다.
+      // silent_unavailable·silent_suppressed는 **넣지 않는다** — Google 경로는 멀쩡하고 이 브라우저에
+      // 구글 세션이 없을 뿐이라, 넣으면 가장 흔한 경우에 폼이 늘 노출돼 이번 변경의 목적이 사라진다.
+      const GOOGLE_UNAVAILABLE = new Set(['not_configured', 'origin_not_allowed', 'upstream'])
+      if (GOOGLE_UNAVAILABLE.has(code)) this.showPasswordForm = true
+
       const SILENT_QUIET = new Set([
         'silent_unavailable', 'silent_suppressed', 'invalid_flow',
         'flow_binding_failed', 'upstream', 'not_configured', 'origin_not_allowed',
@@ -330,7 +394,7 @@ export default {
         google_denied: 'Google 로그인이 취소되었습니다.',
         invalid_flow: '로그인 요청이 만료되었습니다. 다시 시도해주세요.',
         flow_binding_failed: '로그인 요청을 처리하지 못했습니다. 다른 탭에서 로그인을 다시 시도했거나 브라우저가 쿠키를 차단했을 수 있습니다. 쿠키 허용 여부를 확인한 후 다시 시도해주세요.',
-        upstream: '일시적으로 로그인을 처리할 수 없습니다. 잠시 후 다시 시도해주세요.',
+        upstream: '일시적으로 Google 로그인을 처리할 수 없습니다. 잠시 후 다시 시도하거나, 이메일/비밀번호로 로그인하세요.',
         email_unverified: '이메일이 확인되지 않은 Google 계정입니다.',
         hd_mismatch: '회사 Google 계정으로 로그인해주세요.',
         domain_mismatch: '회사 Google 계정으로 로그인해주세요.',
@@ -339,7 +403,7 @@ export default {
         sub_mismatch: '이 계정에 연결된 Google 계정이 아닙니다. 관리자에게 문의하세요.',
         sub_conflict: '이 계정에 연결된 Google 계정이 아닙니다. 관리자에게 문의하세요.',
         not_configured: 'Google 로그인이 아직 설정되지 않았습니다. 이메일/비밀번호로 로그인하세요.',
-        origin_not_allowed: '이 주소에서는 Google 로그인을 사용할 수 없습니다. https://malgnai-hub.apiserver.kr 에서 이용하세요.',
+        origin_not_allowed: '이 주소에서는 Google 로그인을 사용할 수 없습니다. https://malgnai-hub.apiserver.kr 에서 이용하거나, 이메일/비밀번호로 로그인하세요.',
       }
 
       const wasSilent = gsFlag || code === 'silent_suppressed' ||
