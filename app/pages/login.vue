@@ -164,7 +164,7 @@ export default {
     // 폼 유무에 따라 안내 문구가 화면과 어긋나지 않게 맞춘다(폼이 없는데 "이메일 계정으로 접속"이라고
     // 쓰면 입력할 곳이 없다).
     subtitle() {
-      return this.showPasswordForm ? '회사 이메일 계정으로 접속하세요.' : '회사 Google 계정으로 접속하세요.'
+      return this.showPasswordForm ? '이메일 또는 Google 계정으로 접속하세요.' : '회사 Google 계정으로 접속하세요.'
     },
   },
   mounted() {
@@ -281,12 +281,15 @@ export default {
 
     // §4.3(a)(c)(d) — top-level 리디렉트, 마커를 먼저 쓰고 나중에 이동, 동기 판정으로 첫 페인트 전
     // 스켈레톤을 그려 깜빡임을 없앤다. 8초 타임아웃 안전장치는 이동이 일어나지 않는 극단적인 경우의
-    // 대비다(정상적으로 이동하면 페이지가 파괴되어 타이머는 자연히 사라진다).
+    // 대비다(정상적으로 이동하면 페이지가 파괴되어 타이머는 자연히 사라진다). 이 극단적인 경우는
+    // 정확히 Google 경로가 못 도는 상황이므로, 폼도 함께 노출해 화면 안에 복구 수단을 남긴다
+    // (기본 화면이 Google 버튼 단독으로 바뀌면서 이 노출이 없으면 락아웃이 된다).
     startSilentLogin() {
       this.silentPending = true
       this.safeSet(sessionStorage, 'mh_g_silent_tried', '1')
       this._silentTimeoutId = setTimeout(() => {
         this.silentPending = false
+        this.showPasswordForm = true
       }, 8000)
       window.location.replace('/api/auth/google/start?silent=1&redirect=' + encodeURIComponent(this.redirectTarget()))
     },
