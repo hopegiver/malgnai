@@ -3,7 +3,7 @@ import { Hono } from 'hono'
 import * as usersDao from '../dao/users.js'
 import * as refreshTokensDao from '../dao/refresh-tokens.js'
 import { verifyPassword, hashPassword, sha256Hex } from '../lib/tokens.js'
-import { rotateOrDetectReuse } from '../lib/rotating-token.js'
+import { rotateOrDetectReuse, WEB_REFRESH_POLICY } from '../lib/rotating-token.js'
 // issueTokenPair는 server/lib/session-tokens.js로 추출됐다(docs/design/google-oauth-login.md 결정 5) —
 // Google 로그인(server/api/auth-google.js)과 100% 동일한 토큰을 발급하기 위한 공용 lib. 로직·상수·
 // DB 쓰기는 한 글자도 바뀌지 않았다(순수 이동, 시그니처만 (c,user)→(env,user)).
@@ -51,13 +51,15 @@ auth.post('/refresh', async (c) => {
     findByHash: refreshTokensDao.findByHash,
     markRotated: refreshTokensDao.markRotated,
     revokeAll: (db, stored, reason) => refreshTokensDao.revokeAllForUser(db, stored.user_id, reason)
-  })
+  }, WEB_REFRESH_POLICY)
 
   if (!result.ok && result.reason === 'invalid') {
     const message = result.detail === 'expired' ? 'refresh token expired' : 'invalid refresh token'
     return c.json({ error: { code: 'UNAUTHORIZED', message } }, 401)
   }
-  if (!result.ok && result.reason === 'reuse_detected') {
+  if (!result.ok) {
+    // reuse_detected | already_revoked — 응답 바디·상태코드는 현행과 동일(TOKEN_REUSED, 401).
+    // 웹 정책은 REVOKE_FAMILY라 stale_reuse는 구조적으로 나올 수 없다(테스트로 고정, U-19).
     return c.json({ error: { code: 'TOKEN_REUSED', message: 'refresh token reuse detected, all sessions revoked' } }, 401)
   }
 

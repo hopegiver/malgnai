@@ -19,11 +19,12 @@ import * as auditLogsDao from '../dao/audit-logs.js'
 import { newId } from '../lib/ulid.js'
 import {
   generateOpaqueToken, sha256Hex, isValidPkceVerifierFormat, verifyPkceS256,
-  OAUTH_ACCESS_TOKEN_TTL_SECONDS, OAUTH_REFRESH_TOKEN_TTL_SECONDS
+  OAUTH_ACCESS_TOKEN_TTL_SECONDS, OAUTH_REFRESH_TOKEN_TTL_SECONDS, OAUTH_REUSE_GRACE_MS,
+  REUSE_GRACE_MS
 } from '../lib/tokens.js'
 import { resolveTrustedClientName } from '../lib/oauth-trusted-clients.js'
 import { isValidLoopbackRedirect } from '../lib/oauth-redirect-uri.js'
-import { rotateOrDetectReuse } from '../lib/rotating-token.js'
+import { rotateOrDetectReuse, MCP_OAUTH_REFRESH_POLICY } from '../lib/rotating-token.js'
 
 /** client_id가 트러스트(사전등록) 또는 DCR 등록 클라이언트 어느 쪽인지 순서대로 확인하는 공용 헬퍼.
  *  트러스트가 우선 — env var와 일치하면 DCR 테이블 조회 자체를 생략한다. */
@@ -201,30 +202,66 @@ async function handleRefreshTokenGrant(c, body) {
   const result = await rotateOrDetectReuse(c.env.DB, tokenHash, {
     findByHash: oauthRefreshTokensDao.findByHash,
     markRotated: oauthRefreshTokensDao.markRotated,
-    revokeAll: (db, stored, reason) => oauthRefreshTokensDao.revokeAllForDeviceToken(db, stored.device_token_id, reason)
-  })
+    revokeAll: (db, stored, reason) =>
+      oauthRefreshTokensDao.revokeAllForDeviceToken(db, stored.device_token_id, reason)
+  }, MCP_OAUTH_REFRESH_POLICY) // ← 4번째 인자만 추가. dao 어댑터는 그대로(설계 §5.1).
 
   if (!result.ok && result.reason === 'invalid') {
     return c.json({ error: 'invalid_grant' }, 401)
   }
-
-  if (!result.ok && result.reason === 'reuse_detected') {
-    // 탈취 판정 — 연결된 device_tokens는 이 디바이스 하나만 revoke(다른 디바이스는 건드리지 않음).
+  if (!result.ok) {
+    // reuse_detected | stale_reuse | already_revoked — 와이어 응답은 셋 다 동일(401 invalid_grant).
+    // 클라이언트가 세 경우를 구분할 수 없어야 한다(판정 경계 탐색 방지). 구분은 감사로그에만 남긴다.
     const deviceTokenId = result.stored.device_token_id
-    await deviceTokensDao.revoke(c.env.DB, deviceTokenId)
+    if (result.reason === 'reuse_detected') {
+      await deviceTokensDao.revoke(c.env.DB, deviceTokenId) // 가족 폐기일 때만 device_token도 폐기
+    }
     const deviceToken = await deviceTokensDao.findById(c.env.DB, deviceTokenId)
     await auditLogsDao.record(c.env.DB, {
       actorUserId: deviceToken ? deviceToken.user_id : 'system',
-      action: 'oauth_refresh_token.reuse_detected',
+      action: 'oauth_refresh_token.reuse_detected', // ← CHECK 화이트리스트 기존 값 그대로(§10)
       targetType: 'device_token',
       targetId: deviceTokenId,
-      metadata: { client_id: typeof body.client_id === 'string' ? body.client_id : null }
+      metadata: {
+        client_id: typeof body.client_id === 'string' ? body.client_id : null,
+        outcome: result.reason === 'reuse_detected' ? 'family_revoked'
+          : result.reason === 'stale_reuse' ? 'rejected_only' : 'already_revoked',
+        stale_age_ms: Number.isFinite(result.staleAgeMs) ? Math.round(result.staleAgeMs) : null,
+        refresh_token_id: result.stored.id, // 토큰이 아니라 행 ULID — 자격증명 아님
+        grace_ms: OAUTH_REUSE_GRACE_MS,
+        policy: MCP_OAUTH_REFRESH_POLICY.label // reviewer 리뷰 m2 — 죽은 필드였던 policy.label을 감사에 싣는다
+      }
     })
     return c.json({ error: 'invalid_grant' }, 401)
   }
 
   const stored = result.stored
   const deviceToken = await deviceTokensDao.findById(c.env.DB, stored.device_token_id)
+
+  // security 리뷰 H1: grace로 통과한 교환 중 웹 grace(REUSE_GRACE_MS=10초)를 넘긴 것만 감사에
+  // 남긴다 — 10초 이내 동시요청은 기존에도 정상이고 양이 많아 신호를 익사시키지 않는다. 이 구간
+  // (10초~10분)이 바로 이번 완화가 새로 허용한 교환이며, 여태 무기록이었다(설계 §15 R-2가 이
+  // 값을 실측으로 재조정하려면 이 로그가 있어야 한다). action은 CHECK 화이트리스트 기존 값을
+  // 재사용하고(마이그레이션 불필요), 구분은 outcome으로만 한다 — 실패 경로 메타데이터와 필드
+  // 이름·의미를 통일한다.
+  if (result.path === 'grace' && result.staleAgeMs > REUSE_GRACE_MS) {
+    await auditLogsDao.record(c.env.DB, {
+      actorUserId: deviceToken ? deviceToken.user_id : 'system',
+      action: 'oauth_refresh_token.reuse_detected',
+      targetType: 'device_token',
+      targetId: stored.device_token_id,
+      metadata: {
+        client_id: typeof body.client_id === 'string' ? body.client_id : null,
+        outcome: 'grace_allowed',
+        stale_age_ms: Math.round(result.staleAgeMs),
+        refresh_token_id: stored.id, // 토큰이 아니라 행 ULID — 자격증명 아님
+        grace_ms: OAUTH_REUSE_GRACE_MS,
+        policy: MCP_OAUTH_REFRESH_POLICY.label,
+        src_ip: c.req.header('cf-connecting-ip') || null
+      }
+    })
+  }
+
   if (!deviceToken || deviceToken.status !== 'active') {
     return c.json({ error: 'invalid_grant' }, 401)
   }

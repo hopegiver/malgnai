@@ -99,14 +99,17 @@ export const JWT_AUDIENCE = 'malgnai-hub-web'
 export const ACCESS_TOKEN_TTL_SECONDS = 60 * 60 * 4 // 4h(architecture.md §6.1)
 export const REFRESH_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30 // 30일
 
-// [재사용 탐지 grace window] 회전(rotation) 직후 아주 짧은 시간 내에 같은 stale 토큰이 다시
-// 들어오는 것은 "탈취"가 아니라 정상 클라이언트의 동시 요청일 가능성이 높다(예: 여러 탭/재시도가
-// 병렬로 401→refresh를 트리거). 사내 private 프로젝트(~/workspace/malgnai/server/lib/refresh-token.js,
-// 2026-07-13 reviewer 리뷰로 재현·수정된 회귀)에서 이미 검증된 값을 그대로 이식한다 — grace window
-// 없이 즉시 전체 revoke하면 방금 회전으로 정상 발급된 최신 토큰까지 collateral로 폐기되어 정상
-// 사용자가 강제 로그아웃당한다. revoke_reason==='rotated'인 경우에만 적용하고(logout/이미
-// reuse_detected는 즉시 탈취 처리), 이 window를 넘긴 재사용만 진짜 탈취로 간주한다(server/api/auth.js 참고).
-export const REUSE_GRACE_MS = 10_000 // 10초
+// [재사용 탐지 grace window — 웹 로그인 축(server/api/auth.js) 전용] 회전(rotation) 직후 아주
+// 짧은 시간 내에 같은 stale 토큰이 다시 들어오는 것은 "탈취"가 아니라 정상 클라이언트의 동시
+// 요청일 가능성이 높다(예: 여러 탭/재시도가 병렬로 401→refresh를 트리거). 사내 private 프로젝트
+// (~/workspace/malgnai/server/lib/refresh-token.js, 2026-07-13 reviewer 리뷰로 재현·수정된 회귀)에서
+// 이미 검증된 값을 그대로 이식한다 — grace window 없이 즉시 전체 revoke하면 방금 회전으로 정상
+// 발급된 최신 토큰까지 collateral로 폐기되어 정상 사용자가 강제 로그아웃당한다. revoke_reason
+// ==='rotated'인 경우에만 적용하고(logout/이미 reuse_detected는 즉시 탈취 처리), 이 window를 넘긴
+// 재사용만 진짜 탈취로 간주한다(server/api/auth.js 참고). MCP OAuth 축은 이 값을 쓰지 않는다 —
+// 아래 OAUTH_REUSE_GRACE_MS 참고(같은 함수를 공유하지만 값은 축마다 다르다,
+// docs/design/oauth-refresh-race-mitigation.md §2.2·§2.4).
+export const REUSE_GRACE_MS = 10_000 // 10초 — 웹 축 grace(변경 금지)
 
 export async function signAccessToken(user, secret) {
   const key = new TextEncoder().encode(secret)
@@ -139,8 +142,20 @@ export async function verifyAccessToken(token, secret) {
 // 그대로 재사용한다(mcp/device-auth.js는 변경 없음 — 이 Bearer 값이 OAuth로 발급됐는지
 // pair-approve로 발급됐는지는 /mcp 인증 시점에 구분할 필요가 없다).
 // ---------------------------------------------------------------------------
-export const OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60 // 1시간
+// [2026-09-15 변경] 1시간 → 8시간. MCP access token은 요청마다 D1 조회로 검증되므로
+// (mcp/device-auth.js) TTL 연장이 폐기 지연을 만들지 않는다 — 웹 JWT(서명만 검증, 폐기 불가)와
+// 근본적으로 다른 축이라 그쪽 4h와 대칭시킬 필요가 없다. 갱신 빈도가 하루 11.3회(최대 26회)에서
+// 약 3회로 줄어 재사용탐지 충돌 기회가 ~4배 감소한다(근거: docs/design/oauth-refresh-race-mitigation.md §6).
+export const OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60 * 8 // 8시간
 export const OAUTH_REFRESH_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 90 // 90일
+
+// [재사용 탐지 grace window — MCP OAuth 축(server/api/oauth.js) 전용, 2026-09-15 신설] 위
+// REUSE_GRACE_MS(웹 10초)와 값이 다른 이유: 한 사람이 Claude Code 창을 동시에 수십 개 띄우면
+// 창들이 같은 refresh token을 거의 동시에 제시하는데, 웹과 달리 MCP 축은 프로덕션 실측에서
+// 회전 간격 10초~15분 구간에 정상 트래픽이 0건이었다(오탐 버스트는 54~320초). 10분은 그 빈
+// 구간 한가운데이며 실측 최악 오탐(320.2초)의 1.9배다(근거·전체 판정 로직:
+// docs/design/oauth-refresh-race-mitigation.md §2.2·§4).
+export const OAUTH_REUSE_GRACE_MS = 10 * 60 * 1000 // 10분
 
 // PKCE code_verifier 형식(RFC 7636 §4.1): unreserved 문자 43~128자.
 const PKCE_VERIFIER_RE = /^[A-Za-z0-9\-._~]{43,128}$/
