@@ -75,7 +75,8 @@ events.get('/:id/wbs', async (c) => {
   const result = await wbsLib.wbsList(c.env.DB, project.id, {
     parentId: c.req.query('parent_id') || undefined,
     status: c.req.query('status') || undefined,
-    includeDone: c.req.query('include_done') === 'true'
+    includeDone: c.req.query('include_done') === 'true',
+    includeCancelled: c.req.query('include_cancelled') === 'true'
   })
   return c.json(result)
 })

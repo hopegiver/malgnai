@@ -9,10 +9,12 @@ D1 스키마 변경 이력. **wrangler 표준 마이그레이션 체계를 그�
 
 1. `wrangler d1 migrations create malgnai-hub <설명>` → `migrations/000N_<설명>.sql` 생성.
 2. 그 파일에 `CREATE TABLE`/`ALTER TABLE`/`CREATE INDEX` 등을 작성한다.
-   - **forward-only**: 이미 적용된 파일은 절대 수정하지 않는다(체크섬으로 재실행 방지). 되돌려야
-     하면 되돌리는 새 마이그레이션을 추가한다.
+   - **forward-only**: 이미 적용된 파일은 절대 수정하지 않는다(북키핑 테이블 `d1_migrations`이
+     체크섬이 아니라 **파일명**(`name` UNIQUE) 기준으로 재실행을 막는다 — 내용을 고쳐도 파일명이
+     같으면 로컬 DB에는 재적용되지 않고 조용히 갈린다). 되돌려야 하면 되돌리는 새 마이그레이션을
+     추가한다.
    - MySQL과 달리 SQLite(D1)는 `ALTER TABLE ... ADD COLUMN`에 `IF NOT EXISTS`가 없다 — 일반
-     `ADD COLUMN`으로 작성한다(마이그레이션 러너가 체크섬으로 1회만 실행하므로 재실행 자체가
+     `ADD COLUMN`으로 작성한다(마이그레이션 러너가 파일명 기준으로 1회만 실행하므로 재실행 자체가
      일어나지 않는다).
 3. 로컬 적용: `wrangler d1 migrations apply malgnai-hub --local` (= `pnpm run db:migrations:apply:local`)
 4. 원격(운영) 적용: `wrangler d1 migrations apply malgnai-hub --remote` (= `pnpm run db:migrations:apply:remote`)

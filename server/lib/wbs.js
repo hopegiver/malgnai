@@ -50,14 +50,35 @@ export function buildWbsTree(rows) {
   function rollup(node) {
     if (node.children.length === 0) {
       node.computedProgress = node.progress
-      node.computedStatus = node.status
+      node.computedStatus = node.status // 리프가 cancelled면 그대로 'cancelled'
       return
     }
     for (const c of node.children) rollup(c)
-    const total = node.children.reduce((s, c) => s + c.computedProgress, 0)
-    node.computedProgress = Math.round(total / node.children.length)
-    const allDone = node.children.every((c) => c.computedStatus === 'done')
-    const anyStarted = node.children.some((c) => c.computedStatus !== 'planned')
+
+    // 최후 방어선(리뷰 H-1): 가드(PARENT_CANCELLED/STATUS_CANCELLED_LEAF_ONLY)는 전부
+    // TOCTOU라 동시 세션에서 우회될 수 있다 — 저장된 status가 'cancelled'인데 자식이
+    // 붙어버린 노드가 실재할 수 있다는 뜻이다. 그 상태에서도 응답이 status/bucket을
+    // 모순 없이 내도록 저장값을 최우선으로 존중한다. 자식 재귀는 이미 끝난 뒤라
+    // 추가 순회가 없고, 자식들의 computed 값도 건드리지 않으며, 하향 상속(설계 §3.4가
+    // 기각한 대안)도 아니다 — 중복 방어로 보여도 지우지 말 것.
+    if (node.status === 'cancelled') {
+      node.computedProgress = 0
+      node.computedStatus = 'cancelled'
+      return
+    }
+
+    // cancelled 자식은 분자·분모 양쪽에서 제외(설계 §3.1/§3.2). 자식이 전부 취소면
+    // 그룹도 cancelled/progress 0으로 상향 전파 — 부모에서도 같은 규칙으로 자동 제외된다.
+    const active = node.children.filter((c) => c.computedStatus !== 'cancelled')
+    if (active.length === 0) {
+      node.computedProgress = 0
+      node.computedStatus = 'cancelled'
+      return
+    }
+    const total = active.reduce((s, c) => s + c.computedProgress, 0)
+    node.computedProgress = Math.round(total / active.length)
+    const allDone = active.every((c) => c.computedStatus === 'done')
+    const anyStarted = active.some((c) => c.computedStatus !== 'planned')
     node.computedStatus = allDone ? 'done' : anyStarted ? 'in_progress' : 'planned'
   }
   for (const r of roots) rollup(r)
@@ -75,6 +96,7 @@ export function flattenDepthFirst(roots) {
 }
 
 function computeBucket(computedStatus, endDate) {
+  if (computedStatus === 'cancelled') return 'cancelled' // delayed 판정보다 먼저(설계 §3.3, D-1)
   if (computedStatus !== 'done' && endDate && endDate < todayDate()) return 'delayed'
   return computedStatus
 }
@@ -82,7 +104,7 @@ function computeBucket(computedStatus, endDate) {
 // ---------------------------------------------------------------------------
 // wbs_list (§4.7)
 // ---------------------------------------------------------------------------
-export async function wbsList(db, projectId, { parentId, status, includeDone } = {}) {
+export async function wbsList(db, projectId, { parentId, status, includeDone, includeCancelled } = {}) {
   const { results } = await db.prepare(
     'SELECT * FROM wbs_items WHERE project_id = ? ORDER BY parent_id, seq, created_at'
   ).bind(projectId).all()
@@ -109,19 +131,27 @@ export async function wbsList(db, projectId, { parentId, status, includeDone } =
     assigneeAgentName: n.assignee_agent_name,
     startDate: n.start_date,
     endDate: n.end_date,
-    completedDate: n.completed_date
+    completedDate: n.completed_date,
+    // 취소 항목만 사유 메모를 노출한다. 전 항목에 description(최대 2000자)을 실으면
+    // project_get_context 응답이 수 배로 부풀어 AI 컨텍스트 예산을 잠식한다(설계 §5.1).
+    ...(n.status === 'cancelled' && n.description ? { description: n.description } : {})
   }))
 
   let items = withBucket
-  if (status) items = withBucket.filter((i) => i.bucket === status)
-  else if (!includeDone) items = withBucket.filter((i) => i.bucket !== 'done')
+  if (status) {
+    items = withBucket.filter((i) => i.bucket === status)
+  } else {
+    if (!includeDone) items = items.filter((i) => i.bucket !== 'done')
+    if (!includeCancelled) items = items.filter((i) => i.bucket !== 'cancelled')
+  }
 
-  const summary = { total: withBucket.length, planned: 0, inProgress: 0, done: 0, delayed: 0 }
+  const summary = { total: withBucket.length, planned: 0, inProgress: 0, done: 0, delayed: 0, cancelled: 0 }
   for (const i of withBucket) {
     if (i.bucket === 'planned') summary.planned++
     else if (i.bucket === 'in_progress') summary.inProgress++
     else if (i.bucket === 'done') summary.done++
     else if (i.bucket === 'delayed') summary.delayed++
+    else if (i.bucket === 'cancelled') summary.cancelled++
   }
   return { summary, items }
 }
@@ -143,6 +173,7 @@ export async function wbsAdd(db, { userId, projectId, parentId, title, descripti
   if (parentId) {
     const parent = await db.prepare('SELECT * FROM wbs_items WHERE id = ? AND project_id = ?').bind(parentId, projectId).first()
     if (!parent) throw validationError('parent not found in this project', 'PARENT_PROJECT_MISMATCH')
+    if (parent.status === 'cancelled') throw validationError('cannot add a child under a cancelled item', 'PARENT_CANCELLED')
     depth = parent.depth + 1
   }
   const maxSeqRow = await db.prepare(
@@ -190,8 +221,9 @@ export async function wbsBulkAdd(db, { userId, projectId, items }) {
   const existingParentIds = [...new Set(items.filter((i) => i.parentId).map((i) => i.parentId))]
   const parentDepths = new Map()
   for (const pid of existingParentIds) {
-    const row = await db.prepare('SELECT id, depth FROM wbs_items WHERE id = ? AND project_id = ?').bind(pid, projectId).first()
+    const row = await db.prepare('SELECT id, depth, status FROM wbs_items WHERE id = ? AND project_id = ?').bind(pid, projectId).first()
     if (!row) throw validationError(`parentId ${pid} not found in this project`, 'PARENT_PROJECT_MISMATCH')
+    if (row.status === 'cancelled') throw validationError(`parentId ${pid} is cancelled`, 'PARENT_CANCELLED')
     parentDepths.set(pid, row.depth)
   }
 
@@ -257,7 +289,7 @@ export async function wbsUpdate(db, { projectId, id, title, description, status,
   if (!row) throw notFoundError('wbs item not found')
   if (row.project_id !== projectId) throw forbiddenError('item belongs to a different project', 'PROJECT_MISMATCH')
 
-  if (status && !['planned', 'in_progress', 'done'].includes(status)) throw validationError('invalid status')
+  if (status && !['planned', 'in_progress', 'done', 'cancelled'].includes(status)) throw validationError('invalid status')
   if (progress != null && (progress < 0 || progress > 100)) throw validationError('progress must be 0..100')
   if (startDate && !isValidDate(startDate)) throw validationError('startDate must be YYYY-MM-DD')
   if (endDate && !isValidDate(endDate)) throw validationError('endDate must be YYYY-MM-DD')
@@ -267,6 +299,7 @@ export async function wbsUpdate(db, { projectId, id, title, description, status,
   if (hasChildren) {
     if (progress !== undefined) throw validationError('progress is computed from children for group nodes', 'PROGRESS_LEAF_ONLY')
     if (status === 'done') throw validationError('status=done is computed from children for group nodes', 'STATUS_DONE_LEAF_ONLY')
+    if (status === 'cancelled') throw validationError('status=cancelled is computed from children for group nodes', 'STATUS_CANCELLED_LEAF_ONLY')
   }
 
   const now = new Date().toISOString()

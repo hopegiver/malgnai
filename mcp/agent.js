@@ -201,12 +201,13 @@ export class MalgnMcpAgent extends McpAgent {
     this.server.registerTool(
       'wbs_list',
       {
-        description: '프로젝트 WBS(작업분류체계) 트리를 조회한다. 그룹 노드는 자식 롤업 진행률을 반환.',
+        description: '프로젝트 WBS(작업분류체계) 트리를 조회한다. 그룹 노드는 자식 롤업 진행률을 반환. 취소(cancelled)된 항목은 기본적으로 결과에서 숨겨진다(includeCancelled 또는 status="cancelled"로 조회 가능).',
         inputSchema: {
           projectId: z.string().min(1),
           parentId: z.string().optional(),
-          status: z.enum(['planned', 'in_progress', 'done', 'delayed']).optional(),
-          includeDone: z.boolean().optional()
+          status: z.enum(['planned', 'in_progress', 'done', 'delayed', 'cancelled']).optional(),
+          includeDone: z.boolean().optional(),
+          includeCancelled: z.boolean().optional()
         }
       },
       async ({ projectId, ...rest }) => {
@@ -285,13 +286,13 @@ export class MalgnMcpAgent extends McpAgent {
     this.server.registerTool(
       'wbs_update',
       {
-        description: 'WBS 항목을 갱신한다. 그룹(자식 있는) 노드는 progress/status=done을 직접 지정할 수 없다(자식 롤업 전용).',
+        description: 'WBS 항목을 갱신한다. 그룹(자식 있는) 노드는 progress/status=done/status=cancelled를 직접 지정할 수 없다(자식 롤업 전용). status="cancelled"는 계획 자체가 무효가 된 리프 항목에 사용 — 부모 롤업 계산에서 제외된다. 취소는 반드시 리프부터 지정할 것(그룹에 직접 지정하면 거부됨). 취소할 때는 description에 취소 사유를 한 줄 덧붙여라(기존 설명을 덮어쓰지 말 것) — 사유가 없으면 다음 세션이 원래 작업 설명을 취소 사유로 오독한다. 보류·중단은 cancelled가 아니다(cancelled는 "안 하기로 확정"한 것 — 언젠가 할 일을 cancelled로 두면 분모에서 사라져 진행률이 거짓으로 좋아진다).',
         inputSchema: {
           projectId: z.string().min(1),
           id: z.string().min(1),
           title: z.string().max(200).optional(),
           description: z.string().optional(),
-          status: z.enum(['planned', 'in_progress', 'done']).optional(),
+          status: z.enum(['planned', 'in_progress', 'done', 'cancelled']).optional(),
           progress: z.number().int().min(0).max(100).optional(),
           responsibleTeam: z.string().optional(),
           assigneeAgentName: z.string().optional(),
