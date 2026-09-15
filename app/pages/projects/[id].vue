@@ -41,7 +41,7 @@
           <li class="nav-item" role="presentation">
             <button class="nav-link" type="button" :class="{ active: tab === 'wbs' }" @click="selectTab('wbs')">
               <i class="bi bi-list-check pd-tab-icon"></i>WBS
-              <span v-if="wbs.summary" class="pd-tab-count">{{ wbs.summary.total }}</span>
+              <span v-if="wbs.summary" class="pd-tab-count">{{ wbs.summary.total - (wbs.summary.cancelled || 0) }}</span>
             </button>
           </li>
           <li class="nav-item" role="presentation">
@@ -109,7 +109,7 @@
         <template v-else>
           <div v-if="wbs.summary" class="d-flex flex-wrap gap-2 mb-3">
             <button type="button" class="pd-wbs-chip" :class="{ active: wbsFilter === 'all' }" @click="wbsFilter = 'all'">
-              전체 <b>{{ wbs.summary.total }}</b>
+              전체 <b>{{ wbs.summary.total - (wbs.summary.cancelled || 0) }}</b>
             </button>
             <button type="button" class="pd-wbs-chip" :class="{ active: wbsFilter === 'planned' }" @click="wbsFilter = 'planned'">
               계획 <b>{{ wbs.summary.planned }}</b>
