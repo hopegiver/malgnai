@@ -65,8 +65,12 @@
 
   // app/(SPA)을 별도 Pages 배포 대신 Worker 정적 자산 바인딩으로 단일 배포(대표 지시,
   // architecture.md §1/§9.2의 별도 Pages안에서 벗어난 v1 결정 — decision_add로 기록).
-  // /api/*·/mcp*는 정적 파일 매칭 여부와 무관하게 항상 Worker(server/index.js)로 먼저 라우팅하고,
-  // 나머지 경로는 정적 자산을 서빙하다가 매칭 실패 시 index.html로 폴백(SPA 클라이언트 라우팅).
+  // /api/*·/mcp*·/.well-known/oauth-*·/sso는 정적 파일 매칭 여부와 무관하게 항상
+  // Worker(server/index.js)로 먼저 라우팅하고, 나머지 경로는 정적 자산을 서빙하다가 매칭 실패 시
+  // index.html로 폴백(SPA 클라이언트 라우팅).
+  // ⚠️ '/sso' 항목은 server/index.js 최상위 디스패처의 url.pathname === '/sso' 분기,
+  // server/api/sso.js의 registerSsoRoute() 등록과 3곳이 모두 일치해야 동작한다 — 한쪽만 바꾸면
+  // 나머지는 그대로인 채 그 요청이 조용히 text/html 200(SPA 폴백)이 되고, 이를 잡아낼 테스트도 없다.
   "assets": {
     "directory": "./app",
     "binding": "ASSETS",

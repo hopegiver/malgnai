@@ -32,6 +32,9 @@ webApp.use('/api/*', jwtAuthMiddleware)
 // webApp 최상위에 절대경로로 직접 등록(서브라우터에 넣지 않음).
 registerWellKnownRoutes(webApp)
 // /sso도 같은 이유(‘/api’ 접두사 없음)로 같은 방식으로 등록한다(server/api/sso.js 참고).
+// ⚠️ '/sso'는 wrangler.jsonc의 assets.run_worker_first 배열, 아래 fetch()의
+// url.pathname === '/sso' 분기, 이 등록 3곳이 모두 일치해야 동작한다 — 한 곳만 바뀌면 나머지는
+// 그대로인 채 요청이 조용히 text/html 200(SPA 폴백)으로 떨어지고, 이를 잡아낼 테스트도 없다.
 registerSsoRoute(webApp)
 
 // 더 구체적인 경로를 먼저 등록한다(§index.js 하우스 규약, /api/admin/usage/shared-workstations와
@@ -102,6 +105,9 @@ export default {
       return MalgnMcpAgent.serve('/mcp', { binding: 'MCP_AGENT' }).fetch(request, env, ctx)
     }
 
+    // ⚠️ '/sso' 분기는 wrangler.jsonc의 assets.run_worker_first 배열, server/api/sso.js의
+    // registerSsoRoute() 등록, 이 조건식 3곳이 모두 일치해야 한다 — 한쪽만 바꾸면 그 요청은 500이
+    // 아니라 조용히 text/html 200(SPA 폴백)이 되고, 이를 잡아낼 테스트도 없다.
     if (url.pathname.startsWith('/api') || url.pathname.startsWith('/.well-known/oauth-') || url.pathname === '/sso') {
       return webApp.fetch(request, env, ctx)
     }
