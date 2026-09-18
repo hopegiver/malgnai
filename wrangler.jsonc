@@ -58,9 +58,51 @@
   // 막는다. 아래 값은 같은 파생 규칙("malgnai-hub:plugin-deploy-rl"의 sha256 앞 10자 hex를
   // 10진수로 변환)으로 만든 이 바인딩 전용 값이다 — 다른 앱/바인딩에 복제할 때는 반드시 그
   // 앱·바인딩 고유의 새 문자열로 다시 파생할 것.
+  // malgnai-hub의 범용 이메일 발송(MCP 도구 email_send) — docs/design/email-send-tool.md.
+  // 제품은 **Cloudflare Email Service의 Email Sending**이다(옛 Email Routing send_email 바인딩이
+  // 여기로 통합됐다 — 옛 문서 URL이 email-service로 301 리다이렉트된다, 설계 §1.1).
+  //
+  // ⚠️ allowed_sender_addresses를 **반드시** 유지할 것. 이 도구는 사내 수신자에게 임의 본문을
+  //    보낼 수 있으므로, 최소한 "어떤 명의로 나가는가"만은 코드 버그로도 못 바꾸게 Cloudflare
+  //    쪽에서 고정한다(예: ppm-mcp의 report@apiserver.kr 사칭 차단). 이 배열을 지우면 같은
+  //    계정의 온보딩된 도메인 어느 주소로든 발신이 가능해진다.
+  // ⚠️ allowed_destination_addresses는 **설정하지 않는다** — 수신자 제한(D9)이 없어서가 아니라,
+  //    이 속성이 **주소 단위 목록**이라 "@malgnsoft.com 도메인 전체"라는 규칙을 표현할 수 없기
+  //    때문이다. 직원 주소를 일일이 나열하면 회사 명부의 두 번째 정본이 생겨 입·퇴사마다
+  //    드리프트하고, 그 실패(E_RECIPIENT_NOT_ALLOWED)는 감사 INSERT가 끝난 뒤에 나므로
+  //    "기록은 있는데 안 나간 건"을 양산한다. 수신자 제한은 발송 전 코드 게이트가 담당한다
+  //    (설계 §6.4 — 완전일치 판정, RECIPIENT_DOMAIN_NOT_ALLOWED).
+  // ⚠️ 이 주소 문자열은 server/lib/email.js의 FROM_ADDRESS 상수와 **반드시 같아야 한다**.
+  //    한쪽만 바꾸면 E_VALIDATION_ERROR로 전건 실패한다. 바꿀 때 같이 볼 파일:
+  //    wrangler.jsonc(이 줄) / server/lib/email.js(FROM_ADDRESS) / docs/design/email-send-tool.md §2.3
+  // ⚠️ 이 바인딩이 실제로 동작하려면 apiserver.kr이 Cloudflare 대시보드에서 Email Sending
+  //    발송 도메인으로 온보딩돼 있어야 하고 계정이 Workers Paid여야 한다(설계 §2.4 M-1·M-2,
+  //    사람이 해야 하는 수동 단계 — 코드로 자동화 불가). 미완 상태면 도구가
+  //    E_SENDER_DOMAIN_NOT_AVAILABLE로 실패한다.
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "allowed_sender_addresses": ["malgnai-hub@apiserver.kr"]
+    }
+  ],
+
   "ratelimits": [
     { "name": "GOOGLE_LOGIN_RL", "namespace_id": "873909047174", "simple": { "limit": 20, "period": 60 } },
-    { "name": "PLUGIN_DEPLOY_RL", "namespace_id": "725107757322", "simple": { "limit": 10, "period": 60 } }
+    { "name": "PLUGIN_DEPLOY_RL", "namespace_id": "725107757322", "simple": { "limit": 10, "period": 60 } },
+    // EMAIL_SEND_RL — MCP 도구 email_send 전용(설계 §4). 기존 두 바인딩과 **축이 다르다**:
+    // 키가 IP가 아니라 userId다(인증된 사용자 단위 남용이 관심사이고, 사무실 NAT 뒤 공용 IP로
+    // 잡으면 직원끼리 서로를 막는다 — plugin-deploys.js의 m-3 주석이 기록한 회귀).
+    // 또 이 바인딩만 **fail-closed**다(바인딩 부재·오류 시 통과가 아니라 거부) — 로그인은 막히면
+    // 서비스가 죽지만 이메일은 안 나가도 죽지 않는다. 그래서 server/api/*의 checkRateLimit()을
+    // 재사용하지 말고 전용 함수를 쓴다(server/lib/email.js의 checkEmailRateLimit(), 설계 §4.5).
+    //
+    // ⚠️ namespace_id는 계정 전역 스코프다 — 위 두 값을 복사하면 로그인/배포알림/메일발송이
+    // 카운터를 공유해 서로를 막는다. 아래 값은 동일 파생 규칙(sha256("malgnai-hub:email-send-rl")의
+    // 앞 10자 hex → 10진수)으로 만든 이 바인딩 전용 값이다.
+    // ⚠️ period는 10 또는 60만 허용된다(Cloudflare 공식) — 즉 이 바인딩만으로는 "하루 N건" 같은
+    // 볼륨 상한을 만들 수 없다(5/60초 = 하루 7,200건까지 허용). 볼륨 축은 코드에서 audit_logs를
+    // 세는 2층 상한(사용자당 24시간 50건)이 담당한다(설계 §4.3).
+    { "name": "EMAIL_SEND_RL", "namespace_id": "177083697811", "simple": { "limit": 5, "period": 60 } }
   ],
 
   // app/(SPA)을 별도 Pages 배포 대신 Worker 정적 자산 바인딩으로 단일 배포(대표 지시,

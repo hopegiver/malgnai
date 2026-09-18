@@ -1,4 +1,4 @@
-// MalgnMcpAgent — McpAgent(Durable Object) 서브클래스, MCP 도구 14개 등록(docs/mcp-tools.md 정본).
+// MalgnMcpAgent — McpAgent(Durable Object) 서브클래스, MCP 도구 15개 등록(docs/mcp-tools.md 정본).
 // 인증 컨텍스트는 this.props(deviceAuthMiddleware가 주입, architecture.md §6.2)에서 얻는다 —
 // 클라이언트가 보내는 userId는 절대 신뢰하지 않는다(idea.md §12.3). 매 호출마다 D1을 직접 조회하고
 // state/storage에 업무데이터를 이중 저장하지 않는다(architecture.md §0 결정2).
@@ -22,6 +22,7 @@ import { bootstrapProject } from '../server/lib/bootstrap.js'
 import { recordAgentLearning } from '../server/lib/agent-learnings.js'
 import { recordAgentScore } from '../server/lib/agent-scores.js'
 import { getAgentContext } from '../server/lib/agent-context.js'
+import { sendEmail } from '../server/lib/email.js'
 
 function textResult(obj) {
   return { content: [{ type: 'text', text: JSON.stringify(obj) }] }
@@ -417,6 +418,62 @@ export class MalgnMcpAgent extends McpAgent {
         try {
           const userId = this.props.userId
           const out = await getAgentContext(this.env.DB, userId, agentName, { learningLimit, scoreHistoryLimit })
+          return textResult(out)
+        } catch (e) {
+          return errorResult(e)
+        }
+      }
+    )
+
+    // email_send — 범용 이메일 발송(15번째 도구, docs/design/email-send-tool.md 정본, D9 확정판).
+    // 발송 로직 전부는 server/lib/email.js의 sendEmail() 단일 진입점에 있다(§9.2) — 여기서는
+    // this.props(신뢰 가능한 인증 컨텍스트)를 채워 넘기고 결과를 textResult/errorResult로 감싸기만
+    // 한다. projectId는 agent_learning_record와 동일 패턴(선택, 위)으로 이 계층에서
+    // resolveProjectById()로 본인 소유를 먼저 확인한다 — sendEmail()은 이미 검증된 projectId(또는
+    // null)만 받고 소유권을 다시 확인하지 않는다.
+    //
+    // ⚠️ email_send는 §6.4-4 규약대로 던지는 모든 에러의 message를 "<CODE>: <설명>" 형식으로
+    // 맞춘다(errorResult가 e.message만 직렬화하기 때문). resolveProjectById()가 던지는 기존
+    // NotFoundError는 다른 13개 도구와 공유하는 코드라 그 접두 규약이 없으므로, 여기서만 그 형식에
+    // 맞게 다시 감싼다(resolveProjectById 자체는 고치지 않는다 — 다른 도구 전체에 영향을 주는 변경).
+    this.server.registerTool(
+      'email_send',
+      {
+        description:
+          '지정한 수신자에게 이메일을 실제로 발송한다. ⚠️ 호출 즉시 진짜 메일이 나간다 — 테스트·예시 목적으로 호출하지 말 것. ' +
+          '발신자는 malgnai-hub@apiserver.kr로 고정되고 Reply-To는 호출한 직원 본인 주소가 된다. 본문 말미에 발송자를 밝히는 한 줄이 자동으로 붙는다. ' +
+          '⚠️ 수신자는 @malgnsoft.com 주소만 가능하다(사내 전용). 다른 도메인이 하나라도 섞이면 부분발송 없이 호출 전체가 거부된다 — 사외 발송 용도로 시도하지 말 것. ' +
+          '모든 발송 시도는 발송 전에 감사로그에 기록되며 기록에 실패하면 발송도 되지 않는다. ' +
+          'HTML 본문은 지정할 수 없다(text만 받아 서버가 서식 없는 HTML로 변환). 첨부파일은 지원하지 않는다. ' +
+          '같은 idempotencyKey로 다시 호출하면 재발송하지 않고 최초 발송 결과를 그대로 돌려준다.',
+        inputSchema: {
+          to: z.union([
+            z.string().min(3).max(254),
+            z.array(z.string().min(3).max(254)).min(1).max(5)
+          ]),
+          subject: z.string().min(1).max(200),
+          text: z.string().min(1).max(10000),
+          projectId: z.string().optional(),
+          idempotencyKey: z.string().min(1).max(200)
+        }
+      },
+      async ({ to, subject, text, projectId: inputProjectId, idempotencyKey }) => {
+        try {
+          const userId = this.props.userId
+          const deviceId = this.props.deviceId
+          let projectId = null
+          if (inputProjectId) {
+            try {
+              const { project } = await this.resolveProjectById(inputProjectId)
+              projectId = project.id
+            } catch (e) {
+              const wrapped = new Error(`NOT_FOUND: ${e.message}`)
+              wrapped.name = 'NotFoundError'
+              wrapped.code = 'NOT_FOUND'
+              throw wrapped
+            }
+          }
+          const out = await sendEmail(this.env, { userId, deviceId, to, subject, text, projectId, idempotencyKey })
           return textResult(out)
         } catch (e) {
           return errorResult(e)
