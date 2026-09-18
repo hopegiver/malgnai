@@ -16,7 +16,7 @@ import { parseIdempotencyKey } from './idempotency.js'
 // 🔴 발신 주소 — wrangler.jsonc의 send_email.allowed_sender_addresses와 반드시 같은 문자열이어야
 // 한다(한쪽만 바꾸면 E_VALIDATION_ERROR로 전건 실패). 같이 바꿀 파일: wrangler.jsonc / 이 상수 /
 // docs/design/email-send-tool.md §2.3.
-export const FROM_ADDRESS = 'malgnai-hub@apiserver.kr'
+export const FROM_ADDRESS = 'malgnai@apiserver.kr'
 // 표시명은 권위를 참칭하지 않는 서버 상수로 고정한다 — 사용자 입력을 받지 않는다(§2.6-1).
 const FROM_DISPLAY_NAME = '맑은소프트 malgnai-hub (자동발송)'
 
