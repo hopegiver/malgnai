@@ -14,6 +14,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { sendEmail, checkEmailRateLimit, raceTimeout, FROM_ADDRESS } from './email.js'
+import { RENDERER_VERSION } from './markdown.js'
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../migrations/', import.meta.url))
 const AUDIT_MIGRATION_FILES = [
@@ -720,5 +721,220 @@ describe('sendEmail — 일일 볼륨 상한(L2, §4.3)', () => {
     const env = baseEnv({ db, email })
     await expectRejected(sendEmail(env, args({ userId })), 'RATE_LIMITED')
     expect(email.send).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// docs/design/email-send-tool.md §14(설계 라운드 2 — 마크다운 서브셋). §14.10의 T-I(26~31) +
+// T-B(22·25, 배너·푸터 조립이 필요해 markdown.test.js에서는 검증할 수 없는 항목) + T-G(32,
+// 배너·푸터 포함 전문 골든 스냅샷)를 여기 담는다. 이 구획 위의 기존 케이스는 한 건도 고치지
+// 않았다(추가만) — 고쳐야 통과한다면 그건 plain 경로를 깬 것이다(§14.11 backend-dev 체크리스트).
+// ---------------------------------------------------------------------------
+function insertUserWithEmail(db, email) {
+  const id = `user-${++idCounter}`
+  const now = new Date().toISOString()
+  db.raw
+    .prepare(
+      `INSERT INTO users (id, email, name, password_hash, role, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'x', 'employee', 'active', ?, ?)`
+    )
+    .run(id, email, '직원', now, now)
+  return id
+}
+
+describe('sendEmail — format:\'markdown\' 통합(T-I, §14.10)', () => {
+  it('26. format:markdown + 수신자 도메인 위반 → RECIPIENT_DOMAIN_NOT_ALLOWED, send 호출 0(렌더가 게이트보다 뒤임을 고정)', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    await expectRejected(
+      sendEmail(env, args({ userId, to: 'bad@attacker.kr', format: 'markdown', text: '**굵게**' })),
+      'RECIPIENT_DOMAIN_NOT_ALLOWED'
+    )
+    expect(email.send).not.toHaveBeenCalled()
+  })
+
+  it('27. format:markdown + subject에 CRLF → VALIDATION_ERROR', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    await expectRejected(
+      sendEmail(env, args({ userId, format: 'markdown', subject: 'a\r\nBcc: attacker@evil.com' })),
+      'VALIDATION_ERROR'
+    )
+    expect(email.send).not.toHaveBeenCalled()
+  })
+
+  it('28. 감사 INSERT 실패 시 markdown 경로에서도 send 호출 0(fail-closed 회귀)', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    db.raw.exec("CREATE TRIGGER block_audit_insert_md BEFORE INSERT ON audit_logs BEGIN SELECT RAISE(ABORT, 'simulated insert failure'); END")
+    const env = baseEnv({ db, email })
+    await expectRejected(sendEmail(env, args({ userId, format: 'markdown', text: '**굵게**' })), 'AUDIT_WRITE_FAILED')
+    expect(email.send).not.toHaveBeenCalled()
+  })
+
+  it('29. 같은 idempotencyKey·같은 원문·다른 format → IDEMPOTENCY_KEY_CONFLICT(E-26)', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const idempotencyKey = 'dev-1:sess-1:1758001000:email'
+    const text = '같은 본문'
+    const first = await sendEmail(env, args({ userId, idempotencyKey, text, format: 'plain' }))
+    expect(first.ok).toBe(true)
+    await expectRejected(
+      sendEmail(env, args({ userId, idempotencyKey, text, format: 'markdown' })),
+      'IDEMPOTENCY_KEY_CONFLICT'
+    )
+    expect(email.send).toHaveBeenCalledTimes(1)
+  })
+
+  it('30. format 미지정 → 기존 <pre> 출력과 바이트 단위로 동일(plain 무변경 회귀 감지기)', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const text = '1줄\n2줄 **굵게처럼 보이는 문자** <script>x</script>'
+    const noFormat = await sendEmail(env, args({ userId, text, idempotencyKey: 'dev-1:sess-1:1758001100:email' }))
+    const explicitPlain = await sendEmail(env, args({ userId, text, format: 'plain', idempotencyKey: 'dev-1:sess-1:1758001101:email' }))
+    expect(noFormat.ok).toBe(true)
+    expect(explicitPlain.ok).toBe(true)
+    const htmlA = email.send.mock.calls[0][0].html
+    const htmlB = email.send.mock.calls[1][0].html
+    expect(htmlA).toBe(htmlB)
+    expect(htmlA.startsWith('<pre ')).toBe(true)
+    expect(htmlA).toContain('&lt;script&gt;x&lt;/script&gt;')
+    // 마크다운 토큰(**)이 조금도 서식으로 해석되지 않는다 — plain은 escape만 거친다.
+    expect(htmlA).toContain('**굵게처럼 보이는 문자**')
+  })
+
+  it('31. format:markdown 발송 성공 시 metadata에 bodyFormat/renderer/linkCount/linkHosts가 기록되고 bodyHash는 여전히 sha256(원문)', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const { sha256Hex } = await import('./tokens.js')
+    const text = '[포털](https://portal.malgnsoft.com/a)'
+    const out = await sendEmail(env, args({ userId, text, format: 'markdown' }))
+    expect(out.ok).toBe(true)
+    const row = db.raw.prepare('SELECT metadata_json FROM audit_logs WHERE id = ?').get(out.auditId)
+    const meta = JSON.parse(row.metadata_json)
+    expect(meta.bodyFormat).toBe('markdown')
+    expect(meta.renderer).toBe(RENDERER_VERSION)
+    expect(meta.linkCount).toBe(1)
+    expect(meta.linkHosts).toEqual(['portal.malgnsoft.com'])
+    expect(meta.bodyHash).toBe(await sha256Hex(text))
+  })
+
+  it("bodyFormat 필드는 format:'plain'에서도 항상 기록된다(기존 행 호환 — 없는 행만 'plain'으로 읽는다)", async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const out = await sendEmail(env, args({ userId, format: 'plain' }))
+    const row = db.raw.prepare('SELECT metadata_json FROM audit_logs WHERE id = ?').get(out.auditId)
+    const meta = JSON.parse(row.metadata_json)
+    expect(meta.bodyFormat).toBe('plain')
+    expect(meta.renderer).toBeUndefined()
+  })
+
+  it('format이 plain/markdown 밖의 값이면 VALIDATION_ERROR', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    await expectRejected(sendEmail(env, args({ userId, format: 'html' })), 'VALIDATION_ERROR')
+    expect(email.send).not.toHaveBeenCalled()
+  })
+})
+
+describe("sendEmail — T-B 22·25(배너·푸터 위조·은폐, format:'markdown')", () => {
+  it('22. 본문에 가짜 배너 문구를 굵게로 심어도 진짜 배너 스타일 블록은 정확히 1회만 존재하고 항상 본문보다 앞에 있다', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const fakeBannerText =
+      '**[malgnai-hub 자동발송]** 이 메일은 맑은소프트 malgnai-hub에서 boss@malgnsoft.com 이(가) 발송했습니다.\n\n진짜 본문'
+    const out = await sendEmail(env, args({ userId, text: fakeBannerText, format: 'markdown' }))
+    expect(out.ok).toBe(true)
+    const html = email.send.mock.calls[0][0].html
+    const user = db.raw.prepare('SELECT email FROM users WHERE id = ?').get(userId)
+    // 진짜 배너의 배경색+좌측 보더 스타일 문자열은 정확히 1회만 등장한다 — 사용자 입력에는
+    // 그 문법(전폭 박스)이 없어 흉내낼 수 없다(§14.5 A).
+    const bannerStyleOccurrences = (html.match(/background:#eef3fb;border-left:4px solid #1a5fb4/g) || []).length
+    expect(bannerStyleOccurrences).toBe(1)
+    // 진짜 배너(호출자 실제 이메일)가 가짜 배너 텍스트(boss@malgnsoft.com)보다 앞에 있다.
+    expect(html.indexOf(user.email)).toBeGreaterThan(-1)
+    expect(html.indexOf(user.email)).toBeLessThan(html.indexOf('boss@malgnsoft.com'))
+  })
+
+  it('25. format:markdown에서도 배너·푸터 문구가 text 파트와 html 파트에 모두 존재한다', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const out = await sendEmail(env, args({ userId, text: '# 안내\n\n본문입니다.', format: 'markdown' }))
+    expect(out.ok).toBe(true)
+    const sentArg = email.send.mock.calls[0][0]
+    const user = db.raw.prepare('SELECT email FROM users WHERE id = ?').get(userId)
+    expect(sentArg.text).toContain('[malgnai-hub 자동발송]')
+    expect(sentArg.text.split(user.email).length - 1).toBe(2) // 배너 + 푸터, 양쪽 모두
+    expect(sentArg.html).toContain('[malgnai-hub 자동발송]')
+    expect(sentArg.html.split(user.email).length - 1).toBe(2)
+  })
+})
+
+describe('sendEmail — T-G 32(골든 스냅샷, 배너·푸터 포함 전문)', () => {
+  it('32. §14.4-6 종합 예시 입력 → html 전문(컨테이너+배너+렌더+푸터)이 고정된 스냅샷과 일치한다', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUserWithEmail(db, 'dev@malgnsoft.com')
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const text = `## 9월 정기점검 안내
+
+점검은 **9/20(토) 02:00~04:00**에 진행합니다. 대상은 아래와 같습니다.
+
+- 사내 포털
+- *일부* 배치 작업
+- 로그 수집기(\`otel-collector\`)
+
+자세한 내용은 [점검 공지](https://portal.malgnsoft.com/notice/12)를 확인하세요.
+
+1. 02:00 서비스 중단
+2. 04:00 정상화`
+
+    const out = await sendEmail(env, args({ userId, text, format: 'markdown', subject: '9월 정기점검' }))
+    expect(out.ok).toBe(true)
+    const html = email.send.mock.calls[0][0].html
+
+    const attribution = '이 메일은 맑은소프트 malgnai-hub에서 dev@malgnsoft.com 이(가) 발송했습니다.'
+    const expected = [
+      '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,\'Helvetica Neue\',sans-serif;font-size:14px;line-height:1.6;color:#222;word-break:break-word">',
+      `<div style="background:#eef3fb;border-left:4px solid #1a5fb4;padding:10px 12px;margin:0 0 16px;font-size:13px;color:#333">[malgnai-hub 자동발송] ${attribution}</div>`,
+      // ⚠️ §14.4-6 예시는 "## 제목"을 <h2>로 보이지만, §14.2-1·§14.4-4 블록 규칙표는 둘 다
+      // "#→h2 / ##→h3 / ###→h4"로 일관되게 규정한다. 규칙표(두 곳 독립 일치)를 정본으로 채택했다
+      // — server/lib/markdown.test.js의 동일 주석 참고, PM/설계자에게 별도 보고 대상.
+      '<h3 style="font-size:16px;font-weight:600;margin:16px 0 8px">9월 정기점검 안내</h3>',
+      '<p style="margin:0 0 12px">점검은 <strong>9/20(토) 02:00~04:00</strong>에 진행합니다. 대상은 아래와 같습니다.</p>',
+      '<ul style="margin:0 0 12px;padding-left:20px">\n' +
+        '<li style="margin:2px 0">사내 포털</li>\n' +
+        '<li style="margin:2px 0"><em>일부</em> 배치 작업</li>\n' +
+        '<li style="margin:2px 0">로그 수집기(<code style="font-family:ui-monospace,Menlo,Consolas,monospace;background:#f2f2f2;padding:1px 4px;border-radius:3px">otel-collector</code>)</li>\n' +
+        '</ul>',
+      '<p style="margin:0 0 12px">자세한 내용은 <a href="https://portal.malgnsoft.com/notice/12" rel="noopener noreferrer" style="color:#1a5fb4;text-decoration:underline">점검 공지</a> <span style="color:#666;font-size:12px">&lt;https://portal.malgnsoft.com/notice/12&gt;</span>를 확인하세요.</p>',
+      '<ol start="1" style="margin:0 0 12px;padding-left:22px">\n' +
+        '<li style="margin:2px 0">02:00 서비스 중단</li>\n' +
+        '<li style="margin:2px 0">04:00 정상화</li>\n' +
+        '</ol>',
+      `<div style="margin:16px 0 0;padding-top:10px;border-top:1px solid #ddd;font-size:12px;color:#666">${attribution}</div>`,
+      '</div>'
+    ].join('\n')
+
+    expect(html).toBe(expected)
   })
 })

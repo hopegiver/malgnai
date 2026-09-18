@@ -8,6 +8,7 @@ import * as usersDao from '../dao/users.js'
 import { buildRecordStatement } from '../dao/audit-logs.js'
 import { sha256Hex } from './tokens.js'
 import { parseIdempotencyKey } from './idempotency.js'
+import { renderMarkdownSubset, escapeHtml as escapeHtmlMd, RENDERER_VERSION } from './markdown.js'
 
 // ---------------------------------------------------------------------------
 // 상수 (§5.1·§6.4-4·§9.1)
@@ -123,6 +124,30 @@ function buildHtml(textWithFooter) {
 }
 
 // ---------------------------------------------------------------------------
+// §14.4 — format:'markdown' 경로. plain 경로(buildHtml, 위)는 이 절이 한 글자도 건드리지
+// 않는다. 배너·푸터·컨테이너는 renderMarkdownSubset()이 모른다(§14.11) — 여기서 렌더 결과
+// 바깥에 조립한다(I-4: 사용자 본문이 서버 블록을 위조·은폐할 수 없다).
+// ---------------------------------------------------------------------------
+const MD_CONTAINER_STYLE =
+  "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;font-size:14px;line-height:1.6;color:#222;word-break:break-word"
+const MD_BANNER_STYLE = 'background:#eef3fb;border-left:4px solid #1a5fb4;padding:10px 12px;margin:0 0 16px;font-size:13px;color:#333'
+const MD_FOOTER_STYLE = 'margin:16px 0 0;padding-top:10px;border-top:1px solid #ddd;font-size:12px;color:#666'
+
+/** format:'markdown'의 html 파트를 조립한다. attributionLine은 plain 경로(배너/푸터)와
+ *  같은 상수에서 나온 문자열이어야 한다(§14.5 구현 규약 — 문구를 두 번 타이핑하지 말 것).
+ *  ⚠️ attributionLine 안의 replyToEmail은 여기서 별도로 escapeHtml()해야 한다 — plain 경로는
+ *  banner+text+footer 전체를 한 번에 이스케이프해서 자동으로 커버되지만, markdown 경로는
+ *  배너·푸터를 본문과 따로 조립하므로 그 자동 커버가 사라진다(§14.4-6 경고 박스). */
+function buildMarkdownHtml(text, attributionLine) {
+  const { html: rendered, linkCount, linkHosts } = renderMarkdownSubset(text)
+  const attributionHtml = escapeHtmlMd(attributionLine)
+  const bannerHtml = `<div style="${MD_BANNER_STYLE}">[malgnai-hub 자동발송] ${attributionHtml}</div>`
+  const footerHtml = `<div style="${MD_FOOTER_STYLE}">${attributionHtml}</div>`
+  const html = `<div style="${MD_CONTAINER_STYLE}">\n${bannerHtml}\n${rendered}\n${footerHtml}\n</div>`
+  return { html, linkCount, linkHosts }
+}
+
+// ---------------------------------------------------------------------------
 // §6.4-1 — 수신자 1개 판정 절차(A~F). 문법(B) 실패는 즉시 VALIDATION_ERROR로 전체 호출을
 // 중단한다(부분발송 개념이 없다 — 애초에 요청이 잘못됐다). 도메인(D) 실패는 이 함수에서 던지지
 // 않고 호출부가 전 원소를 다 검사한 뒤 한꺼번에 판단한다(§6.4-1 E — 전부-or-전무).
@@ -234,7 +259,7 @@ export async function raceTimeout(promise, ms) {
  *  타임아웃(E-3)만 예외적으로 throw하지 않고 { ok:false, status:'unknown', ... }를 반환한다(§8.3
  *  "타임아웃" 출력 예시 — 재시도 가능함을 알리는 정상 응답이지 MCP 에러가 아니다). 그 외 실패는
  *  전부 throw하고 mcp/agent.js의 errorResult(e)가 e.message를 그대로 직렬화한다. */
-export async function sendEmail(env, { userId, deviceId, to, subject, text, projectId, idempotencyKey }) {
+export async function sendEmail(env, { userId, deviceId, to, subject, text, format, projectId, idempotencyKey }) {
   // 1) 바인딩 존재 확인(§9.3 1단계, §4.4 fail-closed) — 로컬/미배포 환경에서 이 도구가 아예
   //    동작하지 않는 것이 바람직한 성질이다(개발 중 실수로 진짜 수신자에게 보내는 경로를 열지 않음).
   if (!env.EMAIL) throw configError('EMAIL binding is not configured')
@@ -265,6 +290,14 @@ export async function sendEmail(env, { userId, deviceId, to, subject, text, proj
   const subjectValidated = validateSubject(subject)
   const bodyBytes = validateText(text)
 
+  // 4a) format(§14.7) — 게이트는 이 단일 진입점 안에 있어야 한다는 원칙 그대로, zod(1차)에
+  //     이어 여기서 2차 검증한다. 기본값은 'plain'(호출자가 명시하지 않으면 서식이 조용히
+  //     생기지 않는다 — §14.7-2 선택 이유 1).
+  const bodyFormat = format === undefined || format === null ? 'plain' : format
+  if (bodyFormat !== 'plain' && bodyFormat !== 'markdown') {
+    throw validationError("format must be 'plain' or 'markdown'")
+  }
+
   // 4b·4c) 🔴 수신자 도메인 게이트(D9·§6.4) + 중복 제거. 여기서 막히면 감사 행도 남지 않고
   //        idempotencyKey도 소모되지 않는다(§6.4-5) — 사용자가 주소를 고쳐 같은 키로 재호출 가능.
   const recipients = resolveRecipients(to, { userId, deviceId })
@@ -293,7 +326,20 @@ export async function sendEmail(env, { userId, deviceId, to, subject, text, proj
   const banner = `[malgnai-hub 자동발송] ${attributionLine}\n\n`
   const footer = `\n\n─\n${attributionLine}`
   const textWithFooter = banner + text + footer
-  const html = buildHtml(textWithFooter)
+  // format:'plain'은 현행 그대로(§14.4-1 — 한 글자도 바꾸지 않는다). format:'markdown'만
+  // renderMarkdownSubset()을 거친다 — 자원 상한(§14.8) 초과 시 여기서 VALIDATION_ERROR가 던져져
+  // 감사 INSERT(8번, 아래)에 도달하지 않는다(§14.11 체크리스트 19 — 순서 유지).
+  let html
+  let mdLinkCount
+  let mdLinkHosts
+  if (bodyFormat === 'markdown') {
+    const built = buildMarkdownHtml(text, attributionLine)
+    html = built.html
+    mdLinkCount = built.linkCount
+    mdLinkHosts = built.linkHosts
+  } else {
+    html = buildHtml(textWithFooter)
+  }
   const { sessionId } = parseIdempotencyKey(idempotencyKey)
 
   const metadata = {
@@ -306,11 +352,18 @@ export async function sendEmail(env, { userId, deviceId, to, subject, text, proj
     subject: subjectValidated,
     bodyHash,
     bodyBytes,
+    bodyFormat,
     footerApplied: true,
     deviceId: deviceId || null,
     sessionId
   }
   if (projectId) metadata.projectId = projectId
+  // §14.6-1 — renderer/linkCount/linkHosts는 bodyFormat==='markdown'일 때만 싣는다.
+  if (bodyFormat === 'markdown') {
+    metadata.renderer = RENDERER_VERSION
+    metadata.linkCount = mdLinkCount
+    metadata.linkHosts = mdLinkHosts
+  }
 
   // 8) 🔴 감사 INSERT — 발송(9)보다 반드시 먼저, 실패하면 발송에 도달할 수 없다(fail-closed,
   //    §3.7). .catch(()=>{})로 흘리지 않는다. UNIQUE 위반(멱등 재호출)만 별도 분기하고, 그 외
@@ -360,7 +413,9 @@ export async function sendEmail(env, { userId, deviceId, to, subject, text, proj
     const contentChanged =
       existingMeta.bodyHash !== bodyHash ||
       existingMeta.subject !== subjectValidated ||
-      JSON.stringify(existingMeta.to || []) !== JSON.stringify(recipients)
+      JSON.stringify(existingMeta.to || []) !== JSON.stringify(recipients) ||
+      // §14.6-1 — 기존 행(마이그레이션 이전)은 bodyFormat이 없을 수 있으므로 'plain'으로 읽는다.
+      (existingMeta.bodyFormat || 'plain') !== bodyFormat
     if (contentChanged) {
       throw idempotencyConflictError(
         `idempotencyKey reused with different content (to/subject/body) — use a new idempotencyKey: ${idempotencyKey}`

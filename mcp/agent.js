@@ -445,6 +445,7 @@ export class MalgnMcpAgent extends McpAgent {
           '⚠️ 수신자는 @malgnsoft.com 주소만 가능하다(사내 전용). 다른 도메인이 하나라도 섞이면 부분발송 없이 호출 전체가 거부된다 — 사외 발송 용도로 시도하지 말 것. ' +
           '모든 발송 시도는 발송 전에 감사로그에 기록되며 기록에 실패하면 발송도 되지 않는다. ' +
           'HTML 본문은 지정할 수 없다(text만 받아 서버가 서식 없는 HTML로 변환). 첨부파일은 지원하지 않는다. ' +
+          "format:'markdown'을 주면 제목(#~###)·굵게(**)·기울임(*)·인라인코드(`)·목록(-, 1.)·링크([표시](https://…))만 서식으로 렌더된다. 표·이미지·HTML 태그는 지원하지 않고 입력한 문자 그대로 보인다. 링크는 수신자 화면에 표시텍스트와 실제 URL이 항상 함께 표시되며 https://만 링크가 된다. " +
           '같은 idempotencyKey로 다시 호출하면 재발송하지 않고 최초 발송 결과를 그대로 돌려준다.',
         inputSchema: {
           to: z.union([
@@ -453,11 +454,12 @@ export class MalgnMcpAgent extends McpAgent {
           ]),
           subject: z.string().min(1).max(200),
           text: z.string().min(1).max(10000),
+          format: z.enum(['plain', 'markdown']).optional(),
           projectId: z.string().optional(),
           idempotencyKey: z.string().min(1).max(200)
         }
       },
-      async ({ to, subject, text, projectId: inputProjectId, idempotencyKey }) => {
+      async ({ to, subject, text, format, projectId: inputProjectId, idempotencyKey }) => {
         try {
           const userId = this.props.userId
           const deviceId = this.props.deviceId
@@ -473,7 +475,7 @@ export class MalgnMcpAgent extends McpAgent {
               throw wrapped
             }
           }
-          const out = await sendEmail(this.env, { userId, deviceId, to, subject, text, projectId, idempotencyKey })
+          const out = await sendEmail(this.env, { userId, deviceId, to, subject, text, format, projectId, idempotencyKey })
           return textResult(out)
         } catch (e) {
           return errorResult(e)
