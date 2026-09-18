@@ -430,8 +430,45 @@ describe('L7 정규화 사본 기준 판정(라운드 2-2) — 전각·대소문
   })
 
   // ⚠️ ‹›(U+2039/203A)·〈〉(U+3008/3009) 등 NFKC로 반각 꺾쇠에 접히지 않는 유사 꺾쇠는
-  // 여전히 링크를 만든다 — 이것이 현재의 의도된 잔여 위험(계약)이다. 이 테스트 파일은 그
-  // 문자들을 막는 단언을 두지 않는다(지시에 따라 의도적으로 비워둔다).
+  // 여전히 링크를 만든다 — 이것이 현재의 의도된 잔여 위험(계약)이다. 그 계약 자체는 아래
+  // 'T-N — 벡터 41·42' describe 블록의 42번 테스트가 못 박는다(§14.10 벡터 42).
+})
+
+// ---------------------------------------------------------------------------
+// T-N. 정규화 우회와 회귀 방지 공백(§14.10 라운드 2-2) — 41·42번.
+// 40번(전각 꺾쇠·대소문자 혼용·전각 스킴 우회)·43번(U-d 빈 authority)·44번(extractHost 직접
+// 단언)은 이미 위 'L7 정규화 사본 기준 판정' describe와 'U-d 회귀'·'extractHost()' describe가
+// 동등한 입력으로 덮고 있어 여기서는 중복 작성하지 않는다.
+// ---------------------------------------------------------------------------
+describe('T-N — 벡터 41·42(§14.10 라운드 2-2)', () => {
+  it('41. L7 완전일치 예외는 원문 기준이라 대소문자만 다른 표시텍스트로는 넓어지지 않는다 — [HTTPS://a.com](https://a.com)은 링크가 되지 않고, 39번의 [https://a.com](https://a.com)은 여전히 링크가 된다(두 케이스를 나란히 두어 예외가 원문 완전일치 기준임을 고정)', () => {
+    const caseInsensitive = renderMarkdownSubset('[HTTPS://a.com](https://a.com)')
+    expect((caseInsensitive.html.match(/<a /g) || []).length).toBe(0)
+    expect(caseInsensitive.linkCount).toBe(0)
+    expect(caseInsensitive.html).toContain('[HTTPS://a.com](https://a.com)')
+
+    const exact = renderMarkdownSubset('[https://a.com](https://a.com)')
+    expect((exact.html.match(/<a /g) || []).length).toBe(1)
+    expect(exact.linkCount).toBe(1)
+    expect(exact.html).not.toContain('&lt;https://a.com&gt;') // 병기 생략(완전일치)
+  })
+
+  // 42. 잔여 위험의 현재 계약 고정(§14.5-D ⓑ). 이 테스트의 취지는 "막는 것"이 아니라 "현재
+  // 동작을 못 박는 것"이다 — 지금은 이 형태가 링크로 생성되는 것이 의도된 계약(수용된 잔여
+  // 위험)이므로 그 사실을 단언한다. 누군가 유사 문자 목록을 추가해 이 동작을 바꾸면 이 테스트가
+  // 깨지고, 그때 §14.5-D의 수용 판단(뒤집기 조건)을 함께 갱신하게 만드는 장치다 — 실패한다고
+  // "고쳐야 할 버그"로 오인해 임의로 판정 로직을 넓히지 말 것.
+  it('42. NFKC로 접히지 않는 유사 꺾쇠(‹›, 〈〉)는 현재 계약대로 여전히 링크가 생성된다(수용된 잔여 위험 — 취약점을 막는 테스트가 아니라 현재 동작을 고정하는 테스트)', () => {
+    const angle1 = renderMarkdownSubset('[사내 포털 ‹portal.malgnsoft.com›](https://evil.example/login)')
+    expect((angle1.html.match(/<a /g) || []).length).toBe(1)
+    expect(angle1.linkCount).toBe(1)
+    expect(angle1.html).toContain('<a href="https://evil.example/login"')
+
+    const angle2 = renderMarkdownSubset('[사내 포털 〈portal.malgnsoft.com〉](https://evil.example/login)')
+    expect((angle2.html.match(/<a /g) || []).length).toBe(1)
+    expect(angle2.linkCount).toBe(1)
+    expect(angle2.html).toContain('<a href="https://evil.example/login"')
+  })
 })
 
 // ---------------------------------------------------------------------------

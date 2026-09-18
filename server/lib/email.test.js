@@ -991,6 +991,23 @@ describe('sendEmail — format:\'markdown\' 통합(T-I, §14.10)', () => {
     expect(meta.renderer).toBeUndefined()
   })
 
+  it('46. dedup 재호출 응답은 bodyFormat은 실어도(항목 3 테스트가 이미 단언) linkCount는 신지 않는다(발송하지 않은 호출이 렌더 수치를 말하지 않는다, §14.7-4)', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const idempotencyKey = 'dev-1:sess-1:1758001500:email'
+    const text = '[사내 포털](https://portal.malgnsoft.com)'
+    const first = await sendEmail(env, args({ userId, idempotencyKey, text, format: 'markdown' }))
+    expect(first.ok).toBe(true)
+    expect(first.linkCount).toBe(1)
+
+    const second = await sendEmail(env, args({ userId, idempotencyKey, text, format: 'markdown' }))
+    expect(second.deduplicated).toBe(true)
+    expect(second.bodyFormat).toBe('markdown')
+    expect(second.linkCount).toBeUndefined()
+  })
+
   it('format이 plain/markdown 밖의 값이면 VALIDATION_ERROR', async () => {
     const db = makeSqliteDb()
     const userId = insertUser(db)
