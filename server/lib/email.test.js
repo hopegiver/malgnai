@@ -14,7 +14,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { sendEmail, checkEmailRateLimit, raceTimeout, FROM_ADDRESS } from './email.js'
-import { RENDERER_VERSION } from './markdown.js'
+import { RENDERER_VERSION, escapeHtml } from './markdown.js'
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../migrations/', import.meta.url))
 const AUDIT_MIGRATION_FILES = [
@@ -810,6 +810,40 @@ describe('sendEmail — format:\'markdown\' 통합(T-I, §14.10)', () => {
     expect(htmlA).toContain('&lt;script&gt;x&lt;/script&gt;')
     // 마크다운 토큰(**)이 조금도 서식으로 해석되지 않는다 — plain은 escape만 거친다.
     expect(htmlA).toContain('**굵게처럼 보이는 문자**')
+
+    // L-2(reviewer) — "두 호출이 서로 같다"만으로는 buildHtml() 자체가 바뀌어 양쪽 다 달라지는
+    // 회귀를 통과시킬 수 있다. 기대 html **전문**을 골든 리터럴로 고정한다(§14.4-1 — plain
+    // 경로는 한 글자도 바뀌지 않아야 한다). user.email은 insertUser()가 동적으로 채번하므로
+    // 하드코딩하지 않고 DB에서 그대로 읽어 기대값을 조립한다.
+    const user = db.raw.prepare('SELECT email FROM users WHERE id = ?').get(userId)
+    const attribution = `이 메일은 맑은소프트 malgnai-hub에서 ${user.email} 이(가) 발송했습니다.`
+    const textWithFooter = `[malgnai-hub 자동발송] ${attribution}\n\n${text}\n\n─\n${attribution}`
+    const expectedHtml =
+      `<pre style="white-space:pre-wrap;word-break:break-word;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;font-size:14px;margin:0">` +
+      escapeHtml(textWithFooter) +
+      `</pre>`
+    expect(htmlA).toBe(expectedHtml)
+  })
+
+  it('m-7 — server/lib/email.js의 로컬 escapeHtml()과 server/lib/markdown.js의 escapeHtml()이 같은 입력에 같은 결과를 낸다(중복 정의는 통합하지 않되 동치를 고정, plain 경로 무변경 원칙)', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const text = `특수문자 모음 & < > " ' 그리고 한글도 섞음`
+    const out = await sendEmail(env, args({ userId, text, idempotencyKey: 'dev-1:sess-1:1758001200:email' }))
+    expect(out.ok).toBe(true)
+    const html = email.send.mock.calls[0][0].html
+    const user = db.raw.prepare('SELECT email FROM users WHERE id = ?').get(userId)
+    const attribution = `이 메일은 맑은소프트 malgnai-hub에서 ${user.email} 이(가) 발송했습니다.`
+    const textWithFooter = `[malgnai-hub 자동발송] ${attribution}\n\n${text}\n\n─\n${attribution}`
+    // email.js 내부(로컬) escapeHtml()이 만든 결과가 markdown.js가 export하는 escapeHtml()을
+    // 같은 문자열에 적용한 결과와 바이트 단위로 같다 — 두 구현이 갈라지면 이 단언이 깨진다.
+    expect(html).toBe(
+      `<pre style="white-space:pre-wrap;word-break:break-word;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;font-size:14px;margin:0">` +
+      escapeHtml(textWithFooter) +
+      `</pre>`
+    )
   })
 
   it('31. format:markdown 발송 성공 시 metadata에 bodyFormat/renderer/linkCount/linkHosts가 기록되고 bodyHash는 여전히 sha256(원문)', async () => {
@@ -828,6 +862,67 @@ describe('sendEmail — format:\'markdown\' 통합(T-I, §14.10)', () => {
     expect(meta.linkCount).toBe(1)
     expect(meta.linkHosts).toEqual(['portal.malgnsoft.com'])
     expect(meta.bodyHash).toBe(await sha256Hex(text))
+  })
+
+  it('m-4 — format:markdown 발송 성공 응답에 bodyFormat이 실려 호출자가 서식 적용 여부를 확인할 수 있다', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const out = await sendEmail(env, args({ userId, text: '**굵게**', format: 'markdown' }))
+    expect(out.ok).toBe(true)
+    expect(out.bodyFormat).toBe('markdown')
+    // 기존 필드는 제거·개명되지 않았다.
+    expect(out).toMatchObject({ ok: true, to: ['ok@malgnsoft.com'] })
+    expect(typeof out.auditId).toBe('string')
+    expect(typeof out.sentAt).toBe('string')
+  })
+
+  it("m-4 — format 미지정(기본 'plain') 발송 성공 응답에도 bodyFormat:'plain'이 실린다", async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const out = await sendEmail(env, args({ userId }))
+    expect(out.ok).toBe(true)
+    expect(out.bodyFormat).toBe('plain')
+  })
+
+  it("m-9 — format:'markdown'일 때 text 파트(실제 발송값)는 사용자 원문 마크다운을 그대로 보존한다(I-1의 실물 증거)", async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const text = '자세한 내용은 [사내 포털](https://portal.malgnsoft.com/notice/12)을 보세요.\n\n**굵게**도 있습니다.'
+    const out = await sendEmail(env, args({ userId, text, format: 'markdown' }))
+    expect(out.ok).toBe(true)
+    const sentText = email.send.mock.calls[0][0].text
+    // 원문 마크다운 문법(`[표시](URL)`, `**굵게**`)이 text 파트에서 평문화되지 않고 글자
+    // 그대로 남아 있다 — html 파트만 렌더되고 text 파트는 §14.4-1이 규정한 대로 원문 그대로다.
+    expect(sentText).toContain('자세한 내용은 [사내 포털](https://portal.malgnsoft.com/notice/12)을 보세요.')
+    expect(sentText).toContain('**굵게**도 있습니다.')
+  })
+
+  it('m-8/E-23 — 렌더 자원 상한(줄 수) 초과 시 감사 행도 남지 않고 idempotencyKey도 소모되지 않는다(같은 키로 재호출 가능)', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    // MAX_TEXT_LINES(1,000) 초과 — sendEmail() 자체의 길이/바이트 상한(10,000자/40,960바이트)은
+    // 넉넉히 통과하면서 markdown.js의 줄 수 상한만 넘기는 입력.
+    const text = Array.from({ length: 1001 }, (_, i) => `줄${i}`).join('\n')
+    const idempotencyKey = 'dev-1:sess-1:1758001400:email'
+    await expectRejected(sendEmail(env, args({ userId, text, format: 'markdown', idempotencyKey })), 'VALIDATION_ERROR')
+    expect(email.send).not.toHaveBeenCalled()
+    // §9.3 7번(본문 조립·렌더)이 8번(감사 INSERT)보다 앞이므로, 렌더가 여기서 던지면 감사 행
+    // 자체가 생기지 않는다.
+    const row = db.raw.prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'email.send'").get()
+    expect(row.n).toBe(0)
+    // idempotencyKey가 소모되지 않았다는 증거 — 같은 키로 (짧은 본문으로) 재호출하면 충돌
+    // 없이 정상 발송된다.
+    const retry = await sendEmail(env, args({ userId, text: '짧은 본문', format: 'plain', idempotencyKey }))
+    expect(retry.ok).toBe(true)
+    expect(email.send).toHaveBeenCalledTimes(1)
   })
 
   it("bodyFormat 필드는 format:'plain'에서도 항상 기록된다(기존 행 호환 — 없는 행만 'plain'으로 읽는다)", async () => {

@@ -21,6 +21,12 @@ export const FROM_ADDRESS = 'malgnai@apiserver.kr'
 // 표시명은 권위를 참칭하지 않는 서버 상수로 고정한다 — 사용자 입력을 받지 않는다(§2.6-1).
 const FROM_DISPLAY_NAME = '맑은소프트 malgnai-hub (자동발송)'
 
+// 🔴 배너 문구의 유일한 출처(reviewer 지적 — §14.5 비협상 규약: "배너·푸터 문구는 plain·markdown
+// 두 경로가 같은 상수에서 나와야 한다"). plain 경로(banner, 아래)와 markdown 경로(buildMarkdownHtml
+// 의 bannerHtml)가 이 상수를 함께 참조한다 — 문구를 두 번 타이핑하면 한쪽만 고쳤을 때 text 파트와
+// html 파트의 귀속 문구가 갈린다.
+const EMAIL_BANNER_PREFIX = '[malgnai-hub 자동발송]'
+
 // 🔴 보안 경계다. 넓히려면 커밋·리뷰를 거쳐야 하므로 vars/환경변수가 아니라 코드 상수로 둔다
 //    (환경변수면 대시보드에서 배포 없이 조용히 넓힐 수 있다). 이 값을 바꾸면 같이 바꿀 것:
 //    mcp/agent.js의 email_send description / docs/mcp-tools.md §4.16 /
@@ -141,7 +147,7 @@ const MD_FOOTER_STYLE = 'margin:16px 0 0;padding-top:10px;border-top:1px solid #
 function buildMarkdownHtml(text, attributionLine) {
   const { html: rendered, linkCount, linkHosts } = renderMarkdownSubset(text)
   const attributionHtml = escapeHtmlMd(attributionLine)
-  const bannerHtml = `<div style="${MD_BANNER_STYLE}">[malgnai-hub 자동발송] ${attributionHtml}</div>`
+  const bannerHtml = `<div style="${MD_BANNER_STYLE}">${EMAIL_BANNER_PREFIX} ${attributionHtml}</div>`
   const footerHtml = `<div style="${MD_FOOTER_STYLE}">${attributionHtml}</div>`
   const html = `<div style="${MD_CONTAINER_STYLE}">\n${bannerHtml}\n${rendered}\n${footerHtml}\n</div>`
   return { html, linkCount, linkHosts }
@@ -323,7 +329,7 @@ export async function sendEmail(env, { userId, deviceId, to, subject, text, form
   // (설계 §2.6 — 사내 피싱의 필수 완화책). bodyHash는 여전히 배너·푸터를 붙이기 전의 사용자
   // 원문 text 기준을 유지한다(서버가 붙이는 상수는 해시 대상이 아니다).
   const attributionLine = `이 메일은 맑은소프트 malgnai-hub에서 ${replyToEmail} 이(가) 발송했습니다.`
-  const banner = `[malgnai-hub 자동발송] ${attributionLine}\n\n`
+  const banner = `${EMAIL_BANNER_PREFIX} ${attributionLine}\n\n`
   const footer = `\n\n─\n${attributionLine}`
   const textWithFooter = banner + text + footer
   // format:'plain'은 현행 그대로(§14.4-1 — 한 글자도 바꾸지 않는다). format:'markdown'만
@@ -478,5 +484,7 @@ export async function sendEmail(env, { userId, deviceId, to, subject, text, form
   // 10) 결과 로깅 + 11) 반환
   const sentAt = new Date().toISOString()
   console.log({ evt: 'email.sent', auditId, messageId: result && result.messageId, toCount: recipients.length })
-  return { ok: true, auditId, messageId: result && result.messageId, to: recipients, sentAt }
+  // reviewer m-4 — format 기본값이 'plain'이라 호출자가 서식이 실제로 먹었는지 확인할 수단이
+  // 없었다. bodyFormat을 응답에 실어 해소한다. 기존 필드는 그대로 둔다(제거·개명 없음).
+  return { ok: true, auditId, messageId: result && result.messageId, to: recipients, sentAt, bodyFormat }
 }

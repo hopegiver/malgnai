@@ -214,9 +214,19 @@ describe('T-D — malformed 입력은 선형 시간에 리터럴로 떨어진다
 // markdown.js가 모르는 값이라 여기서 검증할 수 없다, §14.11).
 // ---------------------------------------------------------------------------
 describe('T-B — 서브셋에는 전폭 박스·수평선·인용·코드펜스를 만들 문법이 없다(§14.2-2·§14.5)', () => {
-  it('23. 수평선(---, ***, ___)·인용(>)·코드펜스(```) → 어떤 것도 태그가 되지 않는다', () => {
-    const cases = ['---', '***', '___', '> 인용', '```\ncode\n```']
-    for (const input of cases) {
+  it('23. 수평선(---, ***, ___)·인용(>)·코드펜스(```) → 어떤 것도 태그가 되지 않고, 입력 문자는 리터럴로(또는 이스케이프된 형태로) 출력에 남는다(L-1 — 부정 단언만으로는 "문자를 조용히 삭제하는 변경"을 못 잡는다)', () => {
+    // expectLiteral은 escape-first(§14.4-3 2번)를 거친 뒤에도 원문 문자가 사라지지 않았음을
+    // 확인하는 긍정 단언이다. '>'는 escapeHtml() 5종 치환 대상이라 '&gt;'로 남는 것이 정상
+    // 동작이고(치환 ≠ 삭제), 그 외 문자(-, *, _, `)는 escapeHtml()의 치환 대상이 아니라
+    // 원문 그대로 남아야 한다.
+    const cases = [
+      { input: '---', expectLiteral: '---' },
+      { input: '***', expectLiteral: '***' },
+      { input: '___', expectLiteral: '___' },
+      { input: '> 인용', expectLiteral: '&gt; 인용' },
+      { input: '```\ncode\n```', expectLiteral: '```' }
+    ]
+    for (const { input, expectLiteral } of cases) {
       const { html } = renderMarkdownSubset(input)
       expect(html).not.toContain('<hr')
       expect(html).not.toContain('<blockquote')
@@ -224,7 +234,11 @@ describe('T-B — 서브셋에는 전폭 박스·수평선·인용·코드펜스
       // 배너·푸터를 흉내낼 배경색·보더 스타일이 어떤 경로로도 생성되지 않는다.
       expect(html).not.toContain('border-left')
       expect(html).not.toContain('background:#eef3fb')
+      // 긍정 단언 — 입력 문자가 출력에 리터럴(또는 이스케이프된 형태)로 남아 있다.
+      expect(html).toContain(expectLiteral)
     }
+    // 코드펜스 케이스는 'code' 본문 자체도 삭제되지 않고 남아야 한다.
+    expect(renderMarkdownSubset('```\ncode\n```').html).toContain('code')
   })
 
   it('24. 대량 개행 — 문단 경계 1개로 접혀 밀어내기가 무력화된다(MAX_TEXT_LINES 이내 구간)', () => {
@@ -291,6 +305,79 @@ describe('T-G — 골든 스냅샷(§14.4-6)', () => {
     expect(linkCount).toBe(1)
     expect(linkHosts).toEqual(['portal.malgnsoft.com'])
     expect(RENDERER_VERSION).toBe('md-subset@1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// T-A. authority·표시텍스트 참칭(33~39, 라운드 2-1 보정) — 기존 1~32번 번호는 그대로 둔다.
+// ---------------------------------------------------------------------------
+describe('T-A — authority userinfo(U-e)·표시텍스트 URL 참칭(L7) 방어(§14.3-1·§14.3-3, 라운드 2-1)', () => {
+  it('33. userinfo 위장(portal.malgnsoft.com@evil.example) → 링크 없음, 전체 평문. 병기 존재는 통과 판정 근거가 아니다 — <a 개수 0을 직접 단언한다', () => {
+    const { html, linkCount } = renderMarkdownSubset('[사내 포털](https://portal.malgnsoft.com@evil.example/login)')
+    // ⚠️ 이 케이스는 병기 문자열(&lt;https://portal.malgnsoft.com@evil.example/login&gt;)이
+    // 존재해도 그것이 원문 그대로라서 똑같이 속인다(§14.3-1 U-e 근거) — "병기가 있다"로
+    // 통과 판정하면 안 되고, 클릭 가능한 요소(<a ) 자체가 0개임을 단언해야 한다.
+    const anchorCount = (html.match(/<a /g) || []).length
+    expect(anchorCount).toBe(0)
+    expect(html).toContain('[사내 포털](https://portal.malgnsoft.com@evil.example/login)')
+    expect(linkCount).toBe(0)
+  })
+
+  it('34. authority에 자격증명이 섞인 URL → 링크 없음, linkHosts가 빈 배열(감사 metadata에 자격증명이 실리지 않음, §14.6-1)', () => {
+    const { html, linkCount, linkHosts } = renderMarkdownSubset('[x](https://svc:AKIA_SECRET@evil.example/cb)')
+    expect(html).not.toContain('<a ')
+    expect(linkCount).toBe(0)
+    expect(linkHosts).toEqual([])
+    // 렌더 출력에 원문이 평문으로 보이는 것은 정상(사용자가 쓴 문자는 사라지지 않는다).
+    expect(html).toContain('https://svc:AKIA_SECRET@evil.example/cb')
+  })
+
+  it('35. %40 우회(퍼센트 인코딩된 @) → 링크 없음', () => {
+    const { html, linkCount } = renderMarkdownSubset('[x](https://portal.malgnsoft.com%40evil.example/)')
+    expect(html).not.toContain('<a ')
+    expect(linkCount).toBe(0)
+  })
+
+  it('36. 오탐 방지(정상 케이스) — 경로·쿼리의 @, 포트는 authority userinfo가 아니라 링크가 정상 생성된다', () => {
+    const r1 = renderMarkdownSubset('[x](https://a.example/@handle)')
+    expect(r1.html).toContain('<a href="https://a.example/@handle"')
+    expect(r1.linkHosts).toEqual(['a.example'])
+
+    const r2 = renderMarkdownSubset('[x](https://a.example/p?to=user@malgnsoft.com)')
+    expect(r2.html).toContain('<a href="https://a.example/p?to=user@malgnsoft.com"')
+    expect(r2.linkHosts).toEqual(['a.example'])
+
+    const r3 = renderMarkdownSubset('[x](https://a.example:8443/p)')
+    expect(r3.html).toContain('<a href="https://a.example:8443/p"')
+    expect(r3.linkHosts).toEqual(['a.example:8443']) // 포트는 유지한다
+  })
+
+  it('37. 표시텍스트가 병기 서식(꺾쇠)을 참칭 → 링크 없음, 전체 평문. <a 0개', () => {
+    const { html, linkCount } = renderMarkdownSubset(
+      '[사내 포털 <https://portal.malgnsoft.com/notice>](https://evil.example/login)'
+    )
+    expect((html.match(/<a /g) || []).length).toBe(0)
+    expect(linkCount).toBe(0)
+  })
+
+  it('38. 표시텍스트가 URL 자체를 참칭(스킴 문자열 포함) → 링크 없음', () => {
+    const { html, linkCount } = renderMarkdownSubset('[https://portal.malgnsoft.com/notice](https://evil.example/login)')
+    expect(html).not.toContain('<a ')
+    expect(linkCount).toBe(0)
+  })
+
+  it('39. L7 예외·오탐의 회귀 고정 — 완전일치는 링크가 되고(13번과 짝), 부등호가 든 정상 표시텍스트는 의도된 오탐으로 링크가 되지 않는다', () => {
+    const exact = renderMarkdownSubset('[https://a.com](https://a.com)')
+    expect(exact.html).toContain('<a href="https://a.com"')
+    expect(exact.html).not.toContain('&lt;https://a.com&gt;') // 병기 생략(완전일치)
+    expect(exact.linkCount).toBe(1)
+
+    // '매출 > 10억'은 escape-first를 거치면 표시텍스트가 '매출 &gt; 10억'이 되어 '&gt;'를
+    // 포함한다 — 부등호가 든 정상 표시텍스트가 링크가 되지 않는 것은 §14.3-3이 명시한
+    // 의도된 오탐이지 고쳐야 할 버그가 아니다(손실은 0 — 문자 그대로 평문 표시).
+    const mistaken = renderMarkdownSubset('[매출 > 10억](https://a.com)')
+    expect(mistaken.html).not.toContain('<a ')
+    expect(mistaken.linkCount).toBe(0)
   })
 })
 

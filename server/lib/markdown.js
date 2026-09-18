@@ -72,10 +72,21 @@ function findBounded(line, target, start, window) {
   return idx === -1 ? -1 : start + idx
 }
 
-function extractHost(url) {
+/** 'https://' 뒤부터 첫 '/'·'?'·'#' 직전까지(authority). U-a(URL_RE) 통과 후에만 호출한다
+ *  (§14.3-1). 줄 접두 앵커 + 부정 문자군이라 백트래킹이 없다. */
+function authorityOf(url) {
   const rest = url.slice('https://'.length)
-  const m = /^[^/?#]*/.exec(rest)
-  return m ? m[0] : ''
+  return /^[^/?#]*/.exec(rest)[0]
+}
+
+/** linkHosts(감사기록)에 담을 호스트 — authority에서 userinfo(있다면 `lastIndexOf('@')` 앞)를
+ *  잘라낸 값만 남긴다. 포트는 유지한다(사고 조사에 유용, 자격증명이 아니다). U-e가 이런 URL의
+ *  링크 생성을 이미 막지만, 감사 기록은 렌더 규칙과 독립적으로 참이어야 하므로 여기서도
+ *  방어적으로 2중 차단한다 — 제거하지 말 것(§14.4-2 보정, 라운드 2-1). */
+function extractHost(url) {
+  const authority = authorityOf(url)
+  const at = authority.lastIndexOf('@')
+  return at === -1 ? authority : authority.slice(at + 1)
 }
 
 /** A7·§14.4-5 링크 시도. 실패하면 null(호출부가 '['를 리터럴로 1글자만 출력한다).
@@ -94,7 +105,24 @@ function tryParseLink(line, openBracketIdx, state) {
   const url = line.slice(urlStart, closeParen)
 
   if (url.length > MAX_URL_LEN) return null // U-b — 상한 초과는 에러가 아니라 그 링크만 평문(§14.8)
-  if (!URL_RE.test(url)) return null // U-a·U-c·U-d
+  if (!URL_RE.test(url)) return null // U-a·U-c
+
+  // U-d·U-e(§14.3-1, 순서: U-b 길이 → URL_RE → authority). 정규식 하나에 욱여넣지 않는다 —
+  // authority와 나머지를 한 패턴으로 쓰면 대안 분기가 접두를 공유해 백트래킹 금지 규약을
+  // 위협한다. 문자열 연산 2줄로 분리해 비용을 O(len)으로 고정한다.
+  const authority = authorityOf(url)
+  if (authority.length === 0) return null // U-d — authority가 1자 이상이어야 한다
+  // 🔴 U-e — authority에 '@'도 '%40'도 없어야 한다. userinfo 위장(라운드 2-1)은 병기로도
+  // 못 막는 유일한 형태라 링크 자체를 만들지 않는다(§14.3-1). 경로·쿼리의 '@'는 여기서 걸리지
+  // 않는다(authority 밖이라 정상 렌더된다, 벡터 36).
+  if (authority.includes('@') || authority.includes('%40')) return null
+
+  // 🔴 L7 — 표시텍스트가 URL 표기(병기 서식·URL 자체)를 참칭하면 링크를 만들지 않는다(§14.3-3).
+  // 비교는 escape-first를 거친 값 기준이므로 '<'가 아니라 '&lt;'로 검사해야 한다(URL은 U-c 때문에
+  // '&lt;'를 포함할 수 없어 완전일치 예외 경로로 꺾쇠가 새어 들어올 길이 없다).
+  const mimicsUrl =
+    display.includes('&lt;') || display.includes('&gt;') || display.includes('https://') || display.includes('http://')
+  if (display !== url && mimicsUrl) return null
 
   if (state.linkCount + 1 > MAX_LINK_COUNT) {
     throw markdownValidationError(`too many links (max ${MAX_LINK_COUNT})`)
