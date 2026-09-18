@@ -82,8 +82,14 @@ function authorityOf(url) {
 /** linkHosts(감사기록)에 담을 호스트 — authority에서 userinfo(있다면 `lastIndexOf('@')` 앞)를
  *  잘라낸 값만 남긴다. 포트는 유지한다(사고 조사에 유용, 자격증명이 아니다). U-e가 이런 URL의
  *  링크 생성을 이미 막지만, 감사 기록은 렌더 규칙과 독립적으로 참이어야 하므로 여기서도
- *  방어적으로 2중 차단한다 — 제거하지 말 것(§14.4-2 보정, 라운드 2-1). */
-function extractHost(url) {
+ *  방어적으로 2중 차단한다 — 제거하지 말 것(§14.4-2 보정, 라운드 2-1).
+ *
+ *  테스트 전용 export(server/lib/email.js의 raceTimeout과 동일 선례) — U-e가 authority에 '@'가
+ *  있는 URL의 링크 생성 자체를 막기 때문에 공개 API(renderMarkdownSubset)를 통해서는 이 함수의
+ *  userinfo 절단 로직(lastIndexOf 사용 여부, a@b@c형 다중 '@'에서 마지막 '@' 뒤를 취하는지,
+ *  포트 유지, IPv6 대괄호 형태에서의 오작동 여부)에 직접 도달할 수 없다. 그래서 이 함수만 별도로
+ *  export해 단위테스트가 직접 호출한다 — renderMarkdownSubset()의 공개 계약에는 영향이 없다. */
+export function extractHost(url) {
   const authority = authorityOf(url)
   const at = authority.lastIndexOf('@')
   return at === -1 ? authority : authority.slice(at + 1)
@@ -118,10 +124,25 @@ function tryParseLink(line, openBracketIdx, state) {
   if (authority.includes('@') || authority.includes('%40')) return null
 
   // 🔴 L7 — 표시텍스트가 URL 표기(병기 서식·URL 자체)를 참칭하면 링크를 만들지 않는다(§14.3-3).
-  // 비교는 escape-first를 거친 값 기준이므로 '<'가 아니라 '&lt;'로 검사해야 한다(URL은 U-c 때문에
-  // '&lt;'를 포함할 수 없어 완전일치 예외 경로로 꺾쇠가 새어 들어올 길이 없다).
+  // 판정은 display의 정규화 사본(NFKC + 소문자화)에 대해서만 수행한다 — ASCII 원형만 검사하면
+  // 전각 꺾쇠(＜HTTPS://…＞)나 대소문자 변형(HtTps://…)이 그대로 통과해 가짜 병기가 앵커 안에
+  // 남는다(PM 실측 반례, 라운드 2-2). 원문 display는 이 정규화로 변조하지 않는다 — 실제 출력되는
+  // 표시텍스트는 여전히 원문(escape된 값) 그대로다. display===url 완전일치 예외는 원문 기준
+  // 그대로 유지한다(정규화 사본으로 비교하지 않는다).
+  // 검사 대상 6개가 전부 필요하다: escape-first라 진짜 '<'/'>' 는 '&lt;'/'&gt;'로 들어오고,
+  // 전각 '＜'/'＞'는 NFKC로 반각 '<'/'>' 가 되므로 이스케이프된 형태와 반각 원형 둘 다 검사해야
+  // 한쪽만 두어 다른 쪽이 새는 일이 없다.
+  // ⚠️ 잔여 위험(막지 않는다, 알고 두는 것) — ‹›(U+2039/203A)·〈〉(U+3008/3009) 등 NFKC로
+  // 반각 꺾쇠에 접히지 않는 유사 꺾쇠 문자는 이 판정을 통과한다. 문자 목록으로 쫓지 않기로
+  // 확정했다 — NFKC로 접히는 형태까지만 막는다.
+  const displayNormalized = display.normalize('NFKC').toLowerCase()
   const mimicsUrl =
-    display.includes('&lt;') || display.includes('&gt;') || display.includes('https://') || display.includes('http://')
+    displayNormalized.includes('&lt;') ||
+    displayNormalized.includes('&gt;') ||
+    displayNormalized.includes('<') ||
+    displayNormalized.includes('>') ||
+    displayNormalized.includes('https://') ||
+    displayNormalized.includes('http://')
   if (display !== url && mimicsUrl) return null
 
   if (state.linkCount + 1 > MAX_LINK_COUNT) {

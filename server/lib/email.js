@@ -442,6 +442,9 @@ export async function sendEmail(env, { userId, deviceId, to, subject, text, form
       deduplicated: true,
       auditId: existing.id,
       sentAt: existing.created_at,
+      // 항목 3(라운드 2-2) — 성공 응답과 같은 기준(existingMeta.bodyFormat || 'plain', §14.6-1의
+      // 기존 행 호환 규칙과 동일)으로 dedup 응답에도 bodyFormat을 싣는다. 기존 필드는 그대로 둔다.
+      bodyFormat: existingMeta.bodyFormat || 'plain',
       message:
         '이전 시도의 발송 결과가 확인되지 않았습니다(이 감사 행은 "발송을 시도했다"만 의미하며 실제 배달을 보장하지 않습니다). ' +
         "Cloudflare Email Sending 로그에서 X-Malgnai-Hub-Audit-Id로 실제 발송 여부를 확인하세요. 내용을 바꿔 다시 보내려면 새 idempotencyKey를 쓰세요."
@@ -486,5 +489,10 @@ export async function sendEmail(env, { userId, deviceId, to, subject, text, form
   console.log({ evt: 'email.sent', auditId, messageId: result && result.messageId, toCount: recipients.length })
   // reviewer m-4 — format 기본값이 'plain'이라 호출자가 서식이 실제로 먹었는지 확인할 수단이
   // 없었다. bodyFormat을 응답에 실어 해소한다. 기존 필드는 그대로 둔다(제거·개명 없음).
-  return { ok: true, auditId, messageId: result && result.messageId, to: recipients, sentAt, bodyFormat }
+  const response = { ok: true, auditId, messageId: result && result.messageId, to: recipients, sentAt, bodyFormat }
+  // 항목 2 L7 오탐 무음성(라운드 2-2) — L7이 정상 링크를 잘못 평문화해도 호출자가 알 방법이
+  // 없었다. markdown일 때만 linkCount를 실어 호출자가 "링크 몇 개가 실제로 앵커가 됐는가"를
+  // 확인할 수 있게 한다(bodyFormat은 이미 위에서 항상 싣는다).
+  if (bodyFormat === 'markdown') response.linkCount = mdLinkCount
+  return response
 }

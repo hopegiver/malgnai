@@ -470,6 +470,20 @@ describe('sendEmail — 멱등성(D4·§3.5)', () => {
     expect(email.send).toHaveBeenCalledTimes(1)
   })
 
+  it('항목 3(라운드 2-2) — dedup 재호출 응답에도 성공 응답과 같은 기준으로 bodyFormat이 실린다', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const idempotencyKey = 'dev-1:sess-1:1758000900:email'
+    const first = await sendEmail(env, args({ userId, idempotencyKey, format: 'markdown', text: '**굵게**' }))
+    expect(first.ok).toBe(true)
+    expect(first.bodyFormat).toBe('markdown')
+
+    const second = await sendEmail(env, args({ userId, idempotencyKey, format: 'markdown', text: '**굵게**' }))
+    expect(second).toMatchObject({ ok: false, deduplicated: true, bodyFormat: 'markdown' })
+  })
+
   it('F-1 — dedup 재호출은 무음이 아니라 console.warn으로 관측 가능하다(security H-1 지적 — 기존엔 무음)', async () => {
     const db = makeSqliteDb()
     const userId = insertUser(db)
@@ -886,6 +900,46 @@ describe('sendEmail — format:\'markdown\' 통합(T-I, §14.10)', () => {
     const out = await sendEmail(env, args({ userId }))
     expect(out.ok).toBe(true)
     expect(out.bodyFormat).toBe('plain')
+  })
+
+  it('항목 2(라운드 2-2) — 정상 링크가 실제로 앵커가 되면 응답의 linkCount로 확인할 수 있다', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const out = await sendEmail(env, args({ userId, text: '[사내 포털](https://portal.malgnsoft.com)', format: 'markdown' }))
+    expect(out.ok).toBe(true)
+    expect(out.linkCount).toBe(1)
+  })
+
+  it("항목 2(라운드 2-2) — PM 실측 사례([다음 -> 승인](...))처럼 표시텍스트의 '>' 가 escape-first로 '&gt;'가 되어 L7에 걸려도, 링크가 평문으로 떨어졌다는 사실이 이제 응답의 linkCount:0으로 드러난다(기존엔 무음이었다 — 이 값 자체를 고치는 게 아니라 보이게 하는 것이 이번 수정이다)", async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const out = await sendEmail(env, args({ userId, text: '[다음 -> 승인](https://portal.malgnsoft.com)', format: 'markdown' }))
+    expect(out.ok).toBe(true)
+    expect(out.linkCount).toBe(0)
+  })
+
+  it('항목 2(라운드 2-2) — L7이 표시텍스트를 평문화시키면 linkCount:0이 응답에 그대로 드러난다(오탐이 무음이 아님)', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const out = await sendEmail(env, args({ userId, text: '[매출 > 10억](https://a.com)', format: 'markdown' }))
+    expect(out.ok).toBe(true)
+    expect(out.linkCount).toBe(0)
+  })
+
+  it('format:plain 응답에는 linkCount 필드 자체가 없다(markdown 전용, §14.6-1과 동일 원칙)', async () => {
+    const db = makeSqliteDb()
+    const userId = insertUser(db)
+    const email = makeEmailBinding()
+    const env = baseEnv({ db, email })
+    const out = await sendEmail(env, args({ userId, format: 'plain' }))
+    expect(out.ok).toBe(true)
+    expect(out.linkCount).toBeUndefined()
   })
 
   it("m-9 — format:'markdown'일 때 text 파트(실제 발송값)는 사용자 원문 마크다운을 그대로 보존한다(I-1의 실물 증거)", async () => {

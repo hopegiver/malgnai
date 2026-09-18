@@ -4,7 +4,7 @@
 // 항목)는 server/lib/email.test.js에 있다 — §14.11이 markdown.js에는 "배너·푸터·컨테이너를
 // 포함하지 않는다"고 명시했으므로 이 파일에서는 그 두 항목을 직접 검증할 수 없다.
 import { describe, it, expect } from 'vitest'
-import { renderMarkdownSubset, escapeHtml, RENDERER_VERSION } from './markdown.js'
+import { renderMarkdownSubset, escapeHtml, extractHost, RENDERER_VERSION } from './markdown.js'
 
 function expectValidationError(fn) {
   expect(fn).toThrow(expect.objectContaining({ code: 'VALIDATION_ERROR' }))
@@ -384,5 +384,84 @@ describe('T-A — authority userinfo(U-e)·표시텍스트 URL 참칭(L7) 방어
 describe('escapeHtml — email.js의 markdown 경로(배너·푸터)가 재사용하는 함수', () => {
   it('5종 문자를 모두 치환한다', () => {
     expect(escapeHtml(`& < > " '`)).toBe('&amp; &lt; &gt; &quot; &#39;')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 라운드 2-2 — 보안 재검증(2회차) 반영. PM 직접 실측 반례: L7이 표시텍스트를 ASCII 원형
+// 그대로만 검사해 전각·대소문자 변형이 통과했다(가짜 병기가 앵커 안에 남는다). L7 판정을
+// display.normalize('NFKC').toLowerCase() 사본 기준으로 바꾼 데 대한 회귀 테스트.
+// ---------------------------------------------------------------------------
+describe('L7 정규화 사본 기준 판정(라운드 2-2) — 전각·대소문자 변형으로도 병기 참칭을 막는다', () => {
+  it('전각 꺾쇠 + 대문자 스킴(＜HTTPS://…＞)으로 병기를 흉내낸 표시텍스트 → 링크 없음', () => {
+    const { html, linkCount } = renderMarkdownSubset(
+      '[사내 포털 ＜HTTPS://portal.malgnsoft.com＞](https://evil.example/login)'
+    )
+    expect((html.match(/<a /g) || []).length).toBe(0)
+    expect(linkCount).toBe(0)
+    expect(html).toContain('[사내 포털 ＜HTTPS://portal.malgnsoft.com＞](https://evil.example/login)')
+  })
+
+  it('대소문자 혼용 스킴(HtTps://…)으로 병기를 흉내낸 표시텍스트 → 링크 없음', () => {
+    const { html, linkCount } = renderMarkdownSubset(
+      '[사내 포털 HtTps://portal.malgnsoft.com](https://evil.example/login)'
+    )
+    expect((html.match(/<a /g) || []).length).toBe(0)
+    expect(linkCount).toBe(0)
+  })
+
+  it('전각 스킴 전체(ｈｔｔｐｓ：／／…) → 링크 없음(NFKC가 전각 콜론·슬래시까지 반각으로 접는다)', () => {
+    const { html, linkCount } = renderMarkdownSubset('[ｈｔｔｐｓ：／／evil.example](https://evil.example/login)')
+    expect((html.match(/<a /g) || []).length).toBe(0)
+    expect(linkCount).toBe(0)
+  })
+
+  it('전각 대문자 스킴(ＨＴＴＰＳ://…) → 링크 없음', () => {
+    const { html, linkCount } = renderMarkdownSubset('[ＨＴＴＰＳ://evil.example](https://evil.example/login)')
+    expect((html.match(/<a /g) || []).length).toBe(0)
+    expect(linkCount).toBe(0)
+  })
+
+  it('오탐 방지(정상 케이스) — 정규화와 무관한 정상 표시텍스트는 여전히 앵커 1개 + 병기 1개로 렌더된다', () => {
+    const { html, linkCount } = renderMarkdownSubset('[사내 포털](https://portal.malgnsoft.com/notice/12)')
+    expect((html.match(/<a /g) || []).length).toBe(1)
+    expect(linkCount).toBe(1)
+    expect(html).toContain('&lt;https://portal.malgnsoft.com/notice/12&gt;')
+  })
+
+  // ⚠️ ‹›(U+2039/203A)·〈〉(U+3008/3009) 등 NFKC로 반각 꺾쇠에 접히지 않는 유사 꺾쇠는
+  // 여전히 링크를 만든다 — 이것이 현재의 의도된 잔여 위험(계약)이다. 이 테스트 파일은 그
+  // 문자들을 막는 단언을 두지 않는다(지시에 따라 의도적으로 비워둔다).
+})
+
+// ---------------------------------------------------------------------------
+// 회귀 방지 공백 메우기(라운드 2-2 항목 2) — 코드는 옳지만 지워도 전 테스트가 통과하던 3건을
+// 잠근다.
+// ---------------------------------------------------------------------------
+describe('U-d 회귀 — 빈 authority(https:///evil.example)는 링크를 만들지 않는다', () => {
+  it('authority가 빈 URL → 링크 0개(linkHosts도 비어 있다)', () => {
+    const { html, linkCount, linkHosts } = renderMarkdownSubset('[x](https:///evil.example)')
+    expect((html.match(/<a /g) || []).length).toBe(0)
+    expect(linkCount).toBe(0)
+    expect(linkHosts).toEqual([])
+    expect(html).toContain('[x](https:///evil.example)')
+  })
+})
+
+describe('extractHost() — userinfo 절단 로직 직접 단언(테스트 전용 export, U-e 때문에 공개 API로는 도달 불가)', () => {
+  it('userinfo가 있으면 절단하고 호스트만 남긴다', () => {
+    expect(extractHost('https://user@host.example/path')).toBe('host.example')
+  })
+
+  it("a@b@c 형태(다중 '@')에서 마지막 '@' 뒤를 취한다", () => {
+    expect(extractHost('https://a@b@c')).toBe('c')
+  })
+
+  it('포트는 절단하지 않고 유지한다', () => {
+    expect(extractHost('https://a.example:8443/path')).toBe('a.example:8443')
+  })
+
+  it('IPv6 대괄호 형태([2001:db8::1]:8443)에서 오작동하지 않는다(내부 콜론을 userinfo 구분자로 오인하지 않음)', () => {
+    expect(extractHost('https://[2001:db8::1]:8443/path')).toBe('[2001:db8::1]:8443')
   })
 })
