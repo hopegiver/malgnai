@@ -46,6 +46,18 @@ vi.mock('../dao/audit-logs.js', async (importOriginal) => {
   return { ...actual, record: (...args) => auditRecordMock(...args) }
 })
 
+// 계정상태 게이트 회귀 잠금(docs/security/device-token-revocation-investigation-2026-09-19.md §5
+// 후보A "누락 지점" — 이 refresh grant는 findActiveByHash를 쓰지 않고 deviceTokensDao.findById로
+// device_token만 직접 조회하므로 usersDao.findById를 별도로 mock해야 이 경로의 실제 동작을 관찰할
+// 수 있다). 기본값은 활성 사용자 — 이 값을 바꾸지 않은 기존 R-1~R-9 테스트가 전부 그대로 통과해야
+// "정상 active 사용자는 아무 영향을 받지 않는다"(완료판정 불변량)의 증거가 된다.
+const usersFindByIdMock = vi.fn()
+
+vi.mock('../dao/users.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return { ...actual, findById: (...args) => usersFindByIdMock(...args) }
+})
+
 const codesFindByCodeMock = vi.fn()
 const codesConsumeMock = vi.fn()
 
@@ -101,6 +113,10 @@ function activeDeviceToken(overrides = {}) {
   return { id: 'device-1', user_id: 'user-1', status: 'active', ...overrides }
 }
 
+function activeUser(overrides = {}) {
+  return { id: 'user-1', email: 'active@malgnsoft.com', status: 'active', ...overrides }
+}
+
 beforeEach(() => {
   vi.useFakeTimers()
   vi.setSystemTime(BASE_TIME)
@@ -117,6 +133,7 @@ beforeEach(() => {
   codesFindByCodeMock.mockReset()
   codesConsumeMock.mockReset()
   verifyPkceS256Mock.mockReset().mockResolvedValue(true)
+  usersFindByIdMock.mockReset().mockResolvedValue(activeUser())
 })
 
 afterEach(() => {
@@ -261,6 +278,49 @@ describe('POST /api/oauth/token — refresh_token grant', () => {
     expect(r4Text).toBe('{"error":"invalid_grant"}')
     expect(r4Text).toBe(r5Text)
     expect(r5Text).toBe(r6Text)
+  })
+})
+
+// 계정상태 게이트 회귀 잠금(§5 후보A 누락 지점) — R-1~R-9는 위에서 이미 usersFindByIdMock을
+// activeUser()로 기본 세팅해 전부 그대로 통과한다(불변량: 정상 active 사용자는 아무 영향 없음).
+// 아래는 disabled/고아 계정이 이 경로에서도 실제로 막히는지를 새로 증명한다.
+describe('POST /api/oauth/token — refresh_token grant — 계정상태 게이트(§5 후보A)', () => {
+  it('device_token은 active인데 소유자 계정이 disabled → 401, 새 토큰 발급 없음', async () => {
+    oauthFindByHashMock.mockResolvedValue(oauthRow({ status: 'active' }))
+    oauthMarkRotatedMock.mockResolvedValue(true)
+    deviceFindByIdMock.mockResolvedValue(activeDeviceToken())
+    usersFindByIdMock.mockResolvedValue(activeUser({ status: 'disabled' }))
+
+    const res = await refreshRequest()
+    const body = await res.json()
+
+    expect(res.status).toBe(401)
+    expect(body).toEqual({ error: 'invalid_grant' })
+    expect(oauthInsertMock).not.toHaveBeenCalled()
+    expect(deviceRotateTokenMock).not.toHaveBeenCalled()
+  })
+
+  it('device_token의 user_id가 users에 없는 고아 계정 → 401(findById가 null을 반환하는 경우)', async () => {
+    oauthFindByHashMock.mockResolvedValue(oauthRow({ status: 'active' }))
+    oauthMarkRotatedMock.mockResolvedValue(true)
+    deviceFindByIdMock.mockResolvedValue(activeDeviceToken())
+    usersFindByIdMock.mockResolvedValue(null)
+
+    const res = await refreshRequest()
+
+    expect(res.status).toBe(401)
+    expect(deviceRotateTokenMock).not.toHaveBeenCalled()
+  })
+
+  it('active 계정 + active device_token → 정상 200(불변량 회귀 확인, R-1의 명시적 재확인)', async () => {
+    oauthFindByHashMock.mockResolvedValue(oauthRow({ status: 'active' }))
+    oauthMarkRotatedMock.mockResolvedValue(true)
+    deviceFindByIdMock.mockResolvedValue(activeDeviceToken())
+    usersFindByIdMock.mockResolvedValue(activeUser())
+
+    const res = await refreshRequest()
+    expect(res.status).toBe(200)
+    expect(deviceRotateTokenMock).toHaveBeenCalledTimes(1)
   })
 })
 

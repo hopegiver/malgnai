@@ -38,3 +38,16 @@ export async function revokeAllForUser(db, userId, reason = 'reuse_detected') {
     "UPDATE refresh_tokens SET status='revoked', revoke_reason=?, revoked_at=? WHERE user_id = ? AND status != 'revoked'"
   ).bind(reason, new Date().toISOString(), userId).run()
 }
+
+/** 계정 비활성화 캐스케이드(§완료판정 B) — 위 revokeAllForUser와 SQL은 동일하지만 실행하지 않고
+ *  Statement만 만든다. 호출부(server/api/admin-users.js)가 device_tokens/oauth_refresh_tokens
+ *  캐스케이드 UPDATE와 함께 db.batch()로 원자 커밋하기 위한 버전이다. reason 기본값은 'logout'
+ *  (change-password/auth.js:128와 동일 의미 — 명시적 관리행위에 의한 강제 로그아웃, grace window
+ *  대상 아님). 웹 로그인 자체는 이미 login/refresh에서 status='active'를 막고 있어(server/api/auth.js:27,68)
+ *  이 폐기가 없어도 재로그인은 불가능하지만, 이미 발급된 refresh_token 행을 살려두지 않는 것이
+ *  후보B의 명시 범위("연결된 refresh 토큰")다. */
+export function buildRevokeAllForUserStatement(db, userId, reason = 'logout') {
+  return db.prepare(
+    "UPDATE refresh_tokens SET status='revoked', revoke_reason=?, revoked_at=? WHERE user_id = ? AND status != 'revoked'"
+  ).bind(reason, new Date().toISOString(), userId)
+}
