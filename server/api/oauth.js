@@ -113,6 +113,61 @@ async function parseTokenRequestBody(c) {
   return Object.fromEntries(new URLSearchParams(text).entries())
 }
 
+// ---------------------------------------------------------------------------
+// /token 레이트 제한 — backend-dev 작업(레이트 제한 추가). 무인증 공개 경로이자 호출마다 D1
+// 조회+sha256(성공 시 INSERT까지)을 하므로 남용이 곧 과금/DoS다(auth-google.js·plugin-deploys.js와
+// 같은 우려, 그 두 파일 주석이 기록한 선례를 그대로 판단 재료로 쓴다). 다만 이 엔드포인트는 전
+// 직원의 Claude Code 플러그인이 access_token TTL(8h)마다 refresh_token grant를 주기적으로
+// 호출하고, 사무실은 NAT 뒤 공용 IP를 공유한다 — 두 그랜트에 똑같이 "IP 키" 축을 쓰면 사무실
+// 전체의 정상 갱신이 서로를 막는 전사 MCP 장애가 된다(google-login M-E가 겪은 문제의 상위호환:
+// M-E는 같은 사람의 두 요청이 부딪히는 것이었지만, 여기서는 서로 다른 사람들이 부딪힌다). 그래서
+// 그랜트별로 키 축을 다르게 둔다:
+//
+// - authorization_code: `${ip}:authcode` 키(google-login과 동일 IP+scope 모델). 이 그랜트는
+//   사람이 브라우저 동의를 마친 뒤 기기당 1회만 code를 교환하는 흐름이라(재발급 아님, 새 기기
+//   페어링마다 1회) 같은 사무실에서 여러 사람이 "동시에" 이 그랜트를 호출할 확률은
+//   refresh_token보다 훨씬 낮다 — google-login이 이미 이 위협모델(사무실 공용 IP)로 검증한
+//   20/60 한도와 IP+scope 키를 그대로 재사용한다.
+// - refresh_token: **IP가 아니라 제출된 refresh_token 원문의 해시**를 키로 쓴다(handleRefreshTokenGrant가
+//   DB 조회에 쓰려고 이미 계산하는 tokenHash를 그대로 재사용 — 추가 해시 비용 없음). 이 축은
+//   NAT 공유 문제를 임계값을 잘 추측해서 피하는 게 아니라 구조적으로 없앤다 — 직원마다 토큰
+//   값이 전부 다르므로 서로 다른 직원의 요청이 같은 버킷을 절대 공유하지 않는다. 대가는:
+//   이 축은 "같은 토큰을 반복 재생(replay)"하는 남용에는 강하지만, 매번 다른 무작위 문자열을
+//   던지는 순수 물량 스팸에는 이 레이트리밋만으로 대응하지 못한다 — 다만 그런 요청은 이미
+//   findByHash 인덱스 조회 1회(쓰기 없음, invalid_grant로 즉시 종료)라는 이 코드베이스의 다른
+//   opaque-token 조회 엔드포인트(device-tokens 계열)와 동일한 비용 하한을 가지므로, 이번
+//   범위(이 라우트 하나)에서 새로 만든 위험이 아니라 기존에 이미 감당하던 비용이다(범위 확대
+//   금지 — 별도로 강화가 필요하면 docs/security-plan.md에 적어 둔다).
+//
+// 실패모드는 두 그랜트 모두 **fail-open**(바인딩 부재·오류 시 통과) — google-login/plugin-deploys와
+// 같은 이유이되 이 라우트는 그 위험이 더 크다: 이 게이트가 fail-closed로 막히면 "로그인 1건"이
+// 아니라 "전 직원의 MCP 세션 전체"가 죽는다(email_send의 fail-closed와는 정반대 위험 프로파일 —
+// 이메일은 안 나가도 서비스가 안 죽지만, 이 엔드포인트가 막히면 서비스 자체가 죽는다). limit 값
+// (20/60)은 google-login과 같은 값을 재사용한다 — 정확한 임계값은(google-login M-E 주석과 동일한
+// 사유로) 실제 프로덕션 트래픽 없이는 검증할 수 없다.
+async function checkOauthTokenRateLimit(c, key) {
+  const rl = c.env.OAUTH_TOKEN_RL
+  if (!rl) return true
+  try {
+    const { success } = await rl.limit({ key })
+    return success
+  } catch (err) {
+    // 레이트리밋 바인딩 자체 오류로 토큰 발급/갱신이 전면 막히면 안 된다 — 관측만 하고 통과시킨다.
+    console.error('[oauth] rate limit check failed, allowing request', err)
+    return true
+  }
+}
+
+// RFC 8628(§3.5)의 slow_down을 차용한다 — RFC 6749 §5.2는 "너무 자주 호출했다"에 대응하는
+// 표준 에러 코드를 정의하지 않지만, slow_down은 이미 OAuth 생태계(디바이스 그랜트 폴링)에서
+// "그랜트는 유효하나 속도를 늦춰야 한다"는 의미로 통용되는 값이라 invalid_grant(자격 자체가
+// 잘못됐다는 의미)로 오독되지 않는다. 파일 상단 주석대로 /token은 평평한 {error,
+// error_description} 형식을 유지한다.
+function oauthRateLimitedResponse(c) {
+  c.header('Retry-After', '60')
+  return c.json({ error: 'slow_down', error_description: 'too many token requests, retry later' }, 429)
+}
+
 // POST /api/oauth/token — 무인증(PUBLIC_PATHS). grant_type 분기.
 oauthRouter.post('/token', async (c) => {
   const body = await parseTokenRequestBody(c)
@@ -127,6 +182,13 @@ oauthRouter.post('/token', async (c) => {
 })
 
 async function handleAuthorizationCodeGrant(c, body) {
+  // 레이트리밋을 D1 조회(findByCode) 이전, 가장 먼저 확인한다 — 무작위 code 대입 시도의 비용을
+  // 최대한 이른 시점에서 끊는다.
+  const ip = c.req.header('cf-connecting-ip') || 'unknown'
+  if (!(await checkOauthTokenRateLimit(c, `${ip}:authcode`))) {
+    return oauthRateLimitedResponse(c)
+  }
+
   const code = typeof body.code === 'string' ? body.code : ''
   const codeVerifier = typeof body.code_verifier === 'string' ? body.code_verifier : ''
   const redirectUri = typeof body.redirect_uri === 'string' ? body.redirect_uri : ''
@@ -199,6 +261,14 @@ async function handleRefreshTokenGrant(c, body) {
   }
 
   const tokenHash = await sha256Hex(rawRefreshToken)
+
+  // 레이트리밋 — IP가 아니라 이 요청이 제시한 토큰의 해시가 키다(파일 상단 주석 참고). DB 조회
+  // (rotateOrDetectReuse → findByHash) 이전에 확인해, 같은 토큰을 반복 재생하는 남용의 D1 비용을
+  // 끊는다. tokenHash는 아래 findByHash에도 그대로 재사용되므로 추가 계산 비용이 없다.
+  if (!(await checkOauthTokenRateLimit(c, `${tokenHash}:refresh`))) {
+    return oauthRateLimitedResponse(c)
+  }
+
   const result = await rotateOrDetectReuse(c.env.DB, tokenHash, {
     findByHash: oauthRefreshTokensDao.findByHash,
     markRotated: oauthRefreshTokensDao.markRotated,

@@ -6,6 +6,7 @@
 // 들어오는 점에 주의(parseTokenRequestBody, oauth.js:106).
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { Hono } from 'hono'
+import { sha256Hex } from '../lib/tokens.js'
 
 const oauthFindByHashMock = vi.fn()
 const oauthMarkRotatedMock = vi.fn()
@@ -265,8 +266,18 @@ describe('POST /api/oauth/token — refresh_token grant', () => {
 })
 
 describe('POST /api/oauth/token — authorization_code grant', () => {
-  it('R-2 정상 — 200, expires_in===28800, device_tokens.expires_at ≈ now+8h', async () => {
-    const now = BASE_TIME.getTime()
+  function authCodeRequest(overrides = {}) {
+    return tokenRequest({
+      grant_type: 'authorization_code',
+      code: 'code-1',
+      code_verifier: 'a'.repeat(43),
+      redirect_uri: 'http://127.0.0.1:9999/callback',
+      client_id: 'client-1',
+      ...overrides
+    })
+  }
+
+  function stubValidCode(now = BASE_TIME.getTime()) {
     codesFindByCodeMock.mockResolvedValue({
       code: 'code-1',
       client_id: 'client-1',
@@ -278,14 +289,13 @@ describe('POST /api/oauth/token — authorization_code grant', () => {
       device_name: 'test-device'
     })
     codesConsumeMock.mockResolvedValue(true)
+  }
 
-    const res = await tokenRequest({
-      grant_type: 'authorization_code',
-      code: 'code-1',
-      code_verifier: 'a'.repeat(43),
-      redirect_uri: 'http://127.0.0.1:9999/callback',
-      client_id: 'client-1'
-    })
+  it('R-2 정상 — 200, expires_in===28800, device_tokens.expires_at ≈ now+8h', async () => {
+    const now = BASE_TIME.getTime()
+    stubValidCode(now)
+
+    const res = await authCodeRequest()
     const body = await res.json()
 
     expect(res.status).toBe(200)
@@ -296,5 +306,188 @@ describe('POST /api/oauth/token — authorization_code grant', () => {
     expect(diffMs).toBeGreaterThan(8 * 3600 * 1000 - 5000)
     expect(diffMs).toBeLessThan(8 * 3600 * 1000 + 5000)
     expect(oauthInsertMock).toHaveBeenCalledTimes(1)
+  })
+
+  // ---------------------------------------------------------------------------
+  // 레이트리밋(OAUTH_TOKEN_RL) — authorization_code grant. auth-google.test.js의
+  // GOOGLE_LOGIN_RL 회귀 스위트와 같은 형식(바인딩 없음/한도 내/한도 초과/limit() 예외 4케이스)을
+  // 따른다. 키 축은 IP+scope('authcode') — google-login과 동일 모델.
+  // ---------------------------------------------------------------------------
+  describe('레이트리밋(OAUTH_TOKEN_RL) — authorization_code grant', () => {
+    it('바인딩이 없으면(로컬/미배포) 통과한다(fail-open)', async () => {
+      stubValidCode()
+      const res = await authCodeRequest() // ENV에는 OAUTH_TOKEN_RL이 없다
+      expect(res.status).toBe(200)
+    })
+
+    it('바인딩이 있고 한도 내(success:true)면 정상 발급한다', async () => {
+      stubValidCode()
+      const rl = { limit: vi.fn().mockResolvedValue({ success: true }) }
+      const app = new Hono()
+      app.route('/api/oauth', oauthRouter)
+      const body = new URLSearchParams({
+        grant_type: 'authorization_code', code: 'code-1', code_verifier: 'a'.repeat(43),
+        redirect_uri: 'http://127.0.0.1:9999/callback', client_id: 'client-1'
+      }).toString()
+      const res = await app.request('/api/oauth/token', {
+        method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body
+      }, { ...ENV, OAUTH_TOKEN_RL: rl })
+      expect(res.status).toBe(200)
+      expect(rl.limit).toHaveBeenCalledWith({ key: 'unknown:authcode' })
+    })
+
+    it('바인딩이 있고 한도 초과(success:false)면 429 slow_down이고 D1에 아무것도 쓰지 않는다', async () => {
+      stubValidCode()
+      const rl = { limit: vi.fn().mockResolvedValue({ success: false }) }
+      const app = new Hono()
+      app.route('/api/oauth', oauthRouter)
+      const body = new URLSearchParams({
+        grant_type: 'authorization_code', code: 'code-1', code_verifier: 'a'.repeat(43),
+        redirect_uri: 'http://127.0.0.1:9999/callback', client_id: 'client-1'
+      }).toString()
+      const res = await app.request('/api/oauth/token', {
+        method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body
+      }, { ...ENV, OAUTH_TOKEN_RL: rl })
+      expect(res.status).toBe(429)
+      expect(await res.json()).toEqual({ error: 'slow_down', error_description: 'too many token requests, retry later' })
+      expect(res.headers.get('retry-after')).toBe('60')
+      expect(codesFindByCodeMock).not.toHaveBeenCalled()
+      expect(deviceInsertMock).not.toHaveBeenCalled()
+    })
+
+    it('limit() 예외 시 통과(fail-open) + console.error 1회', async () => {
+      stubValidCode()
+      const rl = { limit: vi.fn().mockRejectedValue(new Error('rl boom')) }
+      const app = new Hono()
+      app.route('/api/oauth', oauthRouter)
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const body = new URLSearchParams({
+        grant_type: 'authorization_code', code: 'code-1', code_verifier: 'a'.repeat(43),
+        redirect_uri: 'http://127.0.0.1:9999/callback', client_id: 'client-1'
+      }).toString()
+      const res = await app.request('/api/oauth/token', {
+        method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body
+      }, { ...ENV, OAUTH_TOKEN_RL: rl })
+      expect(res.status).toBe(200)
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0][0]).toBe('[oauth] rate limit check failed, allowing request')
+      spy.mockRestore()
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 레이트리밋(OAUTH_TOKEN_RL) — refresh_token grant. 이 스위트의 핵심 불변량은 "정상적인 MCP
+// 클라이언트가 차단되어서는 안 된다"(작업 지시 §2) — 특히 사무실 NAT 뒤 공용 IP를 공유하는 여러
+// 직원이 각자 다른 refresh_token으로 동시에 갱신해도 서로를 막지 않아야 한다. "429가 나온다"만
+// 보는 테스트는 빈 깡통이므로, 키 축이 IP가 아니라 토큰 해시라는 것 자체를 회귀로 고정한다.
+// ---------------------------------------------------------------------------
+describe('POST /api/oauth/token — refresh_token grant 레이트리밋(OAUTH_TOKEN_RL)', () => {
+  it('바인딩이 없으면(로컬/미배포) 통과한다(fail-open)', async () => {
+    oauthFindByHashMock.mockResolvedValue(oauthRow({ status: 'active' }))
+    oauthMarkRotatedMock.mockResolvedValue(true)
+    deviceFindByIdMock.mockResolvedValue(activeDeviceToken())
+
+    const res = await refreshRequest() // ENV에는 OAUTH_TOKEN_RL이 없다
+    expect(res.status).toBe(200)
+  })
+
+  it('바인딩이 있고 한도 내(success:true)면 정상 회전한다', async () => {
+    oauthFindByHashMock.mockResolvedValue(oauthRow({ status: 'active' }))
+    oauthMarkRotatedMock.mockResolvedValue(true)
+    deviceFindByIdMock.mockResolvedValue(activeDeviceToken())
+    const rl = { limit: vi.fn().mockResolvedValue({ success: true }) }
+
+    const app = new Hono()
+    app.route('/api/oauth', oauthRouter)
+    const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: 'raw-refresh-token', client_id: 'malgn-agent-test' }).toString()
+    const res = await app.request('/api/oauth/token', {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body
+    }, { ...ENV, OAUTH_TOKEN_RL: rl })
+
+    expect(res.status).toBe(200)
+    // 키가 IP가 아니라 제출된 refresh_token의 sha256 해시(":refresh" 접미사)라는 것을 고정한다.
+    expect(rl.limit).toHaveBeenCalledTimes(1)
+    const usedKey = rl.limit.mock.calls[0][0].key
+    expect(usedKey.endsWith(':refresh')).toBe(true)
+    expect(usedKey).not.toContain('unknown') // IP 폴백 문자열이 키에 섞이지 않는다
+  })
+
+  it('바인딩이 있고 한도 초과(success:false)면 429 slow_down이고 D1 회전 로직에 도달하지 않는다', async () => {
+    const rl = { limit: vi.fn().mockResolvedValue({ success: false }) }
+    const app = new Hono()
+    app.route('/api/oauth', oauthRouter)
+    const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: 'raw-refresh-token', client_id: 'malgn-agent-test' }).toString()
+    const res = await app.request('/api/oauth/token', {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body
+    }, { ...ENV, OAUTH_TOKEN_RL: rl })
+
+    expect(res.status).toBe(429)
+    expect(await res.json()).toEqual({ error: 'slow_down', error_description: 'too many token requests, retry later' })
+    expect(res.headers.get('retry-after')).toBe('60')
+    // 레이트리밋에서 이미 끊겼으므로 findByHash(D1 조회) 자체에 도달하지 않는다(비용 절감 목적 검증).
+    expect(oauthFindByHashMock).not.toHaveBeenCalled()
+  })
+
+  it('limit() 예외 시 통과(fail-open) + console.error 1회', async () => {
+    oauthFindByHashMock.mockResolvedValue(oauthRow({ status: 'active' }))
+    oauthMarkRotatedMock.mockResolvedValue(true)
+    deviceFindByIdMock.mockResolvedValue(activeDeviceToken())
+    const rl = { limit: vi.fn().mockRejectedValue(new Error('rl boom')) }
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const app = new Hono()
+    app.route('/api/oauth', oauthRouter)
+    const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: 'raw-refresh-token', client_id: 'malgn-agent-test' }).toString()
+    const res = await app.request('/api/oauth/token', {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body
+    }, { ...ENV, OAUTH_TOKEN_RL: rl })
+
+    expect(res.status).toBe(200)
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy.mock.calls[0][0]).toBe('[oauth] rate limit check failed, allowing request')
+    spy.mockRestore()
+  })
+
+  // 핵심 불변량 회귀 — 사무실 NAT(같은 cf-connecting-ip)를 공유하는 두 "직원"이 서로 다른
+  // refresh_token으로 동시에 갱신해도 같은 버킷을 쓰지 않는다(키가 IP가 아니라 토큰 해시라서).
+  // 한 명의 요청이 한도를 소진해도(success:false) 다른 직원의 요청(success:true)은 막히지 않는다
+  // — "429가 나온다"만 보면 이 문서가 요구하는 불변량을 놓친다.
+  it('불변량 — 같은 사무실 IP, 다른 refresh_token을 쓰는 두 직원은 서로의 레이트리밋에 영향받지 않는다', async () => {
+    oauthFindByHashMock.mockResolvedValue(oauthRow({ status: 'active' }))
+    oauthMarkRotatedMock.mockResolvedValue(true)
+    deviceFindByIdMock.mockResolvedValue(activeDeviceToken())
+
+    // 직원 A의 토큰이 이미 한도를 소진했다(success:false)고 실제 해시값으로 정확히 지정한다 —
+    // 문자열 접두사 추측이 아니라 sha256Hex(라우트가 쓰는 것과 동일한 함수)로 계산한 진짜 키를
+    // 써서, "IP가 아니라 이 특정 토큰만" 막혔다는 것을 정밀하게 고정한다.
+    const employeeATokenHash = await sha256Hex('employee-a-token')
+    const blockedKey = `${employeeATokenHash}:refresh`
+    const rl = {
+      limit: vi.fn(async ({ key }) => ({ success: key !== blockedKey }))
+    }
+
+    const officeIp = '10.0.0.1' // 두 직원이 공유하는 사무실 NAT 공용 IP
+    const employeeARequest = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: 'employee-a-token', client_id: 'malgn-agent-test' }).toString()
+    const employeeBRequest = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: 'employee-b-token', client_id: 'malgn-agent-test' }).toString()
+
+    const app = new Hono()
+    app.route('/api/oauth', oauthRouter)
+
+    const resA = await app.request('/api/oauth/token', {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'cf-connecting-ip': officeIp }, body: employeeARequest
+    }, { ...ENV, OAUTH_TOKEN_RL: rl })
+    const resB = await app.request('/api/oauth/token', {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'cf-connecting-ip': officeIp }, body: employeeBRequest
+    }, { ...ENV, OAUTH_TOKEN_RL: rl })
+
+    expect(rl.limit).toHaveBeenCalledTimes(2)
+    const keys = rl.limit.mock.calls.map((call) => call[0].key)
+    expect(keys).toContain(blockedKey)
+    expect(new Set(keys).size).toBe(2) // 같은 IP를 공유해도 키가 겹치지 않는다.
+    // 직원 A(한도 소진된 토큰)만 429이고, 직원 B(다른 토큰)는 그대로 200 — IP 기반이었다면
+    // 같은 버킷을 공유해 B도 함께 429가 됐을 상황.
+    expect(resA.status).toBe(429)
+    expect(resB.status).toBe(200)
   })
 })
