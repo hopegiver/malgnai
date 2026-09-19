@@ -331,6 +331,14 @@ export default {
     },
     async toggleStatus(u) {
       const nextStatus = u.status === 'disabled' ? 'active' : 'disabled'
+      // 비활성화 방향 전환은 더 이상 가벼운 토글이 아니다 — 서버가 status:disabled 전환 시
+      // device_token/oauth_refresh_tokens/refresh_tokens를 캐스케이드로 영구 폐기한다(§완료판정 B,
+      // docs/security/device-token-revocation-investigation-2026-09-19.md §5). 재활성화해도 이
+      // 라우트는 옛 토큰을 되살리지 않으므로(admin-users.test.js "disabled → active 재활성화" 케이스)
+      // 그 사용자의 모든 기기가 재페어링을 해야 한다는 사실을 클릭 전에 알려야 한다.
+      if (nextStatus === 'disabled' && !window.confirm(
+        `${u.email} 사용자를 비활성화하면 이 사용자의 모든 기기 로그인(device_token)이 영구 폐기되며, 재활성화해도 복구되지 않습니다(모든 기기에서 재페어링 필요). 계속하시겠습니까?`
+      )) return
       await this.patchUser(u, { status: nextStatus })
     },
     async patchUser(u, body) {
