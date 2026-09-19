@@ -15,6 +15,7 @@ import * as oauthCodesDao from '../dao/oauth-authorization-codes.js'
 import * as oauthClientsDao from '../dao/oauth-clients.js'
 import * as oauthRefreshTokensDao from '../dao/oauth-refresh-tokens.js'
 import * as deviceTokensDao from '../dao/device-tokens.js'
+import * as usersDao from '../dao/users.js'
 import * as auditLogsDao from '../dao/audit-logs.js'
 import { newId } from '../lib/ulid.js'
 import {
@@ -333,6 +334,19 @@ async function handleRefreshTokenGrant(c, body) {
   }
 
   if (!deviceToken || deviceToken.status !== 'active') {
+    return c.json({ error: 'invalid_grant' }, 401)
+  }
+
+  // 계정 상태 게이트(docs/security/device-token-revocation-investigation-2026-09-19.md §5 후보A
+  // "누락 지점" — 이 refresh grant는 mcp/device-auth.js의 findActiveByHash를 쓰지 않고
+  // deviceTokensDao.findById로 device_token만 직접 조회하므로, 그 DAO의 users JOIN 수정이 이
+  // 경로에는 적용되지 않는다. 여기서 users.status를 별도로 확인하지 않으면 disabled 계정도
+  // access 8h·refresh 90일을 무제한 갱신할 수 있다(보고서 §2 "폐기" 절). 정상 운영에서는 §완료판정
+  // B의 캐스케이드가 disable 시점에 이 deviceToken도 함께 revoked시키므로 위 status!=='active'
+  // 체크가 대부분 먼저 걸리지만, 캐스케이드가 아직 실행되지 않았거나(레이스) 실패한 경우에도
+  // 이 경로가 독립적으로 막혀야 한다 — 방어 계층을 하나로 합치지 않는다.
+  const owner = await usersDao.findById(c.env.DB, deviceToken.user_id)
+  if (!owner || owner.status !== 'active') {
     return c.json({ error: 'invalid_grant' }, 401)
   }
 

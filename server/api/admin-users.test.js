@@ -13,13 +13,21 @@ const findByEmailMock = vi.fn()
 const findByEmployeeIdMock = vi.fn()
 const insertMock = vi.fn()
 const listAllMock = vi.fn()
+const countActiveAdminsMock = vi.fn()
 const buildUpdateEmployeeIdStatementMock = vi.fn()
+const buildUpdateRoleStatusStatementMock = vi.fn()
 const buildRecordStatementIfPrecedingChangedMock = vi.fn()
+const buildRecordStatementMock = vi.fn()
 // 공용 워크스테이션 레지스트리 PK 단건 조회(usage_shared_workstations, migrations/0022) —
 // docs/design/usage-shared-workstation-axes.md §5.1의 409 SHARED_WORKSTATION 가드가 쓴다.
 const sharedFindByIdMock = vi.fn()
 // GET / 의 project_count 병합(api.md §5.6) — projects 테이블 GROUP BY 집계 대체.
 const countAllByUserMock = vi.fn()
+// PATCH /:id 자격증명 캐스케이드 폐기(§완료판정 B) — device_tokens/oauth_refresh_tokens/refresh_tokens.
+const countActiveForUserMock = vi.fn()
+const deviceBuildRevokeAllForUserStatementMock = vi.fn()
+const oauthBuildRevokeAllForUserStatementMock = vi.fn()
+const refreshBuildRevokeAllForUserStatementMock = vi.fn()
 
 vi.mock('../dao/usage-shared-workstations.js', async (importOriginal) => {
   const actual = await importOriginal()
@@ -35,7 +43,9 @@ vi.mock('../dao/users.js', async (importOriginal) => {
     findByEmployeeId: (...args) => findByEmployeeIdMock(...args),
     insert: (...args) => insertMock(...args),
     listAll: (...args) => listAllMock(...args),
-    buildUpdateEmployeeIdStatement: (...args) => buildUpdateEmployeeIdStatementMock(...args)
+    countActiveAdmins: (...args) => countActiveAdminsMock(...args),
+    buildUpdateEmployeeIdStatement: (...args) => buildUpdateEmployeeIdStatementMock(...args),
+    buildUpdateRoleStatusStatement: (...args) => buildUpdateRoleStatusStatementMock(...args)
   }
 })
 
@@ -46,7 +56,30 @@ vi.mock('../dao/projects.js', async (importOriginal) => {
 
 vi.mock('../dao/audit-logs.js', async (importOriginal) => {
   const actual = await importOriginal()
-  return { ...actual, buildRecordStatementIfPrecedingChanged: (...args) => buildRecordStatementIfPrecedingChangedMock(...args) }
+  return {
+    ...actual,
+    buildRecordStatementIfPrecedingChanged: (...args) => buildRecordStatementIfPrecedingChangedMock(...args),
+    buildRecordStatement: (...args) => buildRecordStatementMock(...args)
+  }
+})
+
+vi.mock('../dao/device-tokens.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    countActiveForUser: (...args) => countActiveForUserMock(...args),
+    buildRevokeAllForUserStatement: (...args) => deviceBuildRevokeAllForUserStatementMock(...args)
+  }
+})
+
+vi.mock('../dao/oauth-refresh-tokens.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return { ...actual, buildRevokeAllForUserStatement: (...args) => oauthBuildRevokeAllForUserStatementMock(...args) }
+})
+
+vi.mock('../dao/refresh-tokens.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return { ...actual, buildRevokeAllForUserStatement: (...args) => refreshBuildRevokeAllForUserStatementMock(...args) }
 })
 
 const { default: adminUsers } = await import('./admin-users.js')
@@ -80,6 +113,14 @@ function putRequest(app, batch, body) {
   )
 }
 
+function patchRequest(app, batch, body, { id = TARGET_ID } = {}) {
+  return app.request(
+    `/api/admin/users/${id}`,
+    { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
+    { DB: { batch } }
+  )
+}
+
 function sharedRow(overrides = {}) {
   return { employee_id: 'claude', label: '3층 공용 PC', note: null, registered_by: '01kadminulid', created_at: '2026-09-08T02:00:00.000Z', updated_at: '2026-09-08T02:00:00.000Z', ...overrides }
 }
@@ -91,13 +132,29 @@ beforeEach(() => {
   insertMock.mockReset()
   listAllMock.mockReset()
   countAllByUserMock.mockReset()
+  countActiveAdminsMock.mockReset()
   buildUpdateEmployeeIdStatementMock.mockReset()
+  buildUpdateRoleStatusStatementMock.mockReset()
   buildRecordStatementIfPrecedingChangedMock.mockReset()
+  buildRecordStatementMock.mockReset()
   sharedFindByIdMock.mockReset()
+  countActiveForUserMock.mockReset()
+  deviceBuildRevokeAllForUserStatementMock.mockReset()
+  oauthBuildRevokeAllForUserStatementMock.mockReset()
+  refreshBuildRevokeAllForUserStatementMock.mockReset()
+
   buildUpdateEmployeeIdStatementMock.mockReturnValue({ __kind: 'update-stmt' })
   buildRecordStatementIfPrecedingChangedMock.mockReturnValue({ id: 'audit-id', stmt: { __kind: 'audit-stmt' } })
   sharedFindByIdMock.mockResolvedValue(null) // 기본: 공용 워크스테이션으로 등록되지 않은 값
   countAllByUserMock.mockResolvedValue(new Map())
+  countActiveAdminsMock.mockResolvedValue(5) // 기본: 마지막 관리자 보호 가드에 걸리지 않는 값
+
+  buildUpdateRoleStatusStatementMock.mockReturnValue({ __kind: 'users-update-stmt' })
+  buildRecordStatementMock.mockImplementation((db, { action }) => ({ id: 'audit-id', stmt: { __kind: 'audit-stmt', action } }))
+  countActiveForUserMock.mockResolvedValue(0)
+  deviceBuildRevokeAllForUserStatementMock.mockReturnValue({ __kind: 'device-revoke-stmt' })
+  oauthBuildRevokeAllForUserStatementMock.mockReturnValue({ __kind: 'oauth-revoke-stmt' })
+  refreshBuildRevokeAllForUserStatementMock.mockReturnValue({ __kind: 'refresh-revoke-stmt' })
 })
 
 // GET /api/admin/users — project_count 병합(api.md §5.6). usersDao.listAll과 projectsDao.countAllByUser를
@@ -556,5 +613,188 @@ describe('POST /api/admin/users — §5.8 신규 계정 employee_id 기본값(M-
     expect(res.status).toBe(409)
     expect(findByEmployeeIdMock).not.toHaveBeenCalled()
     expect(insertMock).not.toHaveBeenCalled()
+  })
+})
+
+// PATCH /api/admin/users/:id — docs/security/device-token-revocation-investigation-2026-09-19.md
+// §5 후보B(자격증명 캐스케이드 폐기) + §완료판정 3(부분 실패 처리, db.batch() 원자 커밋).
+// 이 라우트는 이번 변경 전까지 이 파일에 테스트가 전혀 없었다 — 기존 분기(권한/검증/마지막
+// 관리자 보호)도 함께 잠근다.
+describe('PATCH /api/admin/users/:id — 권한·검증(기존 분기, 회귀 없음 확인)', () => {
+  it('administrator가 아니면 403', async () => {
+    const app = makeApp({ role: 'employee' })
+    const batch = vi.fn()
+    const res = await patchRequest(app, batch, { name: '새이름' })
+    expect(res.status).toBe(403)
+    expect(batch).not.toHaveBeenCalled()
+  })
+
+  it('대상 사용자가 없으면 404', async () => {
+    findByIdMock.mockResolvedValue(null)
+    const app = makeApp()
+    const res = await patchRequest(app, vi.fn(), { name: '새이름' })
+    expect(res.status).toBe(404)
+  })
+
+  it('갱신 가능한 필드가 하나도 없으면 400', async () => {
+    findByIdMock.mockResolvedValue(targetRow())
+    const app = makeApp()
+    const batch = vi.fn()
+    const res = await patchRequest(app, batch, {})
+    expect(res.status).toBe(400)
+    expect(batch).not.toHaveBeenCalled()
+  })
+
+  it('status가 허용값 밖이면 400, batch 호출 안 함', async () => {
+    findByIdMock.mockResolvedValue(targetRow())
+    const app = makeApp()
+    const batch = vi.fn()
+    const res = await patchRequest(app, batch, { status: 'terminated' })
+    expect(res.status).toBe(400)
+    expect(batch).not.toHaveBeenCalled()
+  })
+
+  it('마지막 남은 활성 administrator를 비활성화하려 하면 400, batch·캐스케이드 전부 미호출', async () => {
+    findByIdMock.mockResolvedValue(targetRow({ role: 'administrator', status: 'active' }))
+    countActiveAdminsMock.mockResolvedValue(1)
+    const app = makeApp()
+    const batch = vi.fn()
+    const res = await patchRequest(app, batch, { status: 'disabled' })
+
+    expect(res.status).toBe(400)
+    expect((await res.json()).error.message).toContain('last active administrator')
+    expect(batch).not.toHaveBeenCalled()
+    expect(deviceBuildRevokeAllForUserStatementMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('PATCH /api/admin/users/:id — name/role 변경만(캐스케이드 미발동, 회귀 없음)', () => {
+  it('name만 변경 → batch에 users UPDATE statement 1개만, 감사·캐스케이드 없음', async () => {
+    findByIdMock
+      .mockResolvedValueOnce(targetRow({ name: '기존이름' }))
+      .mockResolvedValueOnce(targetRow({ name: '새이름' }))
+    const app = makeApp()
+    const batch = vi.fn().mockResolvedValue([{ meta: { changes: 1 } }])
+
+    const res = await patchRequest(app, batch, { name: '새이름' })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.name).toBe('새이름')
+    expect(batch).toHaveBeenCalledTimes(1)
+    expect(batch.mock.calls[0][0]).toEqual([{ __kind: 'users-update-stmt' }])
+    expect(buildRecordStatementMock).not.toHaveBeenCalled()
+    expect(deviceBuildRevokeAllForUserStatementMock).not.toHaveBeenCalled()
+    expect(oauthBuildRevokeAllForUserStatementMock).not.toHaveBeenCalled()
+    expect(refreshBuildRevokeAllForUserStatementMock).not.toHaveBeenCalled()
+  })
+
+  it('active↔active 유지되는 role 변경만 → users UPDATE + user.role_changed 감사만(캐스케이드 없음)', async () => {
+    findByIdMock
+      .mockResolvedValueOnce(targetRow({ role: 'employee', status: 'active' }))
+      .mockResolvedValueOnce(targetRow({ role: 'administrator', status: 'active' }))
+    const app = makeApp()
+    const batch = vi.fn().mockResolvedValue([{ meta: { changes: 1 } }, { meta: { changes: 1 } }])
+
+    const res = await patchRequest(app, batch, { role: 'administrator' })
+
+    expect(res.status).toBe(200)
+    expect(batch).toHaveBeenCalledTimes(1)
+    expect(batch.mock.calls[0][0]).toEqual([{ __kind: 'users-update-stmt' }, { __kind: 'audit-stmt', action: 'user.role_changed' }])
+    expect(deviceBuildRevokeAllForUserStatementMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('PATCH /api/admin/users/:id — status:disabled 전환 → 자격증명 캐스케이드 폐기(§5 후보B)', () => {
+  it('active → disabled 전환 시 batch에 users UPDATE + role_changed 감사 + 3개 캐스케이드 UPDATE + 캐스케이드 감사, 총 6개 statement가 하나의 db.batch()로 원자 커밋된다', async () => {
+    findByIdMock
+      .mockResolvedValueOnce(targetRow({ role: 'employee', status: 'active' }))
+      .mockResolvedValueOnce(targetRow({ role: 'employee', status: 'disabled' }))
+    countActiveForUserMock.mockResolvedValue(3)
+    const app = makeApp()
+    const batch = vi.fn().mockResolvedValue(Array.from({ length: 6 }, () => ({ meta: { changes: 1 } })))
+
+    const res = await patchRequest(app, batch, { status: 'disabled' })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.status).toBe('disabled')
+
+    // 원자 커밋 — 6개 statement가 정확한 순서로 "하나의" batch 호출에 실린다(부분 실패가 물리적으로
+    // 불가능한 이유 — D1 batch는 단일 트랜잭션이라 이 배열 중 하나라도 실패하면 전체 롤백된다).
+    expect(batch).toHaveBeenCalledTimes(1)
+    expect(batch.mock.calls[0][0]).toEqual([
+      { __kind: 'users-update-stmt' },
+      { __kind: 'audit-stmt', action: 'user.role_changed' },
+      { __kind: 'device-revoke-stmt' },
+      { __kind: 'oauth-revoke-stmt' },
+      { __kind: 'refresh-revoke-stmt' },
+      { __kind: 'audit-stmt', action: 'device_token.revoked' }
+    ])
+
+    // 캐스케이드 builder들이 대상 user id로 정확히 호출됐는지(다른 사용자를 건드리지 않음).
+    expect(deviceBuildRevokeAllForUserStatementMock).toHaveBeenCalledWith(expect.anything(), TARGET_ID)
+    expect(oauthBuildRevokeAllForUserStatementMock).toHaveBeenCalledWith(expect.anything(), TARGET_ID, 'device_revoked')
+    expect(refreshBuildRevokeAllForUserStatementMock).toHaveBeenCalledWith(expect.anything(), TARGET_ID, 'logout')
+
+    // 캐스케이드 감사로그 메타데이터 — reason/count.
+    const cascadeAuditCall = buildRecordStatementMock.mock.calls.find((c) => c[1].action === 'device_token.revoked')
+    expect(cascadeAuditCall[1]).toMatchObject({
+      actorUserId: ADMIN_ID,
+      targetType: 'user',
+      targetId: TARGET_ID,
+      metadata: { reason: 'user_disabled', device_token_count: 3 }
+    })
+  })
+
+  it('이미 disabled인 계정을 다시 status:disabled로 PATCH(no-op 재전환) → 캐스케이드 재발동 안 함(감사 노이즈 방지)', async () => {
+    findByIdMock
+      .mockResolvedValueOnce(targetRow({ status: 'disabled' }))
+      .mockResolvedValueOnce(targetRow({ status: 'disabled' }))
+    const app = makeApp()
+    const batch = vi.fn().mockResolvedValue([{ meta: { changes: 1 } }, { meta: { changes: 0 } }])
+
+    const res = await patchRequest(app, batch, { status: 'disabled' })
+
+    expect(res.status).toBe(200)
+    expect(batch.mock.calls[0][0]).toEqual([{ __kind: 'users-update-stmt' }, { __kind: 'audit-stmt', action: 'user.role_changed' }])
+    expect(deviceBuildRevokeAllForUserStatementMock).not.toHaveBeenCalled()
+    expect(countActiveForUserMock).not.toHaveBeenCalled()
+  })
+
+  it('disabled → active 재활성화 → 캐스케이드 미발동(옛 토큰은 이 라우트가 되살리지 않는다)', async () => {
+    findByIdMock
+      .mockResolvedValueOnce(targetRow({ status: 'disabled' }))
+      .mockResolvedValueOnce(targetRow({ status: 'active' }))
+    const app = makeApp()
+    const batch = vi.fn().mockResolvedValue([{ meta: { changes: 1 } }, { meta: { changes: 1 } }])
+
+    const res = await patchRequest(app, batch, { status: 'active' })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.status).toBe('active')
+    expect(deviceBuildRevokeAllForUserStatementMock).not.toHaveBeenCalled()
+    expect(oauthBuildRevokeAllForUserStatementMock).not.toHaveBeenCalled()
+    expect(refreshBuildRevokeAllForUserStatementMock).not.toHaveBeenCalled()
+  })
+
+  // §완료판정 3 "부분 실패 처리" — batch()가 실패하면 캐스케이드 UPDATE들과 users UPDATE가 하나의
+  // 트랜잭션이므로 "users만 disabled로 커밋되고 토큰은 살아남는" 반쪽 상태가 응답 레벨에서도
+  // 관찰되지 않아야 한다: 200이 아니라 예외가 그대로 올라가 5xx가 돼야 한다.
+  it('batch()가 실패하면(예: D1 트랜잭션 오류) 200을 응답하지 않고 예외가 전파된다 — 부분 성공 없음', async () => {
+    findByIdMock.mockResolvedValueOnce(targetRow({ status: 'active' }))
+    const app = makeApp()
+    app.onError((err, c) => c.json({ error: { code: 'INTERNAL_ERROR', message: err.message } }, 500))
+    const batch = vi.fn().mockRejectedValue(new Error('D1_ERROR: transaction failed'))
+
+    const res = await patchRequest(app, batch, { status: 'disabled' })
+
+    expect(res.status).toBe(500)
+    expect(batch).toHaveBeenCalledTimes(1)
+    // 캐스케이드 builder 호출 자체(=statement 생성)는 batch 실행 전에 일어나지만, 그 statement들이
+    // 실제로 반영됐는지는 이 mock 세계에서는 batch 호출 성패로만 판단된다 — 200 응답이 없다는 것이
+    // "users만 바뀌고 토큰은 살아남는" 상태가 클라이언트에 성공으로 보이지 않는다는 증거다.
+    expect(res.status).not.toBe(200)
   })
 })

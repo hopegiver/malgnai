@@ -35,3 +35,16 @@ export async function revokeAllForDeviceToken(db, deviceTokenId, reason = 'reuse
     "UPDATE oauth_refresh_tokens SET status='revoked', revoke_reason=?, revoked_at=? WHERE device_token_id = ? AND status != 'revoked'"
   ).bind(reason, new Date().toISOString(), deviceTokenId).run()
 }
+
+/** 계정 비활성화 캐스케이드(§완료판정 B) — 해당 user의 모든 device_token에 연결된 OAuth refresh
+ *  token을 device_tokens.user_id로 연쇄해 일괄 폐기하는 실행하지 않는 UPDATE builder. 호출부
+ *  (server/api/admin-users.js)가 device-tokens.js의 buildRevokeAllForUserStatement와 함께
+ *  db.batch()로 원자 커밋한다. revoke_reason은 기존 CHECK 화이트리스트 값 'device_revoked'를
+ *  재사용한다(migrations/0007 — devices.js DELETE의 "이 device_token이 revoked됐다"와 같은 의미라
+ *  새 값 추가가 필요 없다). */
+export function buildRevokeAllForUserStatement(db, userId, reason = 'device_revoked') {
+  return db.prepare(
+    `UPDATE oauth_refresh_tokens SET status='revoked', revoke_reason=?, revoked_at=?
+      WHERE device_token_id IN (SELECT id FROM device_tokens WHERE user_id = ?) AND status != 'revoked'`
+  ).bind(reason, new Date().toISOString(), userId)
+}

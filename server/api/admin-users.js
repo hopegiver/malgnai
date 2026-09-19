@@ -10,6 +10,9 @@ import * as usersDao from '../dao/users.js'
 import * as projectsDao from '../dao/projects.js'
 import * as auditLogsDao from '../dao/audit-logs.js'
 import * as sharedWorkstationsDao from '../dao/usage-shared-workstations.js'
+import * as deviceTokensDao from '../dao/device-tokens.js'
+import * as oauthRefreshTokensDao from '../dao/oauth-refresh-tokens.js'
+import * as refreshTokensDao from '../dao/refresh-tokens.js'
 import { hashPassword, generateTempPassword } from '../lib/tokens.js'
 import { requireAdmin } from '../middleware/jwt-auth.js'
 import { normalizeEmployeeIdInput, employeeIdFromEmail } from '../lib/usage-identity.js'
@@ -152,10 +155,27 @@ adminUsers.patch('/:id', async (c) => {
     }
   }
 
-  await usersDao.updateRoleStatus(c.env.DB, id, fields)
+  // 【자격증명 캐스케이드 폐기, docs/security/device-token-revocation-investigation-2026-09-19.md
+  // §5 후보B】 status가 'disabled'로 새로 전환될 때만(이미 disabled인 계정을 다시 PATCH하는
+  // no-op 재전환은 대상에서 제외 — 감사 노이즈 방지 + 이미 폐기된 행을 다시 건드리지 않음) 이
+  // user의 device_tokens·연결된 oauth_refresh_tokens·웹 refresh_tokens를 함께 폐기한다.
+  const isDisablingNow = fields.status === 'disabled' && target.status !== 'disabled'
+
+  // 캐스케이드 감사로그 메타데이터용 사전 카운트(best-effort, device-tokens.js countActiveForUser
+  // 주석 참고) — 폐기 자체의 정확성은 batch 안의 WHERE 조건이 원자적으로 보장한다.
+  const revokedDeviceTokenCount = isDisablingNow ? await deviceTokensDao.countActiveForUser(c.env.DB, id) : 0
+
+  // 【부분 실패 처리, §완료판정 3】 users 상태 UPDATE와 캐스케이드 폐기(+감사 INSERT)를 하나의
+  // db.batch() 배열로 묶어 원자 커밋한다 — D1의 batch는 단일 트랜잭션이라(이 저장소가 이미
+  // admin-users.js PUT /:id/employee-id에서 쓰는 패턴과 동일) 배열 안 statement 중 하나라도
+  // 실패하면 전체가 롤백된다. 즉 "users.status='disabled'는 이미 커밋됐는데 device_token 폐기만
+  // 실패해 잔존 토큰이 남는" 반쪽 상태가 원천적으로 존재할 수 없다 — 이 요청은 그대로 5xx로
+  // 실패하고 관리자가 재시도한다(재시도는 안전하다: 캐스케이드 UPDATE들의 WHERE status='active'/
+  // `!= 'revoked'` 필터가 멱등이라 이미 폐기된 행을 다시 건드리지 않는다).
+  const statements = [usersDao.buildUpdateRoleStatusStatement(c.env.DB, id, fields)]
 
   if (fields.role !== undefined || fields.status !== undefined) {
-    await auditLogsDao.record(c.env.DB, {
+    const { stmt: roleAuditStmt } = auditLogsDao.buildRecordStatement(c.env.DB, {
       actorUserId: c.get('userId'),
       action: 'user.role_changed',
       targetType: 'user',
@@ -165,7 +185,24 @@ adminUsers.patch('/:id', async (c) => {
         after: { role: finalRole, status: finalStatus }
       }
     })
+    statements.push(roleAuditStmt)
   }
+
+  if (isDisablingNow) {
+    statements.push(deviceTokensDao.buildRevokeAllForUserStatement(c.env.DB, id))
+    statements.push(oauthRefreshTokensDao.buildRevokeAllForUserStatement(c.env.DB, id, 'device_revoked'))
+    statements.push(refreshTokensDao.buildRevokeAllForUserStatement(c.env.DB, id, 'logout'))
+    const { stmt: cascadeAuditStmt } = auditLogsDao.buildRecordStatement(c.env.DB, {
+      actorUserId: c.get('userId'),
+      action: 'device_token.revoked',
+      targetType: 'user',
+      targetId: id,
+      metadata: { reason: 'user_disabled', device_token_count: revokedDeviceTokenCount }
+    })
+    statements.push(cascadeAuditStmt)
+  }
+
+  await c.env.DB.batch(statements)
 
   const updated = await usersDao.findById(c.env.DB, id)
   return c.json(toPublicUser(updated))

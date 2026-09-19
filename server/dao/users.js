@@ -54,6 +54,25 @@ export async function updateRoleStatus(db, id, { name, role, status }) {
   await db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).bind(...binds).run()
 }
 
+/** updateRoleStatus와 SQL은 동일하지만 실행하지 않고 Statement만 만든다(§완료판정 B 원자 커밋용).
+ *  status가 'disabled'로 전환되는 PATCH는 호출부(server/api/admin-users.js)가 이 statement를
+ *  device_tokens/oauth_refresh_tokens/refresh_tokens 캐스케이드 폐기 statement 및 감사 INSERT와
+ *  함께 하나의 db.batch()로 묶는다 — users 상태 변경과 자격증명 폐기가 분리된 두 커밋이 되지
+ *  않는다(보고서 §5 후보B 트레이드오프④가 지적한 부분 실패 위험을 트랜잭션 경계로 없앤다).
+ *  호출부는 fields가 이미 최소 1개 키를 갖도록 보장한다(PATCH 라우트의 "no updatable fields" 400
+ *  가드가 먼저 통과해야 여기 도달) — updateRoleStatus와 달리 빈 fields 가드를 두지 않는다. */
+export function buildUpdateRoleStatusStatement(db, id, { name, role, status }) {
+  const sets = []
+  const binds = []
+  if (name !== undefined) { sets.push('name = ?'); binds.push(name) }
+  if (role) { sets.push('role = ?'); binds.push(role) }
+  if (status) { sets.push('status = ?'); binds.push(status) }
+  sets.push('updated_at = ?')
+  binds.push(new Date().toISOString())
+  binds.push(id)
+  return db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).bind(...binds)
+}
+
 /** 본인 PATCH /api/auth/me 전용 — name만 갱신 가능(email/role/status는 이 경로로 불가, server/api/auth.js). */
 export async function updateName(db, id, name) {
   await db.prepare('UPDATE users SET name = ?, updated_at = ? WHERE id = ?')
